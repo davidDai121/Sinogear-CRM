@@ -1,0 +1,35 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 320px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #fff;
+}
+
+#root {
+  padding: 16px;
+}
+
+.sgc-popup-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 13px;
+  color: #111b21;
+}
+
+.sgc-popup-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.sgc-popup-dot.online { background: #00a884; }
+.sgc-popup-dot.offline { background: #d1d7db; }
+
+.sgc-popup-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e9edef;
+}

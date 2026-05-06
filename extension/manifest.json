@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Sino Gear CRM",
+  "version": "0.1.0",
+  "description": "WhatsApp Web 内嵌 CRM — 客户资料、车辆兴趣、AI 销售助手",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqjsyh1G2wGP5rcworh1hyKmqG7ba3Bnz4IPd3LzQHvT5szzdYtNa0skDceRxUkp3Fm4Yq4fMDSDW2NF0vZItwwA4zbzI38SPUmulomdZSrfiV43I0MqcPtK8UTXMR4pZUZ/Nv5c3f+32HN4jZwsZFK1QpGuDSd5WCbZyuRUyJ3s36xaYhn1vj6024t/yKb+YJdCL3Ca1Tp2wa8G7peWcjcQUJ85cS9C6x9ADUDLocrQwWktQLL8BvFwB4s09rDnQXCR8BlS/zuWwbkhCXUDtKw4z5vCo00O1eH8Vm9yz6h/xl09jsnWvrvxa1gWQCv4ik0rxCF9N4gTtTX6MGM0T5wIDAQAB",
+  "oauth2": {
+    "client_id": "PLACEHOLDER_REPLACED_AT_BUILD_TIME",
+    "scopes": [
+      "https://www.googleapis.com/auth/contacts"
+    ]
+  },
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "Sino Gear CRM"
+  },
+  "background": {
+    "service_worker": "src/background/service-worker.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["src/content/main.tsx"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage", "tabs", "identity", "scripting"],
+  "host_permissions": [
+    "https://web.whatsapp.com/*",
+    "https://gemini.google.com/*",
+    "https://*.supabase.co/*",
+    "https://dashscope.aliyuncs.com/*",
+    "https://translate.googleapis.com/*"
+  ],
+  "icons": {
+    "16": "public/icons/icon-16.png",
+    "48": "public/icons/icon-48.png",
+    "128": "public/icons/icon-128.png"
+  }
+}
