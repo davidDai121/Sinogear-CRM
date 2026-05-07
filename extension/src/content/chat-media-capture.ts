@@ -224,6 +224,7 @@ async function captureMessageViaLightbox(rowEl: Element): Promise<number> {
   }
   if (!trigger) return 0;
 
+  console.log('[sgc] lightbox: clicking trigger', trigger.tagName);
   trigger.click();
 
   // 等 lightbox 出现（关闭按钮 / 上一步按钮 出现）
@@ -239,6 +240,7 @@ async function captureMessageViaLightbox(rowEl: Element): Promise<number> {
     console.warn('[sgc] lightbox did not open');
     return 0;
   }
+  console.log('[sgc] lightbox opened');
 
   const seenSrcs = new Set<string>();
   let count = 0;
@@ -471,7 +473,9 @@ function findMultiSelectToolbar(): HTMLElement | null {
 }
 
 async function captureSelectedFromMultiSelect(): Promise<number> {
+  console.log('[sgc] captureSelectedFromMultiSelect: start');
   const checked = document.querySelectorAll('input[type="checkbox"]:checked');
+  console.log('[sgc] checked count =', checked.length);
   // 收集所有被选中的 row，以及每个 row 里第一张图（用于打开 lightbox）。
   // 注意：一旦我们 click 第一张图开 lightbox，多选模式可能会被 WA 取消（点图片会触发 select toggle）。
   // 解决方案：先收集 row references → 退出多选模式（点取消选择）→ 然后逐个 row 点首图开 lightbox 抓取。
@@ -481,40 +485,53 @@ async function captureSelectedFromMultiSelect(): Promise<number> {
     const row = cb.closest('[role="row"]');
     if (row && !rows.includes(row)) rows.push(row);
   }
+  console.log('[sgc] rows collected =', rows.length);
   if (rows.length === 0) return 0;
 
   // 退出多选模式（不然 click 图片会被 toggle 选择，不会开 lightbox）
   const cancelBtn = document.querySelector(
     'button[aria-label="取消选择"], button[aria-label="Cancel selection"]',
   ) as HTMLButtonElement | null;
+  console.log('[sgc] cancel btn?', !!cancelBtn);
   if (cancelBtn) {
     cancelBtn.click();
     await sleep(400);
   }
 
   let ok = 0;
-  for (const row of rows) {
-    // 优先 inline video.src 直接抓（已加载的视频）
+  for (let idx = 0; idx < rows.length; idx++) {
+    const row = rows[idx];
     const inlineVideos = Array.from(row.querySelectorAll('video')).filter(
       (v): v is HTMLVideoElement =>
         v instanceof HTMLVideoElement && Boolean(v.src),
     );
+    const imgsCount = row.querySelectorAll('img[src^="blob:"]').length;
+    const allVideos = row.querySelectorAll('video').length;
+    console.log(`[sgc] row ${idx}: imgs=${imgsCount} videos=${allVideos} inlineWithSrc=${inlineVideos.length}`);
+
     let inlineOk = 0;
     for (const v of inlineVideos) {
       if (await captureVideo(v)) inlineOk++;
     }
     if (inlineOk > 0) {
+      console.log(`[sgc] row ${idx}: inline video captured ${inlineOk}`);
       ok += inlineOk;
       await sleep(300);
       continue;
     }
-    // 否则走 lightbox（图片或未加载视频）—— 处理图片相册 + 视频未播放
+
     const hasMedia = !!row.querySelector('img[src^="blob:"], video');
     if (hasMedia) {
-      ok += await captureMessageViaLightbox(row);
+      console.log(`[sgc] row ${idx}: trying lightbox...`);
+      const captured = await captureMessageViaLightbox(row);
+      console.log(`[sgc] row ${idx}: lightbox captured ${captured}`);
+      ok += captured;
       await sleep(300);
+    } else {
+      console.log(`[sgc] row ${idx}: no media to capture (text only?)`);
     }
   }
+  console.log('[sgc] captureSelectedFromMultiSelect: done, total =', ok);
   return ok;
 }
 
@@ -529,6 +546,7 @@ function injectMultiSelectToolbarButton() {
   btn.textContent = '📥 加入车源';
   btn.title = '把选中的图片/视频加入车源暂存';
   btn.addEventListener('click', async (e) => {
+    console.log('[sgc] toolbar 加入车源 clicked');
     e.preventDefault();
     e.stopPropagation();
     btn.disabled = true;
