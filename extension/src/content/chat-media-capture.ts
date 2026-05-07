@@ -215,12 +215,20 @@ function findLightboxVideo(): HTMLVideoElement | null {
  * 等 src 变化 → 重复 → 看到重复 src 视为遍历完一圈 → ESC 关闭。
  */
 async function captureMessageViaLightbox(rowEl: Element): Promise<number> {
-  // 优先点 img，没图就点 video
+  // 优先点 img (blob:)；否则点 video；否则点任意有意义的 img（视频 poster 等）
   let trigger: HTMLElement | null = rowEl.querySelector(
     'img[src^="blob:"]',
   ) as HTMLImageElement | null;
   if (!trigger) {
     trigger = rowEl.querySelector('video') as HTMLVideoElement | null;
+  }
+  if (!trigger) {
+    // 视频 poster 或 https: 缩略图 — 通常 width >= 100
+    const candidates = Array.from(rowEl.querySelectorAll('img')).filter(
+      (i): i is HTMLImageElement =>
+        i instanceof HTMLImageElement && (i.naturalWidth >= 100 || i.width >= 100),
+    );
+    trigger = candidates[0] ?? null;
   }
   if (!trigger) return 0;
 
@@ -514,23 +522,39 @@ async function captureSelectedFromMultiSelect(): Promise<number> {
   }
 
   let ok = 0;
-  // 优先用 data-id 重新查 DOM（避免 stale reference）
+  // 用 data-id 重新查 DOM；WA 用虚拟滚动 + 懒加载，需要 scrollIntoView 触发渲染
   const rowsToProcess: Element[] = [];
   for (const id of dataIds) {
-    const fresh = document.querySelector(`[data-id="${CSS.escape(id)}"]`);
-    if (fresh) {
-      // 取最近 [role=row] 包装层（更全面的容器）
-      const wrapper = fresh.closest('[role="row"]') || fresh;
-      rowsToProcess.push(wrapper);
+    let row: Element | null = null;
+    // 6 次 × 500ms = 3s 轮询，等媒体加载
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const fresh = document.querySelector(`[data-id="${CSS.escape(id)}"]`);
+      if (fresh) {
+        const wrapper = fresh.closest('[role="row"]') || fresh;
+        // 第 1 次找到就 scroll 进视口触发懒加载
+        if (attempt === 0) {
+          (fresh as HTMLElement).scrollIntoView({ block: 'center' });
+        }
+        // 任意 img/video 即可（不要求 blob: src，因为视频未播放时只有 poster img）
+        if (wrapper.querySelector('img, video')) {
+          row = wrapper;
+          console.log(`[sgc] data-id ${id.slice(-8)}: found media on attempt ${attempt + 1}`);
+          break;
+        }
+      }
+      await sleep(500);
+    }
+    if (row) {
+      rowsToProcess.push(row);
     } else {
-      console.warn(`[sgc] row gone after cancel: ${id}`);
+      console.warn(`[sgc] data-id ${id.slice(-8)}: no media after 3s wait`);
     }
   }
   // fallback：如果没拿到 data-id，用旧 row 引用（可能是 stale）
   if (rowsToProcess.length === 0) {
     rowsToProcess.push(...rows);
   }
-  console.log('[sgc] rows to process after re-query =', rowsToProcess.length);
+  console.log('[sgc] rows to process =', rowsToProcess.length);
 
   for (let idx = 0; idx < rowsToProcess.length; idx++) {
     const row = rowsToProcess[idx];
@@ -553,7 +577,8 @@ async function captureSelectedFromMultiSelect(): Promise<number> {
       continue;
     }
 
-    const hasMedia = !!row.querySelector('img[src^="blob:"], video');
+    // 视频未播放时可能只有 poster <img>（非 blob:）— 也算 hasMedia
+    const hasMedia = !!row.querySelector('img, video');
     if (hasMedia) {
       console.log(`[sgc] row ${idx}: trying lightbox...`);
       const captured = await captureMessageViaLightbox(row);
