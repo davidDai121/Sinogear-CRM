@@ -363,7 +363,7 @@ function scanAndInject() {
         (img.closest('[data-id]') as Element | null) ||
         host;
       const ok = await captureMessageViaLightbox(row);
-      flashButton(host, ok > 0 ? `已加 ${ok}` : '失败');
+      flashButton(host, ok > 0 ? `✓ 已加 ${ok}` : '❌ 失败');
     });
   });
 
@@ -433,7 +433,7 @@ function scanAndInject() {
       e.preventDefault();
       e.stopPropagation();
       void captureAlbum(msg).then((ok) => {
-        flashButton(host, `已加 ${ok}`);
+        flashButton(host, `✓ 已加 ${ok}`);
       });
     });
     host.appendChild(btn);
@@ -494,19 +494,25 @@ async function captureSelectedFromMultiSelect(): Promise<number> {
 
   let ok = 0;
   for (const row of rows) {
-    const hasImage = !!row.querySelector('img[src^="blob:"]');
-    if (hasImage) {
-      ok += await captureMessageViaLightbox(row);
-      // 每条之间小停顿避免 WA 反应不过来
+    // 优先 inline video.src 直接抓（已加载的视频）
+    const inlineVideos = Array.from(row.querySelectorAll('video')).filter(
+      (v): v is HTMLVideoElement =>
+        v instanceof HTMLVideoElement && Boolean(v.src),
+    );
+    let inlineOk = 0;
+    for (const v of inlineVideos) {
+      if (await captureVideo(v)) inlineOk++;
+    }
+    if (inlineOk > 0) {
+      ok += inlineOk;
       await sleep(300);
       continue;
     }
-    // 视频或仅文字的 row：试试 video（视频通常也能开 lightbox 但简单起见用 inline）
-    const videos = Array.from(row.querySelectorAll('video')).filter(
-      (v): v is HTMLVideoElement => v instanceof HTMLVideoElement,
-    );
-    for (const v of videos) {
-      if (await captureVideo(v)) ok++;
+    // 否则走 lightbox（图片或未加载视频）—— 处理图片相册 + 视频未播放
+    const hasMedia = !!row.querySelector('img[src^="blob:"], video');
+    if (hasMedia) {
+      ok += await captureMessageViaLightbox(row);
+      await sleep(300);
     }
   }
   return ok;
@@ -569,21 +575,21 @@ function injectLightboxButton() {
       const curImg = overlay.querySelector('img');
       const curVid = overlay.querySelector('video');
       if (curImg instanceof HTMLImageElement) {
-        void captureImg(curImg).then(() => flashButton(host, '已加'));
+        void captureImg(curImg).then(() => flashButton(host, '✓ 已加'));
       } else if (curVid instanceof HTMLVideoElement) {
-        void captureVideo(curVid).then(() => flashButton(host, '已加'));
+        void captureVideo(curVid).then(() => flashButton(host, '✓ 已加'));
       }
     });
     host.appendChild(btn);
   });
 }
 
-function flashButton(host: HTMLElement, msg = '已加') {
+function flashButton(host: HTMLElement, msg = '✓ 已加') {
   const flash = document.createElement('div');
   flash.className = 'sgc-mc-flash';
-  flash.textContent = `✓ ${msg}`;
+  flash.textContent = msg;
   host.appendChild(flash);
-  setTimeout(() => flash.remove(), 1200);
+  setTimeout(() => flash.remove(), 1500);
 }
 
 export function initChatMediaCapture() {
