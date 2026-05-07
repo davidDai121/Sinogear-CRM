@@ -134,13 +134,18 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
 
       // 3. Build prompt + url
       const url = existingConv?.gem_chat_url ?? template.gem_url;
-      const prompt = existingConv
+      const basePrompt = existingConv
         ? formatUpdate(contact.phone, messages.slice(-5))
         : formatNewCustomer({
             contact,
             vehicleInterests,
             messages,
           });
+      // 销售自定义指令（来自 textarea）— 高优先级，覆盖默认风格
+      const guidance = followup.trim();
+      const prompt = guidance
+        ? `[Sales Guidance — TOP PRIORITY]\n${guidance}\n\nThe guidance above OVERRIDES default style. Apply it strictly to the [WhatsApp Reply].\n\n${basePrompt}`
+        : basePrompt;
 
       // 4. Run Gem
       setStatus({ kind: 'sending', foreground });
@@ -181,6 +186,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         chatUrl: newChatUrl,
         model: response.modelSelected ?? null,
       });
+      setFollowup('');
     } catch (err) {
       const msg = stringifyError(err);
       if (msg.includes('GEMINI_AUTH_REQUIRED')) {
@@ -205,41 +211,6 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
     await refreshConversations();
     setStatus({ kind: 'idle' });
     setFollowup('');
-  };
-
-  const sendFollowup = async () => {
-    if (!followup.trim() || !existingConv) return;
-    const text = followup.trim();
-    setStatus({ kind: 'sending', foreground });
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'GEM_RUN',
-        url: existingConv.gem_chat_url,
-        prompt: text,
-        active: foreground,
-        preferModel: ['Pro', '专业', '高级', 'Advanced'],
-      });
-      if (!response?.ok) {
-        throw new Error(response?.error ?? 'Gem 调用失败');
-      }
-      await supabase
-        .from('gem_conversations')
-        .update({
-          gem_chat_url: response.chatUrl,
-          last_used_at: new Date().toISOString(),
-        })
-        .eq('id', existingConv.id);
-      await refreshConversations();
-      setStatus({
-        kind: 'done',
-        text: response.responseText,
-        chatUrl: response.chatUrl,
-        model: response.modelSelected ?? null,
-      });
-      setFollowup('');
-    } catch (err) {
-      setStatus({ kind: 'error', message: stringifyError(err) });
-    }
   };
 
   const parsed = useMemo(
@@ -348,6 +319,24 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
             </button>
           </div>
 
+          {/* 销售自定义指令（永远展示）— 写了就高优先级注入到 prompt 顶部 */}
+          <div className="sgc-gem-guidance">
+            <textarea
+              value={followup}
+              onChange={(e) => setFollowup(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  if (!busy && selectedTemplateId) void generate();
+                }
+              }}
+              placeholder="想让 Gem 怎么回？(可选 · Cmd/Ctrl+Enter 直接生成)
+例：用法语回 / 客气一点 / 强调 1 万定金锁车 / 直接报 35k USD / 别问太多问题"
+              rows={3}
+              disabled={busy}
+            />
+          </div>
+
           {existingConv && (
             <div className="sgc-gem-progress">
               已有对话 · 最近使用{' '}
@@ -450,35 +439,6 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
                 </a>
               </div>
 
-              {existingConv && (
-                <div className="sgc-gem-followup">
-                  <textarea
-                    value={followup}
-                    onChange={(e) => setFollowup(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (
-                        (e.metaKey || e.ctrlKey) &&
-                        e.key === 'Enter' &&
-                        followup.trim()
-                      ) {
-                        e.preventDefault();
-                        void sendFollowup();
-                      }
-                    }}
-                    placeholder="继续问 Gem... (例如：再客气一点 / 用法语回复 / 这个客户预算降到 $30k 怎么报)"
-                    rows={2}
-                  />
-                  <button
-                    type="button"
-                    className="sgc-btn-primary"
-                    onClick={sendFollowup}
-                    disabled={!followup.trim() || busy}
-                    title="发送 (Cmd/Ctrl + Enter)"
-                  >
-                    发送
-                  </button>
-                </div>
-              )}
             </>
           )}
         </div>

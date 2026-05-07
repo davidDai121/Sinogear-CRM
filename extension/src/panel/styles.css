@@ -2473,6 +2473,35 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
   align-self: stretch;
 }
 
+.sgc-gem-guidance {
+  margin-top: 8px;
+}
+
+.sgc-gem-guidance textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d1d7db;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 56px;
+  box-sizing: border-box;
+  background: #fffbe6;
+}
+
+.sgc-gem-guidance textarea:focus {
+  outline: none;
+  border-color: #00a884;
+  background: #fff;
+}
+
+.sgc-gem-guidance textarea::placeholder {
+  color: #8696a0;
+  white-space: pre-line;
+}
+
 .sgc-gem-card {
   margin-top: 10px;
   background: #fff;
