@@ -144,9 +144,18 @@ Supabase（托管 Postgres + Auth）
 │       │                                + vehicle_interests.target_price_usd
 │       ├── 0006_quotes.sql             quotes 表（draft/sent/accepted/rejected）
 │       ├── 0007_contact_events.sql     contact_events 时间轴（append-only）
-│       └── 0008_gem_templates_and_conversations.sql
-│                                        gem_templates（org Gem URL 库）+
-│                                        gem_conversations（contact+template → chat URL）
+│       ├── 0008_gem_templates_and_conversations.sql
+│       │                                gem_templates（org Gem URL 库）+
+│       │                                gem_conversations（contact+template → chat URL）
+│       ├── 0009_backfill_contact_events.sql
+│       │                                给历史 contacts 补 'created' 事件（幂等）
+│       ├── 0010_org_member_management.sql
+│       │                                invite/list/remove/update_role RPC
+│       ├── 0011_messages.sql            messages 表（contact+wa_message_id 唯一）
+│       │                                + 'inbound'/'outbound' 方向枚举
+│       ├── 0012_keepalive.sql           SW 保活 RPC（Gem 长任务防休眠）
+│       └── 0013_vehicle_media_and_pricing.sql
+│                                        vehicle_media (img/video/spec) + 定价扩展
 └── （仅此一个目录；旧 backend/ frontend/ docs/ 已删）
 ```
 
@@ -197,7 +206,7 @@ gem_conversations       id, contact_id, template_id, gem_chat_url,
 - `is_org_member(org_id)` — RLS 用
 - `touch_updated_at()` trigger — contacts/vehicles/quotes/gem_templates 自动更新 updated_at
 
-**所有 8 个 migration 都已应用到生产 Supabase。**
+**所有 13 个 migration 都已应用到生产 Supabase。**
 
 ## 启动
 
