@@ -382,7 +382,7 @@ async function waitForResponse(
       return {
         generating: !!stopBtn,
         hasCopyBtn: !!copyBtn,
-        content: last?.textContent?.trim() ?? '',
+        content: ((last as HTMLElement)?.innerText ?? last?.textContent ?? '').trim(),
       };
     });
 
@@ -402,7 +402,7 @@ async function waitForResponse(
           const last = els[els.length - 1];
           return {
             generating: !!stopBtn,
-            content: last?.textContent?.trim() ?? '',
+            content: ((last as HTMLElement)?.innerText ?? last?.textContent ?? '').trim(),
           };
         },
       );
