@@ -24,6 +24,10 @@ function findCompose(): HTMLElement | null {
 
 /**
  * 把文本填入当前聊天输入框。返回 true = 成功，false = 找不到输入框。
+ *
+ * 优先 paste 事件（保留 \n 换行 — WA 的 Lexical 输入框会渲染成 <br>）；
+ * fallback 走 execCommand 按行 insertText + insertLineBreak（execCommand
+ * insertText 一次性传带 \n 的字符串会把换行折叠成空格）。
  */
 export function fillWhatsAppCompose(text: string): boolean {
   const input = findCompose();
@@ -31,16 +35,9 @@ export function fillWhatsAppCompose(text: string): boolean {
 
   input.focus();
 
-  // 1. 先尝试 execCommand insertText — 对老版 contenteditable 最稳
-  let inserted = false;
+  // 1. paste 事件 — text/plain 含 \n，Lexical 会渲成多行
+  let pasteOk = false;
   try {
-    inserted = document.execCommand('insertText', false, text);
-  } catch {
-    inserted = false;
-  }
-
-  // 2. Fallback: 模拟 paste event（适用 Lexical 等新框架）
-  if (!inserted) {
     const dt = new DataTransfer();
     dt.setData('text/plain', text);
     const pasteEvent = new ClipboardEvent('paste', {
@@ -49,6 +46,27 @@ export function fillWhatsAppCompose(text: string): boolean {
       cancelable: true,
     });
     input.dispatchEvent(pasteEvent);
+    pasteOk = (input.textContent ?? '').trim().length > 0;
+  } catch {
+    pasteOk = false;
+  }
+
+  // 2. Fallback：手动按行写入（execCommand insertText 单次会丢 \n）
+  if (!pasteOk) {
+    try {
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) document.execCommand('insertLineBreak');
+        if (lines[i]) document.execCommand('insertText', false, lines[i]);
+      }
+    } catch {
+      // 兜底再来一次单次 insertText（至少把内容写进去，丢换行也认了）
+      try {
+        document.execCommand('insertText', false, text);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   // 3. 触发 input 事件让 React 状态同步
