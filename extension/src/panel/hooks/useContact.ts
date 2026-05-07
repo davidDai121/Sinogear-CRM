@@ -61,7 +61,29 @@ export function useContact(
           .select('*')
           .single();
 
-        if (inserted.error) throw inserted.error;
+        if (inserted.error) {
+          // 23505 = race with another path (bulk-sync, label-sync's auto, etc.)
+          // creating the same (org_id, phone). Re-fetch and use the existing row.
+          const code = (inserted.error as { code?: string }).code;
+          if (code === '23505') {
+            const refetched = await supabase
+              .from('contacts')
+              .select('*')
+              .eq('org_id', orgId)
+              .eq('phone', phone)
+              .single();
+            if (refetched.error) throw refetched.error;
+            if (!cancelled) {
+              setState({
+                contact: refetched.data,
+                loading: false,
+                error: null,
+              });
+            }
+            return;
+          }
+          throw inserted.error;
+        }
 
         if (inserted.data) {
           void logContactEvent(inserted.data.id, 'created', {

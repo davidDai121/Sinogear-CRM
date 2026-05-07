@@ -12,21 +12,29 @@ function findMainPane(): Element | null {
   );
 }
 
+function readStrippingInjections(el: HTMLElement): string {
+  const clone = el.cloneNode(true) as HTMLElement;
+  clone
+    .querySelectorAll('.sgc-translation, .sgc-translate-btn')
+    .forEach((n) => n.remove());
+  return (clone.innerText || clone.textContent || '').trim();
+}
+
 function getMessageText(scope: Element): string {
   const copyable = scope.querySelector('.copyable-text .selectable-text') as HTMLElement | null;
   if (copyable) {
-    const text = copyable.innerText?.trim();
+    const text = readStrippingInjections(copyable);
     if (text) return text;
   }
 
   const fallback = scope.querySelector('.selectable-text') as HTMLElement | null;
   if (fallback) {
-    const text = fallback.innerText?.trim();
+    const text = readStrippingInjections(fallback);
     if (text) return text;
   }
 
   const anyCopyable = scope.querySelector('.copyable-text') as HTMLElement | null;
-  return anyCopyable?.innerText?.trim() ?? '';
+  return anyCopyable ? readStrippingInjections(anyCopyable) : '';
 }
 
 function findDataId(el: Element): string | null {

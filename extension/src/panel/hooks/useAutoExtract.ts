@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { readChatMessages } from '@/content/whatsapp-messages';
+import { readCurrentChat, phonesMatch } from '@/content/whatsapp-dom';
 import { phoneToCountry } from '@/lib/phone-countries';
 import { stringifyError } from '@/lib/errors';
 import { supabase } from '@/lib/supabase';
@@ -128,6 +129,16 @@ export function useAutoExtract({ contact, save, enabled }: Args) {
           (existingVehicles ?? []).map((v) => vehicleKey(v.model, v.condition)),
         );
         const existingModels = (existingVehicles ?? []).map((v) => v.model);
+
+        // Guard against reading the wrong chat: if the user just switched
+        // chats and the DOM still shows the previous one, abort. Otherwise
+        // we'd extract Country/Vehicle from another customer's messages
+        // and save them to this contact.
+        const active = readCurrentChat();
+        if (!active.phone || !phonesMatch(active.phone, c.phone)) {
+          if (!cancelled) setStatus('idle');
+          return;
+        }
 
         const messages = readChatMessages(30);
 

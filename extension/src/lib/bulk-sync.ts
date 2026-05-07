@@ -78,9 +78,12 @@ export async function bulkSyncWhatsAppChats(orgId: string): Promise<BulkSyncResu
   let added = 0;
   for (let i = 0; i < toInsert.length; i += CHUNK) {
     const batch = toInsert.slice(i, i + CHUNK);
-    const { error } = await supabase.from('contacts').insert(batch);
+    const { data, error } = await supabase
+      .from('contacts')
+      .upsert(batch, { onConflict: 'org_id,phone', ignoreDuplicates: true })
+      .select('id');
     if (error) throw new Error(stringifyError(error));
-    added += batch.length;
+    added += data?.length ?? 0;
   }
 
   return {

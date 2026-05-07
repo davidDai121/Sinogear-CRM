@@ -129,6 +129,48 @@ export function readCurrentChat(): CurrentChat {
   return { name, phone, rawJid };
 }
 
+/**
+ * Strip non-digit chars from a phone for comparison.
+ */
+export function phoneDigits(phone: string | null | undefined): string {
+  return (phone ?? '').replace(/\D/g, '');
+}
+
+/**
+ * Loose phone equality: identical digits, OR one is a suffix of the other
+ * (handles missing country code like "13552592187" vs "8613552592187").
+ */
+export function phonesMatch(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  const da = phoneDigits(a);
+  const db = phoneDigits(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  if (da.length >= 7 && db.endsWith(da)) return true;
+  if (db.length >= 7 && da.endsWith(db)) return true;
+  return false;
+}
+
+/**
+ * Poll readCurrentChat until the active chat's phone matches the expected one.
+ * Used by bulk-extract / auto-extract to guard against reading the WRONG chat
+ * when WhatsApp Web hasn't finished switching after a jumpToChat.
+ */
+export async function waitForActiveChatPhone(
+  expected: string,
+  timeoutMs = 3000,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const cur = readCurrentChat();
+    if (cur.phone && phonesMatch(cur.phone, expected)) return true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+}
+
 export function observeCurrentChat(
   onChange: (chat: CurrentChat) => void,
 ): () => void {

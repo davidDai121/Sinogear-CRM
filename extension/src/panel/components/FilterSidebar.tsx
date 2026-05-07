@@ -32,6 +32,11 @@ import {
   cleanupVehicleInterests,
   type VehicleCleanupResult,
 } from '@/lib/vehicle-cleanup';
+import {
+  scanForMismatches,
+  repairMismatched,
+  type RepairResult,
+} from '@/lib/repair-extraction';
 import { stringifyError } from '@/lib/errors';
 
 const HAS_QWEN_KEY = Boolean(import.meta.env.VITE_DASHSCOPE_API_KEY);
@@ -42,6 +47,8 @@ interface Props {
   orgId: string;
   onFilterChange: (filtered: CrmContact[] | null) => void;
   onRefresh: () => void;
+  onCollapse?: () => void;
+  clearSignal?: number;
 }
 
 const QUALITIES: { id: CustomerQuality; label: string; icon: string }[] = [
@@ -118,6 +125,8 @@ export function FilterSidebar({
   orgId,
   onFilterChange,
   onRefresh,
+  onCollapse,
+  clearSignal,
 }: Props) {
   const [filter, setFilter] = useState<FilterState>(emptyFilter);
   const [filterLoaded, setFilterLoaded] = useState(false);
@@ -141,6 +150,13 @@ export function FilterSidebar({
       onFilterChange(applyFilter(contacts, filter));
     }
   }, [filterLoaded, contacts, filter, onFilterChange]);
+
+  // External clear (e.g. user clicks X on FilteredChatList)
+  useEffect(() => {
+    if (clearSignal && clearSignal > 0) {
+      setFilter(emptyFilter());
+    }
+  }, [clearSignal]);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<BulkSyncResult | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -154,6 +170,9 @@ export function FilterSidebar({
   const [cleanupRunning, setCleanupRunning] = useState(false);
   const [cleanupResult, setCleanupResult] = useState<VehicleCleanupResult | null>(null);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const [repairRunning, setRepairRunning] = useState(false);
+  const [repairResult, setRepairResult] = useState<RepairResult | null>(null);
+  const [repairError, setRepairError] = useState<string | null>(null);
   const stopRef = useRef(false);
   const [overrideNonce, setOverrideNonce] = useState(0);
   const [collapsedBrands, setCollapsedBrands] = useState<Set<string>>(new Set());
@@ -199,6 +218,38 @@ export function FilterSidebar({
       setCleanupError(stringifyError(err));
     } finally {
       setCleanupRunning(false);
+    }
+  };
+
+  const runRepair = async () => {
+    setRepairRunning(true);
+    setRepairError(null);
+    setRepairResult(null);
+    try {
+      const scan = await scanForMismatches(orgId);
+      if (scan.mismatched.length === 0) {
+        setRepairResult({
+          contactsRepaired: 0,
+          vehiclesRemoved: 0,
+          errors: 0,
+          errorMessages: [],
+        });
+        return;
+      }
+      const ok = window.confirm(
+        `找到 ${scan.mismatched.length} 个客户的国家与手机号区号不匹配，可能是早期 AI 错抽。\n\n点确定将：\n• 重置国家为手机号对应的国家\n• 清空 语言 / 预算 / 目的港\n• 删除这些客户的所有车型兴趣\n• 标记为待重抽（下次批量抽取会重做）\n\n姓名 / 备注 / 阶段 / 标签 不动。\n\n继续吗？`,
+      );
+      if (!ok) {
+        setRepairRunning(false);
+        return;
+      }
+      const result = await repairMismatched(scan.mismatched);
+      setRepairResult(result);
+      onRefresh();
+    } catch (err) {
+      setRepairError(stringifyError(err));
+    } finally {
+      setRepairRunning(false);
     }
   };
 
@@ -361,11 +412,23 @@ export function FilterSidebar({
     <div className="sgc-filter-sidebar">
       <div className="sgc-filter-header">
         <span className="sgc-filter-heading">🔍 筛选客户</span>
-        {!isFilterEmpty(filter) && (
-          <button className="sgc-filter-reset" onClick={reset}>
-            清空
-          </button>
-        )}
+        <div className="sgc-filter-header-actions">
+          {!isFilterEmpty(filter) && (
+            <button className="sgc-filter-reset" onClick={reset}>
+              清空
+            </button>
+          )}
+          {onCollapse && (
+            <button
+              className="sgc-filter-collapse"
+              onClick={onCollapse}
+              title="收起筛选栏"
+              aria-label="收起筛选栏"
+            >
+              ◀
+            </button>
+          )}
+        </div>
       </div>
 
       {loading && <div className="sgc-filter-loading">加载中…</div>}
@@ -477,6 +540,27 @@ export function FilterSidebar({
         )}
         {cleanupError && (
           <div className="sgc-filter-sync-error">{cleanupError}</div>
+        )}
+
+        <button
+          className="sgc-btn-secondary sgc-filter-sync-btn"
+          onClick={runRepair}
+          disabled={repairRunning}
+        >
+          {repairRunning ? '修复中…' : '🛠 修复 AI 错抽'}
+        </button>
+        {repairResult && (
+          <div className="sgc-filter-sync-result">
+            {repairResult.contactsRepaired === 0
+              ? '✓ 没有发现需修复的客户'
+              : `✓ 修复 ${repairResult.contactsRepaired} 个客户 · 删车型 ${repairResult.vehiclesRemoved}` +
+                (repairResult.errors > 0
+                  ? ` · ${repairResult.errors} 错误`
+                  : '')}
+          </div>
+        )}
+        {repairError && (
+          <div className="sgc-filter-sync-error">{repairError}</div>
         )}
       </div>
 

@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { readChatMessages } from '@/content/whatsapp-messages';
+import { waitForActiveChatPhone } from '@/content/whatsapp-dom';
 import { phoneToCountry } from './phone-countries';
 import { jumpToChat } from './jump-to-chat';
 import { stringifyError } from './errors';
@@ -151,7 +152,13 @@ async function extractOne(
   const jumped = await jumpToChat(queryDigits);
   if (!jumped) return null;
 
-  await sleep(800);
+  // Verify the right chat actually loaded — if WhatsApp didn't switch
+  // (slow load / search miss / business account), reading DOM messages
+  // would pull from the PREVIOUS chat and cross-contaminate this contact.
+  const matched = await waitForActiveChatPhone(contact.phone, 3500);
+  if (!matched) return null;
+
+  await sleep(300);
 
   const messages = readChatMessages(30);
 

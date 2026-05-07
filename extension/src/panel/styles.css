@@ -1223,6 +1223,12 @@ body.sgc-page-overlay-active #app {
   font-size: 13px;
 }
 
+.sgc-filter-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .sgc-filter-reset {
   background: transparent;
   color: #00a884;
@@ -1230,6 +1236,62 @@ body.sgc-page-overlay-active #app {
   font-size: 12px;
   cursor: pointer;
   font-family: inherit;
+}
+
+.sgc-filter-collapse {
+  background: transparent;
+  border: 0;
+  color: #667781;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  line-height: 1;
+}
+
+.sgc-filter-collapse:hover {
+  background: #f0f2f5;
+  color: #111b21;
+}
+
+.sgc-filter-sidebar-expander {
+  position: fixed;
+  top: 88px;
+  left: 0;
+  width: 28px;
+  height: 80px;
+  background: #00a884;
+  color: #fff;
+  border: 0;
+  border-radius: 0 10px 10px 0;
+  cursor: pointer;
+  z-index: 2147483598;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0;
+  font-family: inherit;
+  box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.25);
+  transition: width 0.15s ease, background 0.15s ease;
+}
+
+.sgc-filter-sidebar-expander:hover {
+  background: #008f6f;
+  width: 36px;
+}
+
+.sgc-filter-expander-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.sgc-filter-expander-arrow {
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.9;
 }
 
 .sgc-filter-loading {

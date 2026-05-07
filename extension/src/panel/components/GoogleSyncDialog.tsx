@@ -71,15 +71,18 @@ export function GoogleSyncDialog({ orgId, onClose, onDone }: Props) {
             if (!existing) {
               const inserted = await supabase
                 .from('contacts')
-                .insert({
-                  org_id: orgId,
-                  phone,
-                  name: g.displayName,
-                  google_resource_name: g.resourceName,
-                  google_synced_at: new Date().toISOString(),
-                })
+                .upsert(
+                  {
+                    org_id: orgId,
+                    phone,
+                    name: g.displayName,
+                    google_resource_name: g.resourceName,
+                    google_synced_at: new Date().toISOString(),
+                  },
+                  { onConflict: 'org_id,phone', ignoreDuplicates: true },
+                )
                 .select('*')
-                .single();
+                .maybeSingle();
               if (inserted.error) {
                 result.errors.push(`${phone}: ${inserted.error.message}`);
               } else if (inserted.data) {
