@@ -54,6 +54,7 @@ export function formatNewCustomer(ctx: GemPromptContext): string {
     lines.push(formatMessage(msg));
   }
 
+  lines.push('', FORMAT_CONSTRAINT);
   return lines.join('\n');
 }
 
@@ -68,6 +69,7 @@ export function formatUpdate(
   for (const msg of newMessages) {
     lines.push(formatMessage(msg));
   }
+  lines.push('', FORMAT_CONSTRAINT);
   return lines.join('\n');
 }
 
@@ -75,8 +77,17 @@ export function formatUpdate(
  * 销售引导：让 Gem 调整回复方向
  */
 export function formatGuidance(guidance: string): string {
-  return `[Sales Guidance]\n${guidance.trim()}`;
+  return `[Sales Guidance]\n${guidance.trim()}\n\n${FORMAT_CONSTRAINT}`;
 }
+
+/**
+ * 强制 Gem 把 [WhatsApp Reply] 分段输出，避免一大坨墙文字客户读不下去。
+ */
+const FORMAT_CONSTRAINT = `[Format Constraint]
+The [WhatsApp Reply] section MUST be split into 2-4 short paragraphs.
+Separate paragraphs with a single blank line (i.e. \\n\\n).
+Each paragraph: max 2-3 sentences. No single paragraph longer than ~50 words.
+This is mandatory for readability — customers won't read a wall of text.`;
 
 function buildProfileLines(
   contact: GemPromptContext['contact'],

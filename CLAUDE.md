@@ -296,19 +296,21 @@ npm run build
 
 ## 待完成功能
 
-> Phase 1-4 全部完成。剩下长期任务。
+> Phase 1-4 全部完成。原列表中所有事项已完成（见下方"近期补完"）。
 
-### 长期（不急）
+### 近期补完（2026-05-07）
 
-- [ ] WhatsApp 消息历史持久化（写入 Supabase，目前只读 DOM 当下 30 条）
-- [ ] 团队成员邀请 UI（目前需要在 SQL Editor 手动 INSERT）
-- [ ] 旧 PostgreSQL 数据迁移脚本
+- [x] **WhatsApp 消息历史持久化**（migration `0011_messages.sql` + `lib/message-sync.ts` + `MessagesHistorySection`/`MessagesHistoryModal` + `useMessageSync` hook）
+- [x] **团队成员管理 UI**（migration `0010_org_member_management.sql` 提供 `invite_user_to_org` / `list_org_members` / `remove_org_member` / `update_org_member_role` RPC，UI 在 `TeamMembersModal.tsx`，顶栏 "👥 团队"）
+- [x] **旧 PostgreSQL 迁移脚本**（`extension/scripts/migrate-from-old-pg.mjs`，配 `npm run migrate-old-pg`）
+- [x] **contact_events 老客户回填**（migration `0009_backfill_contact_events.sql`，幂等 `NOT EXISTS`）
+- [x] **@crxjs/vite-plugin 升级**（`^2.0.0-beta.27` → `^2.4.0` 正式版）
+- [x] **FilterSidebar 拆子组件**（811 → 451 行，分出 `FilterPrimitives` / `FilterMaintenancePanel` / `FilterTodoList`）
 
-### 体验优化（已知可改进）
+### 还可以做的（不急）
 
-- [ ] FilterSidebar.tsx 已超 700 行，未来可拆子组件
-- [ ] @crxjs/vite-plugin 是 beta（^2.0.0-beta.27），未来可能要升级
-- [ ] contact_events 时间轴只在新动作触发时写入，老客户没有 created 事件（可写一次性回填脚本）
+- [ ] 聊天媒体捕获 Phase C 收尾：lightbox 边播边录视频已上 + 多选 toolbar 加 PDF/Excel/视频；如需更稳的视频抓取可调研 WA 内部 download API
+- [ ] 旧"已知问题"清理 + WA Web DOM/IDB schema 漂移监测
 
 ## Gem 配置流程（用户首次设置）
 
