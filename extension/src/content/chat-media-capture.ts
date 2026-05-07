@@ -102,6 +102,11 @@ async function captureVideo(video: HTMLVideoElement): Promise<boolean> {
     try {
       const filename = `whatsapp_${ts()}_${Math.random().toString(36).slice(2, 6)}.mp4`;
       const file = await urlToFile(video.src, filename, 'video/mp4');
+      // WA 用 MediaSource 流式播放，blob: URL 实际不可 fetch — 会得到 0 字节
+      if (file.size === 0) {
+        console.warn('[sgc] video src is MediaSource (streaming), cannot extract bytes:', video.src);
+        return false;
+      }
       addCaptured({
         file,
         thumbDataUrl: video.poster || null,
@@ -712,7 +717,9 @@ function injectLightboxButton() {
           detail = '视频还没加载（点播放后再试）';
         } else {
           ok = await captureVideo(video);
-          detail = ok ? '✓ 视频已加' : '❌ 视频抓不到';
+          detail = ok
+            ? '✓ 视频已加'
+            : '❌ WA 视频流式不可抓 — 请用 WA 自带下载';
         }
       } else if (img) {
         ok = await captureImg(img);
