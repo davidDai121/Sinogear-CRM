@@ -157,12 +157,19 @@ function findLightboxImage(): HTMLImageElement | null {
   return candidates[0] ?? null;
 }
 
+let lastLightboxState: boolean | null = null;
 function lightboxIsOpen(): boolean {
-  // WA 的图片/视频全屏浏览器 — 用 "下载" 按钮 + "关闭" 按钮联合判定
-  // (下一步/上一步 只有相册才有)
-  const hasDownload = !!document.querySelector('button[aria-label="下载"], button[aria-label="Download"]');
-  const hasClose = !!document.querySelector('button[aria-label="关闭"], button[aria-label="Close"]');
-  return hasDownload && hasClose;
+  // WA 全屏图片/视频浏览器：找"下载"按钮 + 大图(naturalWidth>800) 或 视频
+  const hasDownload = !!document.querySelector(
+    'button[aria-label="下载"], button[aria-label="Download"]',
+  );
+  const hasBigMedia = !!findLightboxImage() || !!findLightboxVideo();
+  const open = hasDownload && hasBigMedia;
+  if (open !== lastLightboxState) {
+    console.log(`[sgc] lightbox state -> ${open ? 'OPEN' : 'closed'} (download=${hasDownload}, bigMedia=${hasBigMedia})`);
+    lastLightboxState = open;
+  }
+  return open;
 }
 
 async function closeLightbox() {
