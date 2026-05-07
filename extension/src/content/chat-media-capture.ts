@@ -158,11 +158,11 @@ function findLightboxImage(): HTMLImageElement | null {
 }
 
 function lightboxIsOpen(): boolean {
-  return Boolean(
-    document.querySelector(
-      'button[aria-label="下一步"], button[aria-label="上一步"]',
-    ),
-  );
+  // WA 的图片/视频全屏浏览器 — 用 "下载" 按钮 + "关闭" 按钮联合判定
+  // (下一步/上一步 只有相册才有)
+  const hasDownload = !!document.querySelector('button[aria-label="下载"], button[aria-label="Download"]');
+  const hasClose = !!document.querySelector('button[aria-label="关闭"], button[aria-label="Close"]');
+  return hasDownload && hasClose;
 }
 
 async function closeLightbox() {
@@ -649,12 +649,21 @@ function injectLightboxButton() {
     if (existing) existing.remove();
     return;
   }
-  if (existing) return; // 已注入
+  if (existing) {
+    // 已注入：根据当前内容更新文案（图片 vs 视频）
+    const v = findLightboxVideo();
+    const desired = v ? '📥 加入车源（视频）' : '📥 加入车源（图片）';
+    if (!existing.disabled && existing.textContent !== desired && !existing.textContent?.startsWith('✓') && !existing.textContent?.startsWith('❌') && existing.textContent !== '抓取中…') {
+      existing.textContent = desired;
+    }
+    return;
+  }
 
   const btn = document.createElement('button');
   btn.id = LIGHTBOX_BTN_ID;
   btn.className = `${BTN_CLASS} sgc-mc-lightbox-btn`;
-  btn.textContent = '📥 抓这张';
+  const initialVideo = findLightboxVideo();
+  btn.textContent = initialVideo ? '📥 加入车源（视频）' : '📥 加入车源（图片）';
   btn.title = '把当前查看的图片/视频加入车源暂存';
   btn.addEventListener('click', async (e) => {
     e.preventDefault();
@@ -662,21 +671,35 @@ function injectLightboxButton() {
     btn.disabled = true;
     btn.textContent = '抓取中…';
     let ok = false;
-    const img = findLightboxImage();
-    const video = findLightboxVideo();
-    if (img) {
-      ok = await captureImg(img);
-    } else if (video && video.src) {
-      ok = await captureVideo(video);
+    let detail = '';
+    try {
+      const video = findLightboxVideo();
+      const img = findLightboxImage();
+      if (video) {
+        if (!video.src) {
+          detail = '视频还没加载（点播放后再试）';
+        } else {
+          ok = await captureVideo(video);
+          detail = ok ? '✓ 视频已加' : '❌ 视频抓不到';
+        }
+      } else if (img) {
+        ok = await captureImg(img);
+        detail = ok ? '✓ 图片已加' : '❌ 图片抓不到';
+      } else {
+        detail = '❌ 找不到媒体';
+      }
+    } catch (err) {
+      console.error('[sgc] lightbox capture err:', err);
+      detail = '❌ ' + (err instanceof Error ? err.message : String(err));
     }
-    btn.textContent = ok ? '✓ 已加' : '❌ 抓不到';
+    btn.textContent = detail;
     setTimeout(() => {
-      // 如果 lightbox 还开着 reset；否则自然消失（下次 scan 移除）
       if (document.getElementById(LIGHTBOX_BTN_ID) === btn) {
-        btn.textContent = '📥 抓这张';
+        const v = findLightboxVideo();
+        btn.textContent = v ? '📥 加入车源（视频）' : '📥 加入车源（图片）';
         btn.disabled = false;
       }
-    }, 1800);
+    }, 2500);
   });
   document.body.appendChild(btn);
 }
