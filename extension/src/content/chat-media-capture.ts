@@ -193,7 +193,15 @@ function startBulkCapture(specForceKind?: CapturedKindLocal): {
       return;
     }
     try {
-      const res = await fetch(url);
+      const isBlobUrl = url.startsWith('blob:');
+      console.log(`[sgc/bulk] fetching ${isBlobUrl ? 'blob' : 'http'} url:`, url.slice(0, 100));
+      // 非 blob: 是 WA 媒体 CDN URL，依赖签名 + cookie；带 credentials 让 cookie 跟着走
+      const res = await fetch(url, isBlobUrl ? {} : { credentials: 'include' });
+      if (!res.ok) {
+        console.warn(`[sgc/bulk] fetch ${res.status} ${res.statusText} for`, m.filename || url);
+        failed++;
+        return;
+      }
       const blob = await res.blob();
       if (blob.size === 0) {
         console.warn('[sgc/bulk] empty blob for', m.filename || url);

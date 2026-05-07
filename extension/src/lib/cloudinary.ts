@@ -52,13 +52,15 @@ export function isCloudinaryConfigured(): boolean {
 }
 
 /** 根据 media type 推断 cloudinary resource_type 端点 */
-function endpointFor(mediaType: VehicleMediaType, mime?: string): 'image' | 'video' | 'raw' | 'auto' {
+function endpointFor(mediaType: VehicleMediaType, mime?: string): 'image' | 'video' | 'raw' {
   if (mediaType === 'image') return 'image';
   if (mediaType === 'video') return 'video';
-  // spec：图片走 image，视频走 video，PDF/Excel 走 raw — 用 auto 让 cloudinary 自己判断
+  // spec：图片走 image，视频走 video，其它（PDF/Excel/Word/PPT/Zip）必须走 raw。
+  // 不能用 auto — Cloudinary 会把 PDF 判定成 image，但默认账号禁止从 /image/upload/ 投放
+  // PDF/ZIP（"PDF and ZIP files delivery: Not allowed"），下载时返回 401 deny。
   if (mime?.startsWith('image/')) return 'image';
   if (mime?.startsWith('video/')) return 'video';
-  return 'auto';
+  return 'raw';
 }
 
 /**
