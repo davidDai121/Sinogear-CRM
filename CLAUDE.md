@@ -16,9 +16,10 @@ Chrome 扩展（Manifest V3, Vite + React + TypeScript）
 Supabase（托管 Postgres + Auth）
   ├── 多租户：organizations + organization_members + RLS
   ├── 表：contacts / contact_tags / vehicle_interests / vehicles
-  │       vehicle_tags / tasks / quotes / contact_events
-  │       gem_templates / gem_conversations
+  │       vehicle_tags / vehicle_media / tasks / quotes / messages
+  │       contact_events / gem_templates / gem_conversations
   ├── chrome.storage 持久化 session
+  ├── pg_cron 心跳防免费层 7 日自动暂停（0012_keepalive）
   └── Google 联系人同步（chrome.identity OAuth + People API）
 
 外部服务
@@ -33,6 +34,10 @@ Supabase（托管 Postgres + Auth）
   │   ├── chrome.tabs 后台打开 gemini.google.com Gem URL
   │   ├── chrome.scripting 注入脚本切换 Pro 模型 + 填 prompt + 读响应
   │   └── 用户在 Gem Builder 自建 Gem，URL 存进 gem_templates 表
+  ├── Cloudinary 媒体存储（unsigned upload preset，无后端签名）
+  │   ├── 车源图片 / 视频 / 配置表（PDF/Excel/Word）全走它
+  │   ├── 聊天暂存 → 分配车型时上传，URL + public_id 写 vehicle_media
+  │   └── WA Web CSP 屏蔽 res.cloudinary.com，CloudinaryImg 用 fetch + blob URL 绕过
   └── Google People API — 联系人双向同步
 ```
 
@@ -54,43 +59,69 @@ Supabase（托管 Postgres + Auth）
 │   │   ├── background/
 │   │   │   └── service-worker.ts       PING + GET/CLEAR_GOOGLE_TOKEN +
 │   │   │                               EXTRACT_FIELDS / EXTRACT_TAGS /
-│   │   │                               EXTRACT_TASKS / TRANSLATE_TEXT (Google → Qwen fallback)
-│   │   │                               GEM_RUN / GEM_BUSY (Gem 自动化)
+│   │   │                               EXTRACT_TASKS / TRANSLATE_TEXT (Google → Qwen fallback) +
+│   │   │                               GEM_RUN / GEM_BUSY (Gem 自动化) +
+│   │   │                               BULK_CAPTURE_ARM/DISARM (拦 chrome.downloads
+│   │   │                               转发回 content 给 chat-media-capture)
 │   │   ├── content/
-│   │   │   ├── main.tsx                Content script 入口，挂 AppShell
+│   │   │   ├── main.tsx                Content script 入口，挂 AppShell + initChatMediaCapture
 │   │   │   ├── whatsapp-dom.ts         testid + span[title] + 多重 fallback
 │   │   │   ├── whatsapp-messages.ts    读当前聊天 + waitForChatMessages 轮询
-│   │   │   ├── whatsapp-compose.ts     把文本 paste 入聊天输入框（Gem reply 一键填入）
-│   │   │   └── auto-translate.ts       消息气泡自动翻译：观察器 + 顺序队列
-│   │   │                               + 每条消息悬停 🌐 手动按钮 (200ms 间隔)
+│   │   │   ├── whatsapp-compose.ts     把文本 paste 入聊天输入框（Gem reply 一键填入）+
+│   │   │   │                            pasteFilesToWhatsApp（车源媒体一键发图/视频/PDF）
+│   │   │   ├── auto-translate.ts       消息气泡自动翻译：观察器 + 顺序队列
+│   │   │   │                            + 每条消息悬停 🌐 手动按钮 (200ms 间隔)
+│   │   │   └── chat-media-capture.ts   Phase C 媒体捕获（1085 行）：
+│   │   │                                单图/视频/相册 hover 📥 + lightbox 浮动按钮 +
+│   │   │                                多选 toolbar "📥 加入车源"（含 PDF/Excel/Word）+
+│   │   │                                走 WA 自带"下载"按钮，SW 拦截转发回来 fetch blob
 │   │   ├── popup/                      扩展弹窗（登录 + 打开 WhatsApp）
 │   │   ├── panel/
 │   │   │   ├── AppShell.tsx            顶层组件，路由 6 个 tab + body class 切换
 │   │   │   ├── styles.css              所有面板样式
 │   │   │   ├── components/
-│   │   │   │   ├── TopNav.tsx          顶部 6 tab + 翻译开关 + 重译按钮
+│   │   │   │   ├── TopNav.tsx          顶部 6 tab + 翻译开关 + 重译按钮 +
+│   │   │   │   │                       🤖 Gem 模板 + 👥 团队成员
 │   │   │   │   ├── LoginForm.tsx       注册/登录
 │   │   │   │   ├── OrgSetup.tsx        首次创建团队
+│   │   │   │   ├── TeamMembersModal.tsx 成员列表 + 邀请 / 改角色 / 移除
 │   │   │   │   ├── ContactEditForm.tsx 客户编辑表单（聊天卡 + drawer 共用）
 │   │   │   │   │                       姓名/国家/语言/预算/目的港/质量/阶段/备注
-│   │   │   │   ├── ContactCard.tsx     聊天 tab 右侧：AI 抽取 banner +
-│   │   │   │   │                       ContactEditForm + Tags + Vehicle +
-│   │   │   │   │                       Quotes + Tasks + Timeline (全 sections)
-│   │   │   │   ├── ContactDetailDrawer.tsx  客户 tab drawer：同样所有 sections
+│   │   │   │   ├── ContactCard.tsx     聊天 tab 右侧 tab 容器：客户资料 / AI 回复 / 历史消息
+│   │   │   │   ├── ContactDetailDrawer.tsx  客户 tab drawer：同样三 tab
 │   │   │   │   ├── TagsSection.tsx     标签 CRUD + 🤖 AI 建议
 │   │   │   │   ├── VehicleInterestsSection.tsx  车型兴趣
 │   │   │   │   ├── QuotesSection.tsx   报价历史 (车型 datalist 联动)
 │   │   │   │   ├── ContactTasksSection.tsx      任务 + 🤖 AI 建议
 │   │   │   │   ├── TimelineSection.tsx 客户事件时间线（图标 + 相对时间）
+│   │   │   │   ├── MessagesHistorySection.tsx  聊天历史入口 +
+│   │   │   │   │                                  useMessageSync 自动 upsert 当前可见消息
+│   │   │   │   ├── MessagesHistoryModal.tsx    分页加载 messages 表（最多 500 条）
+│   │   │   │   ├── AIReplyTab.tsx      AI 回复 tab：顶部 dropdown 切换"翻译"/"Gem"
+│   │   │   │   │                       + 上方常驻 VehicleRecommendations
+│   │   │   │   ├── TranslateReplyPanel.tsx  直翻模式：中文 → 客户语言 → 一键填入
 │   │   │   │   ├── GemReplySection.tsx Gem AI 回复：模板选择 + 前后台开关 +
 │   │   │   │   │                       reply/translation/clientRecord 三段卡 +
-│   │   │   │   │                       💬 填入聊天框 + "应用 N 项到客户资料" + 续聊输入框
+│   │   │   │   │                       💬 填入聊天框 + "应用 N 项到客户资料" + 续聊输入框 +
+│   │   │   │   │                       常驻指令 textarea（按 contact 持久化到 chrome.storage）
 │   │   │   │   ├── GemTemplatesModal.tsx Gem 模板 CRUD（org 共享，is_default 标记）
+│   │   │   │   ├── VehicleRecommendations.tsx  AI 回复 tab 顶部"相关车源"（527 行）：
+│   │   │   │   │                                按 vehicle_interests 推荐 + 拼图册 +
+│   │   │   │   │                                "💬 一键发图/视频/PDF 到 WhatsApp"
+│   │   │   │   ├── VehicleModal.tsx    车源创建/编辑（含 pricing_tiers 阶梯价 + media manager）
+│   │   │   │   ├── VehicleMediaManager.tsx     图片/视频/配置表 三 section 上传 (Cloudinary)
+│   │   │   │   ├── CloudinaryImg.tsx   绕过 WA CSP：fetch → blob URL → <img>
+│   │   │   │   ├── MediaStagingTray.tsx        屏幕右下浮动暂存盘（Portal）：
+│   │   │   │   │                                显示已捕获媒体 + "📤 保存到车型" 按钮
+│   │   │   │   ├── AssignMediaToVehicleModal.tsx 暂存 → 选车型/新建车型 → 上传 Cloudinary +
+│   │   │   │   │                                 写 vehicle_media（仅当前 tab 内有效）
 │   │   │   │   ├── TaskModal.tsx       任务创建/编辑
-│   │   │   │   ├── VehicleModal.tsx    车源创建/编辑
 │   │   │   │   ├── GoogleSyncDialog.tsx  Google 联系人同步对话框
-│   │   │   │   ├── FilterSidebar.tsx   左侧多维筛选（726 行，主战场）
-│   │   │   │   └── FilteredChatList.tsx  筛选结果列表
+│   │   │   │   ├── FilterSidebar.tsx   左侧多维筛选编排（451 行，主件）
+│   │   │   │   ├── FilterPrimitives.tsx   共享 CollapsibleSection / Chip
+│   │   │   │   ├── FilterMaintenancePanel.tsx  sync/extract/cleanup/repair 工具栏
+│   │   │   │   ├── FilterTodoList.tsx     今日待办 5 buckets
+│   │   │   │   └── FilteredChatList.tsx   筛选结果列表
 │   │   │   ├── pages/
 │   │   │   │   ├── DashboardPage.tsx   看板 tab：周/月切换 + 6 KPI 卡 +
 │   │   │   │   │                       阶段漏斗 + 热门车型 Top 5
@@ -107,10 +138,12 @@ Supabase（托管 Postgres + Auth）
 │   │   │       ├── useContact.ts       按手机号查/建客户（写 created/stage_changed 事件）
 │   │   │       ├── useCrmData.ts       中心 CRM 数据 + WhatsApp IDB 合并 +
 │   │   │       │                       20s 轮询 + fire-and-forget syncAutoStages
-│   │   │       └── useAutoExtract.ts   自动 AI 字段抽取 + 写 ai_extracted/vehicle_added 事件
+│   │   │       ├── useAutoExtract.ts   自动 AI 字段抽取 + 写 ai_extracted/vehicle_added 事件
+│   │   │       └── useMessageSync.ts   按 contactId 自动 sync 当前可见消息 → messages 表
 │   │   └── lib/
 │   │       ├── supabase.ts             Supabase client（chrome.storage 适配器）
-│   │       ├── database.types.ts       完整数据库类型（含 quotes/contact_events）
+│   │       ├── database.types.ts       完整数据库类型（含 quotes/contact_events/
+│   │       │                            messages/vehicle_media/PricingTier）
 │   │       ├── errors.ts               错误格式化（"扩展刚更新，请刷新" 友好提示）
 │   │       ├── google-people.ts        Google People API 客户端
 │   │       ├── whatsapp-idb.ts         读 WhatsApp Web IndexedDB（chats/labels/contacts）
@@ -132,8 +165,12 @@ Supabase（托管 Postgres + Auth）
 │   │       ├── gem-prompt.ts           Gem prompt 格式化（formatNewCustomer/Update/Guidance）
 │   │       ├── gem-automation.ts       Gem 网页端自动化（chrome.tabs + executeScript
 │   │       │                            + 模型选择 + 等响应停止生成按钮 + busy 串行）
-│   │       └── gem-parser.ts           解析 Gem 响应：[Client Record] / [WhatsApp Reply] /
-│   │                                    [Translation]，无标签时按 CJK 比例 fallback 拆分
+│   │       ├── gem-parser.ts           解析 Gem 响应：[Client Record] / [WhatsApp Reply] /
+│   │       │                            [Translation]，无标签时按 CJK 比例 fallback 拆分
+│   │       ├── cloudinary.ts           unsigned upload preset 直传 + thumbnailUrl 缩略
+│   │       ├── media-tray-store.ts     聊天媒体捕获暂存（内存 Map + subscribe，不持久化）
+│   │       ├── message-sync.ts         syncMessages upsert + countMessages + loadMessages
+│   │       └── repair-extraction.ts    扫描国家 / 区号不匹配的客户 + 重置字段 + 删错抽车型
 │   └── supabase/migrations/
 │       ├── 0001_init.sql               表 + RLS 策略
 │       ├── 0002_create_org_rpc.sql     create_organization RPC
@@ -153,7 +190,8 @@ Supabase（托管 Postgres + Auth）
 │       │                                invite/list/remove/update_role RPC
 │       ├── 0011_messages.sql            messages 表（contact+wa_message_id 唯一）
 │       │                                + 'inbound'/'outbound' 方向枚举
-│       ├── 0012_keepalive.sql           SW 保活 RPC（Gem 长任务防休眠）
+│       ├── 0012_keepalive.sql           pg_cron 每日心跳（防 Supabase 免费层
+│       │                                7 日无活动自动暂停，跟 SW 无关）
 │       └── 0013_vehicle_media_and_pricing.sql
 │                                        vehicle_media (img/video/spec) + 定价扩展
 └── （仅此一个目录；旧 backend/ frontend/ docs/ 已删）
@@ -179,8 +217,12 @@ vehicle_interests       id, contact_id, model, year, condition, steering,
 vehicles                id, org_id, brand, model, year, version,
                         vehicle_condition, fuel_type(gas/diesel/hybrid/ev),
                         steering, base_price, currency, logistics_cost,
-                        sale_status(available/paused/expired), short_spec, *_at
+                        sale_status(available/paused/expired), short_spec,
+                        pricing_tiers jsonb([{label, price_usd}]), *_at
 vehicle_tags            vehicle_id, tag
+vehicle_media           id, vehicle_id, media_type(image/video/spec),
+                        url, public_id, caption, mime_type, file_size_bytes,
+                        sort_order, created_by, created_at
 tasks                   id, org_id, contact_id, title, due_at,
                         status(open/done/cancelled), created_by, created_at
 quotes                  id, contact_id, vehicle_model, price_usd,
@@ -195,11 +237,18 @@ gem_templates           id, org_id, name, gem_url, description, is_default,
 gem_conversations       id, contact_id, template_id, gem_chat_url,
                         last_used_at, created_at
                         UNIQUE(contact_id, template_id)
+messages                id, contact_id, wa_message_id, direction(inbound/outbound),
+                        text, sent_at, synced_at
+                        UNIQUE(contact_id, wa_message_id)
+_keepalive              singleton (id=1, last_ping) — pg_cron 每日心跳
+                        防 Supabase 免费层 7 日无活动自动暂停
 ```
 
 **RLS：** 所有表的 SELECT/INSERT/UPDATE/DELETE 都要求 `auth.uid()` 是 `org_id` 成员（通过 `is_org_member(org_id)` SECURITY DEFINER 函数）。
-- quotes / contact_events / gem_conversations 通过 contact 反查 org_id（无 org_id 列）
+- quotes / contact_events / gem_conversations / messages 通过 contact 反查 org_id（无 org_id 列）
+- vehicle_media 通过 vehicle 反查 org_id
 - contact_events 只有 SELECT/INSERT policy（append-only）
+- _keepalive 全部 deny，仅 pg_cron 内部 postgres role 可写
 
 **Helpers：**
 - `create_organization(name)` RPC — 原子建 org + 把 caller 加 owner
@@ -236,6 +285,10 @@ npm run build
 - `VITE_AI_MODEL` — 默认 `qwen-flash`（百炼免费档，1M tokens/月）
   - 备选：`qwen-turbo-1101`（10M 额度但老）/ `deepseek-v3.2` / `glm-4.7` / `kimi-k2.6`
   - 国际版：endpoint 改成 `dashscope-intl.aliyuncs.com/compatible-mode/v1`
+- `VITE_CLOUDINARY_CLOUD_NAME` / `VITE_CLOUDINARY_UPLOAD_PRESET` — 车源媒体上传
+  - preset 必须在 Cloudinary 后台 Settings → Upload → Upload presets 设为 **Unsigned**
+  - 一个免费账号 25 GB 流量 / 月，对几百车型够用
+- `SUPABASE_SERVICE_ROLE_KEY` / `ORG_ID` — 仅 `npm run migrate-old-pg` 需要
 
 ## 测试规则（重要）
 
@@ -247,9 +300,11 @@ npm run build
 ## 已完成功能
 
 ### 基础设施
-- [x] Chrome 扩展骨架（MV3 + Vite + React + TS）
-- [x] Supabase 多租户 schema + RLS（**7 个 migration 全部上线**）
+- [x] Chrome 扩展骨架（MV3 + Vite + React + TS，@crxjs/vite-plugin 2.4 正式版）
+- [x] Supabase 多租户 schema + RLS（**13 个 migration 全部上线**）
 - [x] 邮箱密码登录（chrome.storage 持久 session）+ 创建团队
+- [x] **团队成员管理 UI**（顶栏 👥 团队）：list / invite / 改角色 / 移除（仅 owner/admin）
+- [x] **Supabase 免费层防自动暂停**：0012 `pg_cron` 每日 03:00 UTC 写心跳到 `_keepalive` 表
 - [x] WhatsApp Web 内嵌顶部 **6 tab**（看板 / 聊天 / 客户 / 车源 / 任务 / 标签）+ 自动 shrink
 
 ### WhatsApp 集成
@@ -261,15 +316,16 @@ npm run build
 
 ### 客户管理
 - [x] **共享 ContactEditForm**：聊天 tab 卡片 + 客户 tab drawer **完全一致**（姓名/国家/语言/预算/目的港/⭐⭐⭐质量/完整 7 阶段/备注）
-- [x] **聊天 tab 右侧面板**：核心字段 + 标签 + 车辆兴趣 + 报价历史 + 任务 + 时间轴（drawer 同款全 sections）
+- [x] **聊天 tab 右侧面板**：tab 容器（客户资料 / AI 回复 / 历史消息），资料 tab 内含全 sections（标签/车辆/报价/任务/时间轴）
 - [x] **客户 tab**：列表 + 搜索/阶段筛选 + 每行 **💬 聊天按钮**（一键切到聊天 tab + WhatsApp 跳转）
 - [x] **任务 tab 看板化**：4 KPI 卡（今日/本周/累计待跟进/总数）+ 日历常驻（每天写客户名 + "+N" 溢出）+ 选中日详情列表
-- [x] **车源库**：vehicles 表 + 卡片网格 + 创建/编辑模态 + 筛选
+- [x] **车源库（Phase A 升级）**：vehicles 表 + 卡片网格 + 创建/编辑模态 + 筛选 + **阶梯价 (`pricing_tiers` JSONB)** + **Cloudinary 媒体管理（图片/视频/配置表）**
+- [x] **消息历史持久化**（"📜 历史消息"）：useMessageSync 自动 upsert 当前可见消息到 messages 表，wa_message_id 唯一去重，modal 加载最近 500 条
 - [x] **标签 tab**：列表 + 改名/合并/删除（内联确认替代 native confirm）
 - [x] **看板 tab**：周/月切换 + 6 KPI 卡 + 阶段漏斗 + 热门车型 Top 5
 
 ### 多维筛选系统
-- [x] **左侧 240px FilterSidebar**：5 维度（阶段 / 质量 / 区域 / 车型 / 预算）+ 今日待办
+- [x] **左侧 240px FilterSidebar**：5 维度（阶段 / 质量 / 区域 / 车型 / 预算）+ 今日待办（拆为 4 个文件：主件 + Primitives + MaintenancePanel + TodoList）
 - [x] **筛选条件持久化** + **不自动关闭** + **品牌可折叠**
 - [x] **车型规范化**：60+ 别名规则 + 噪音剥离 + 一键合并去重
 - [x] **品牌自动识别**：30+ 主流品牌 + 首词 fallback + 用户右键改组
@@ -292,10 +348,30 @@ npm run build
 - [x] **Gem 模板管理**（GemTemplatesModal）：用户在 gemini.google.com 自建的 Gem URL 录入，is_default 默认模板，CRUD + 顶栏 🤖 Gem 按钮 / 客户卡 "管理模板" 都能进
 - [x] **新客户 vs 老客户对话路由**：第一次发送用 template.gem_url 开新对话，Gem 返回的 chat URL 存到 gem_conversations，下次同一 (contact, template) 直接打开那个 URL 续聊（保留 Gem 上下文）
 - [x] **chrome.tabs 自动化**（gem-automation.ts）：后台/前台开关 → 创建 tab 加载 Gem URL → 等 ready → 注入脚本切换 Pro 模型（适配中文界面"快速/思考/Pro/Ultra"）→ 填 prompt + 点发送 → 等"停止生成"按钮消失（240s timeout）→ 取最终 chat URL → 关 tab；busy 单 flag 串行
-- [x] **响应解析**（gem-parser.ts）：拆 [Client Record] / [WhatsApp Reply] / [Translation] 三段，无标签时按 CJK 比例兜底
-- [x] **Reply card + 一键填入**（GemReplySection + whatsapp-compose.ts）：reply 显示成绿边卡，💬 按钮 paste 到 WhatsApp 输入框（不自动发送），不在当前聊天则先 jumpToChat
+- [x] **响应解析**（gem-parser.ts）：拆 [Client Record] / [WhatsApp Reply] / [Translation] 三段，无标签时按 CJK 比例兜底；`[WhatsApp Reply]` prompt 强制 2-4 段、段间空行
+- [x] **Reply card + 一键填入**（GemReplySection + whatsapp-compose.ts）：reply 显示成绿边卡，💬 按钮 paste 到 WhatsApp 输入框（保留换行：paste 事件优先，fallback 按行 execCommand），不自动发送，不在当前聊天则先 jumpToChat
 - [x] **[Client Record] 应用到客户资料**：差异化对比 + "应用 N 项" 按钮 → update contacts (country/language/budget_usd/destination_port/customer_stage/name) + upsert contact_tags + 写 ai_extracted 时间轴事件
 - [x] **续聊对话框**：done 状态下常驻 textarea，Cmd/Ctrl+Enter 发送，输入啥发啥（不加 [Sales Guidance] 前缀，自由对话），保留 Gem 上下文
+- [x] **指令草稿持久化**：每个 contact 有自己的指令 textarea，输入立即保存到 chrome.storage.local（按 contact_id 隔离），下次切回该客户自动恢复；非空时注入 prompt 顶部 `TOP PRIORITY` 段
+
+### 车源媒体库（Phase A）
+- [x] **Cloudinary 直传**（cloudinary.ts）：unsigned upload preset 无需后端签名；image / video / raw（PDF/Excel/Word）三种 resource_type，PDF/Excel 走 `/raw/upload/`
+- [x] **VehicleMediaManager**（车源 modal 内）：图片 / 视频 / 配置表 三 section，drag-drop 上传 → Cloudinary → 写 vehicle_media；删除按钮一并删 Cloudinary public_id（如有）
+- [x] **CloudinaryImg**（绕 WA CSP）：`<img src="res.cloudinary.com/...">` 在 web.whatsapp.com 被 CSP 拦；改 fetch → blob URL → object URL，WA 默认放行 blob: 协议；in-memory cache + inflight dedupe
+- [x] **阶梯价**（pricing_tiers JSONB 数组）：VehicleModal 编辑 + VehicleRecommendations 展示
+
+### AI 推荐车源（聊天 AI 回复 tab 顶部）
+- [x] **VehicleRecommendations**：根据当前客户的 vehicle_interests 模糊匹配 org 库存（canonicalizeModel）+ 卡片展示（含图册/视频/配置表预览）+ 阶梯价
+- [x] **一键发图/视频/PDF 到 WhatsApp**：从 Cloudinary fetch → File → pasteFilesToWhatsApp 注入到 WA 输入框，比手动找文件快得多
+- [x] **状态持久化**：选中车型 + 折叠态分别按 chrome.storage.local 存
+
+### 聊天媒体捕获 + 车源暂存盘（Phase C）
+- [x] **chat-media-capture.ts**（content script，1085 行）：MutationObserver + 轮询扫 message bubbles，给图片 / 视频 / 相册 / lightbox 注入 hover 📥 按钮
+- [x] **多选 toolbar "📥 加入车源"**：用户在 WA 多选 N 条消息（图片 / 视频 / PDF / Excel），点按钮 → SW 拦截 chrome.downloads（BULK_CAPTURE_ARM）→ 模拟点 WA 自带"下载" → 收 download URL/filename/mime → content fetch blob → 按 mime 自动归 image / video / spec
+- [x] **绕过 WA MediaSource 限制**：直接 `fetch(blob: video src)` 得 0 字节，所以视频走 WA 自带下载（真解码下载）而非 MediaRecorder
+- [x] **MediaStagingTray**（屏幕右下浮动暂存盘 Portal）：显示已捕获缩略图 + "📤 保存到车型"
+- [x] **AssignMediaToVehicleModal**：选已有车型 / 创建新车型（仅填 brand+model）→ 上传 Cloudinary + 批量插入 vehicle_media + 清空暂存
+- [x] **不持久化**：File 对象不能 serialize，blob URL 跨页面无效——刷新即清空（设计取舍）
 
 ### 其他
 - [x] **客户质量分级**：⭐⭐⭐ 大客户 / ⭐⭐ 有潜力（默认）/ ⭐ 普通 / 🗑 垃圾
@@ -318,8 +394,9 @@ npm run build
 
 ### 还可以做的（不急）
 
-- [ ] 聊天媒体捕获 Phase C 收尾：lightbox 边播边录视频已上 + 多选 toolbar 加 PDF/Excel/视频；如需更稳的视频抓取可调研 WA 内部 download API
-- [ ] 旧"已知问题"清理 + WA Web DOM/IDB schema 漂移监测
+- [ ] WA Web DOM / IDB schema 漂移自动监测（目前靠用户报告失效）
+- [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
+- [ ] Cloudinary 用量监控（25 GB/月免费），临近上限提醒
 
 ## Gem 配置流程（用户首次设置）
 
@@ -352,6 +429,10 @@ WhatsApp 绿色主题：
 - **Gem 模型切换**：通过遍历 `<button>` 找文字含"快速/思考/Pro/Flash/Advanced/Ultra"的按钮，文字 < 30 字符且 viewport 内可见，取最后一个（输入框旁那个）作为触发器；菜单 `[role="menuitem"]/[role="option"]` 里找含 "Pro|专业|高级|Advanced" 且不含 "Flash|快速" 的项点击
 - **Gem 自动化 busy 串行**：`busy` flag 在 service worker 内存里，SW 重启会重置——Gem 长任务期间持续调 chrome API 保活，正常 < 3min 不会休眠
 - **chat URL 持久**：Gemini 在第一次发送 prompt 后立刻分配固定 URL，即使中途出错关 tab，URL 也已经写到 `tab.url`，下次能续聊（只是当次 responseText 是截断的，需要重新生成）
+- **Cloudinary CSP**：在 web.whatsapp.com 直接 `<img src="res.cloudinary.com/...">` 会被 CSP 屏蔽——一律用 `CloudinaryImg` 走 fetch + blob URL；新加显示 Cloudinary 图的地方记得换成 CloudinaryImg
+- **WA MediaSource 视频**：blob: video src 是 MediaSource 流，直接 fetch 得 0 字节——视频抓取一律走 WA 自带"下载"按钮（chat-media-capture 的多选 toolbar 路径），SW 拦 chrome.downloads 转发回来
+- **chat-media-capture DOM 依赖**：lightbox 关闭按钮 `aria-label="关闭"`、下载按钮 `aria-label="下载"`、多选取消 `aria-label="取消选择"`、"已选 N 项" span 文案——WA 改 i18n 或 ARIA 时要修
+- **暂存盘不持久化**：刷新页面 / 切扩展 tab 即清空（File 对象不能 serialize），不是 bug 是设计
 
 ## 用户偏好
 
