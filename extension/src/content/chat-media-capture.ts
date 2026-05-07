@@ -137,18 +137,22 @@ function sleep(ms: number) {
 }
 
 /**
- * 找当前 lightbox 里显示的"大图"。WA lightbox 的大图 naturalWidth > 800（全清）。
- * 内联缩略图通常 < 600。
+ * 找当前 lightbox 里显示的"大图"。优先 naturalWidth >= 800（全清），否则取屏幕上面积最大的。
  */
 function findLightboxImage(): HTMLImageElement | null {
-  const candidates = Array.from(document.querySelectorAll('img'))
-    .filter(
-      (i): i is HTMLImageElement =>
-        i instanceof HTMLImageElement &&
-        i.src.startsWith('blob:') &&
-        i.naturalWidth >= 800,
-    );
-  // 取在 viewport 中、面积最大的（可能有缩略图条 224×168 也是 1400px 原始尺寸）
+  const allImgs = Array.from(document.querySelectorAll('img')).filter(
+    (i): i is HTMLImageElement =>
+      i instanceof HTMLImageElement && i.src.startsWith('blob:'),
+  );
+  // 先按 naturalWidth >= 800 筛选；找不到再退而求其次
+  let candidates = allImgs.filter((i) => i.naturalWidth >= 800);
+  if (candidates.length === 0) {
+    // 取屏幕显示面积最大的（lightbox 大图通常占屏一半以上）
+    candidates = allImgs.filter((i) => {
+      const r = i.getBoundingClientRect();
+      return r.width >= 300 && r.height >= 300;
+    });
+  }
   candidates.sort((a, b) => {
     const ar = a.getBoundingClientRect();
     const br = b.getBoundingClientRect();
@@ -159,17 +163,15 @@ function findLightboxImage(): HTMLImageElement | null {
 
 let lastLightboxState: boolean | null = null;
 function lightboxIsOpen(): boolean {
-  // WA 全屏图片/视频浏览器：找"下载"按钮 + 大图(naturalWidth>800) 或 视频
+  // 只用 WA 媒体浏览器特有的"下载"按钮判定 — 它只在全屏图片/视频浏览器里存在
   const hasDownload = !!document.querySelector(
     'button[aria-label="下载"], button[aria-label="Download"]',
   );
-  const hasBigMedia = !!findLightboxImage() || !!findLightboxVideo();
-  const open = hasDownload && hasBigMedia;
-  if (open !== lastLightboxState) {
-    console.log(`[sgc] lightbox state -> ${open ? 'OPEN' : 'closed'} (download=${hasDownload}, bigMedia=${hasBigMedia})`);
-    lastLightboxState = open;
+  if (hasDownload !== lastLightboxState) {
+    console.log(`[sgc] lightbox state -> ${hasDownload ? 'OPEN' : 'closed'}`);
+    lastLightboxState = hasDownload;
   }
-  return open;
+  return hasDownload;
 }
 
 async function closeLightbox() {
@@ -193,26 +195,21 @@ async function closeLightbox() {
 }
 
 /**
- * 找 lightbox 里当前显示的视频元素（如果是视频消息）。
- * lightbox 视频有 <video> 元素 + blob: src 或 src starts with media URL。
+ * 找 lightbox 里当前显示的视频元素。
+ * lightbox 打开时 <video> 元素几乎肯定就是它。取屏幕上最大的 <video>。
  */
 function findLightboxVideo(): HTMLVideoElement | null {
-  // lightbox 容器（关闭按钮的祖先）
-  const closeBtn = document.querySelector('button[aria-label="关闭"]');
-  if (!closeBtn) return null;
-  let scope: Element | null = closeBtn;
-  for (let i = 0; i < 12 && scope; i++) {
-    if (
-      scope.querySelector &&
-      scope.querySelector('button[aria-label="下一步"], button[aria-label="上一步"]')
-    ) {
-      break;
-    }
-    scope = scope.parentElement;
-  }
-  if (!scope) return null;
-  const v = scope.querySelector('video');
-  return v instanceof HTMLVideoElement ? v : null;
+  const videos = Array.from(document.querySelectorAll('video')).filter(
+    (v): v is HTMLVideoElement => v instanceof HTMLVideoElement,
+  );
+  if (videos.length === 0) return null;
+  // 优先有 src + 屏幕显示尺寸大
+  videos.sort((a, b) => {
+    const ar = a.getBoundingClientRect();
+    const br = b.getBoundingClientRect();
+    return br.width * br.height - ar.width * ar.height;
+  });
+  return videos[0];
 }
 
 /**
