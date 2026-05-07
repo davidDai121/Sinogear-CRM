@@ -96,27 +96,46 @@ async function captureImg(img: HTMLImageElement): Promise<boolean> {
  * 捕获一个 <video>（取 src 或 poster）。
  * 优先抓视频本体；抓不到就抓 poster 作为图片。
  */
-async function captureVideo(video: HTMLVideoElement): Promise<boolean> {
+async function captureVideo(
+  video: HTMLVideoElement,
+  onProgress?: (msg: string) => void,
+): Promise<boolean> {
   const phone = readCurrentChat().phone;
   if (video.src) {
+    // 1. 试直接 fetch — 老 WA 或某些视频可能可行
     try {
       const filename = `whatsapp_${ts()}_${Math.random().toString(36).slice(2, 6)}.mp4`;
       const file = await urlToFile(video.src, filename, 'video/mp4');
-      // WA 用 MediaSource 流式播放，blob: URL 实际不可 fetch — 会得到 0 字节
-      if (file.size === 0) {
-        console.warn('[sgc] video src is MediaSource (streaming), cannot extract bytes:', video.src);
-        return false;
+      if (file.size > 0) {
+        addCaptured({
+          file,
+          thumbDataUrl: video.poster || null,
+          kind: 'video',
+          sourceContactPhone: phone,
+        });
+        return true;
       }
-      addCaptured({
-        file,
-        thumbDataUrl: video.poster || null,
-        kind: 'video',
-        sourceContactPhone: phone,
-      });
-      return true;
+      console.log('[sgc] direct fetch returned 0 bytes (MediaSource), trying MediaRecorder fallback...');
     } catch (e) {
-      console.warn('[sgc] capture video failed', e);
+      console.warn('[sgc] direct fetch failed, trying MediaRecorder', e);
     }
+
+    // 2. MediaRecorder 边播边录（slow but works）
+    try {
+      const file = await recordVideoPlayback(video, onProgress);
+      if (file && file.size > 0) {
+        addCaptured({
+          file,
+          thumbDataUrl: video.poster || null,
+          kind: 'video',
+          sourceContactPhone: phone,
+        });
+        return true;
+      }
+    } catch (e) {
+      console.error('[sgc] MediaRecorder failed', e);
+    }
+    return false;
   }
   // 至少抓 poster 当图片
   if (video.poster) {
@@ -139,6 +158,146 @@ async function captureVideo(video: HTMLVideoElement): Promise<boolean> {
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 边播边录：用 video.captureStream() + MediaRecorder 录 webm。
+ * 用于 WA MediaSource 流（直接 fetch 得 0 字节的情况）。
+ *
+ * 副作用：会把 video seek 到 0、静音播放一遍。结束后还原 muted 状态，
+ * paused 状态如果原来是 paused 则 pause 回去。
+ */
+type CaptureStreamVideo = HTMLVideoElement & {
+  captureStream?: () => MediaStream;
+  mozCaptureStream?: () => MediaStream;
+};
+
+async function recordVideoPlayback(
+  video: HTMLVideoElement,
+  onProgress?: (msg: string) => void,
+): Promise<File | null> {
+  // 等 metadata（拿 duration）
+  if (video.readyState < 1) {
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        video.removeEventListener('loadedmetadata', onLoaded);
+        video.removeEventListener('error', onError);
+      };
+      const onLoaded = () => { cleanup(); resolve(); };
+      const onError = () => { cleanup(); reject(new Error('video error before metadata')); };
+      video.addEventListener('loadedmetadata', onLoaded);
+      video.addEventListener('error', onError);
+      setTimeout(() => { cleanup(); reject(new Error('metadata timeout 8s')); }, 8000);
+    });
+  }
+
+  const duration = video.duration;
+  if (!isFinite(duration) || duration <= 0) {
+    throw new Error(`bad duration: ${duration}`);
+  }
+  if (duration > 300) {
+    throw new Error(`视频太长 ${Math.round(duration)}s，跳过录制`);
+  }
+
+  const cs = video as CaptureStreamVideo;
+  const stream = cs.captureStream?.() ?? cs.mozCaptureStream?.();
+  if (!stream) throw new Error('captureStream not supported');
+
+  const mimeCandidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  const mime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m));
+  if (!mime) throw new Error('no supported webm MediaRecorder mime');
+
+  const recorder = new MediaRecorder(stream, {
+    mimeType: mime,
+    videoBitsPerSecond: 2_500_000,
+  });
+  const chunks: Blob[] = [];
+  recorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) chunks.push(e.data);
+  };
+
+  const wasPaused = video.paused;
+  const wasMuted = video.muted;
+  video.muted = true; // 录制期间不打扰用户
+
+  // 回到开头（即使部分播过）
+  try { video.currentTime = 0; } catch {}
+  await new Promise<void>((resolve) => {
+    if (video.currentTime <= 0.05) return resolve();
+    const onSeeked = () => { video.removeEventListener('seeked', onSeeked); resolve(); };
+    video.addEventListener('seeked', onSeeked);
+    setTimeout(resolve, 1000);
+  });
+
+  recorder.start(500);
+
+  let progressTimer: number | null = null;
+  if (onProgress) {
+    onProgress(`录制中 0% (0/${Math.round(duration)}s)`);
+    progressTimer = window.setInterval(() => {
+      const pct = Math.min(100, Math.round((video.currentTime / duration) * 100));
+      onProgress(`录制中 ${pct}% (${Math.round(video.currentTime)}/${Math.round(duration)}s)`);
+    }, 500);
+  }
+
+  try {
+    await video.play();
+  } catch (e) {
+    if (progressTimer != null) clearInterval(progressTimer);
+    try { recorder.stop(); } catch {}
+    video.muted = wasMuted;
+    throw new Error(`video.play() 失败: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 等播完（或超时 = duration + 5s 兜底）
+  await new Promise<void>((resolve) => {
+    const cleanup = () => {
+      video.removeEventListener('ended', onEnded);
+      video.removeEventListener('pause', onPause);
+    };
+    const onEnded = () => { cleanup(); resolve(); };
+    // 用户中途暂停 / lightbox 关掉了 → 停止录制
+    const onPause = () => {
+      if (video.currentTime >= duration - 0.2) { cleanup(); resolve(); return; }
+      // 短暂停后能继续就忽略，否则 600ms 后认为是真停了
+      setTimeout(() => {
+        if (video.paused && video.currentTime < duration - 0.2) {
+          cleanup();
+          resolve();
+        }
+      }, 600);
+    };
+    video.addEventListener('ended', onEnded);
+    video.addEventListener('pause', onPause);
+    setTimeout(() => { cleanup(); resolve(); }, (duration + 5) * 1000);
+  });
+
+  if (progressTimer != null) clearInterval(progressTimer);
+
+  await new Promise<void>((resolve) => {
+    if (recorder.state === 'inactive') return resolve();
+    recorder.onstop = () => resolve();
+    try { recorder.stop(); } catch { resolve(); }
+  });
+
+  // 还原状态
+  video.muted = wasMuted;
+  if (wasPaused && !video.paused) {
+    try { video.pause(); } catch {}
+  }
+
+  if (chunks.length === 0) return null;
+  const blob = new Blob(chunks, { type: mime });
+  if (blob.size === 0) return null;
+
+  const filename = `whatsapp_${ts()}_${Math.random().toString(36).slice(2, 6)}.webm`;
+  return new File([blob], filename, { type: mime });
 }
 
 /**
@@ -716,10 +875,12 @@ function injectLightboxButton() {
         if (!video.src) {
           detail = '视频还没加载（点播放后再试）';
         } else {
-          ok = await captureVideo(video);
+          ok = await captureVideo(video, (msg) => {
+            btn.textContent = msg;
+          });
           detail = ok
             ? '✓ 视频已加'
-            : '❌ WA 视频流式不可抓 — 请用 WA 自带下载';
+            : '❌ 视频抓不到（试试点播放后再来）';
         }
       } else if (img) {
         ok = await captureImg(img);
