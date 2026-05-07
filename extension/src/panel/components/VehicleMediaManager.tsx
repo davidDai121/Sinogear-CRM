@@ -26,8 +26,8 @@ const SECTIONS: { type: VehicleMediaType; label: string; accept: string; hint: s
   {
     type: 'spec',
     label: '配置表',
-    accept: 'image/*,application/pdf,.pdf,.xlsx,.xls,.doc,.docx',
-    hint: 'PDF / Excel / Word / 截图',
+    accept: '*/*',
+    hint: 'PDF / Excel / Word / PPT / HTML / 截图 / 其他任意文件',
   },
 ];
 

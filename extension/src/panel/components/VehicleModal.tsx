@@ -59,6 +59,7 @@ export function VehicleModal({ orgId, vehicle, onClose, onSaved }: Props) {
   const [tiers, setTiers] = useState<DraftTier[]>(tiersFromRow(vehicle));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const cloudinaryReady = isCloudinaryConfigured();
 
@@ -122,6 +123,25 @@ export function VehicleModal({ orgId, vehicle, onClose, onSaved }: Props) {
     setBusy(false);
     onSaved();
     // 不自动关闭 — 留着让用户上传媒体；用户点 "完成" 关闭
+  };
+
+  const handleDelete = async () => {
+    if (!editingVehicle) return;
+    setBusy(true);
+    setError(null);
+    // 先删车源关联的 media（外键级联应该会处理，但保险起见手动删；vehicle_tags / vehicle_interests 引用也是 cascade）
+    const { error: dErr } = await supabase
+      .from('vehicles')
+      .delete()
+      .eq('id', editingVehicle.id);
+    setBusy(false);
+    if (dErr) {
+      setError(`删除失败：${dErr.message}`);
+      setConfirmDelete(false);
+      return;
+    }
+    onSaved();
+    onClose();
   };
 
   // ---- pricing tier ops ----
@@ -335,16 +355,55 @@ export function VehicleModal({ orgId, vehicle, onClose, onSaved }: Props) {
           {error && <div className="sgc-error">{error}</div>}
 
           <div className="sgc-modal-actions">
-            <button type="button" className="sgc-btn-link" onClick={onClose}>
-              {editingVehicle ? '完成' : '取消'}
-            </button>
-            <button
-              type="submit"
-              className="sgc-btn-primary"
-              disabled={busy || !draft.brand.trim() || !draft.model.trim()}
-            >
-              {busy ? '保存中…' : editingVehicle ? '保存' : '创建'}
-            </button>
+            {editingVehicle && (
+              confirmDelete ? (
+                <>
+                  <span className="sgc-muted" style={{ marginRight: 'auto', fontSize: 12 }}>
+                    删除车源 + 关联媒体记录，不可恢复
+                  </span>
+                  <button
+                    type="button"
+                    className="sgc-btn-secondary sgc-btn-danger-bg"
+                    onClick={handleDelete}
+                    disabled={busy}
+                  >
+                    {busy ? '删除中…' : '确认删除'}
+                  </button>
+                  <button
+                    type="button"
+                    className="sgc-btn-link"
+                    onClick={() => setConfirmDelete(false)}
+                    disabled={busy}
+                  >
+                    取消
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="sgc-btn-link sgc-btn-danger-link"
+                  style={{ marginRight: 'auto' }}
+                  onClick={() => setConfirmDelete(true)}
+                  disabled={busy}
+                >
+                  🗑 删除车源
+                </button>
+              )
+            )}
+            {!confirmDelete && (
+              <>
+                <button type="button" className="sgc-btn-link" onClick={onClose}>
+                  {editingVehicle ? '完成' : '取消'}
+                </button>
+                <button
+                  type="submit"
+                  className="sgc-btn-primary"
+                  disabled={busy || !draft.brand.trim() || !draft.model.trim()}
+                >
+                  {busy ? '保存中…' : editingVehicle ? '保存' : '创建'}
+                </button>
+              </>
+            )}
           </div>
         </form>
 
