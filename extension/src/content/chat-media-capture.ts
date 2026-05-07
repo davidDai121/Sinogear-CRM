@@ -476,6 +476,21 @@ async function captureSelectedFromMultiSelect(): Promise<number> {
   console.log('[sgc] captureSelectedFromMultiSelect: start');
   const checked = document.querySelectorAll('input[type="checkbox"]:checked');
   console.log('[sgc] checked count =', checked.length);
+
+  // 收集 data-id（cancel 多选后 row 引用会失效，必须用 data-id 重查）
+  const dataIds: string[] = [];
+  for (const cb of Array.from(checked)) {
+    let cur: Element | null = cb.closest('[role="row"]') || cb.parentElement;
+    let id: string | null = null;
+    for (let i = 0; cur && i < 12; i++) {
+      const dataId = cur.querySelector?.('[data-id]')?.getAttribute('data-id');
+      if (dataId) { id = dataId; break; }
+      if (cur.getAttribute && cur.getAttribute('data-id')) { id = cur.getAttribute('data-id'); break; }
+      cur = cur.parentElement;
+    }
+    if (id && !dataIds.includes(id)) dataIds.push(id);
+  }
+  console.log('[sgc] data-ids collected:', dataIds);
   // 收集所有被选中的 row，以及每个 row 里第一张图（用于打开 lightbox）。
   // 注意：一旦我们 click 第一张图开 lightbox，多选模式可能会被 WA 取消（点图片会触发 select toggle）。
   // 解决方案：先收集 row references → 退出多选模式（点取消选择）→ 然后逐个 row 点首图开 lightbox 抓取。
@@ -485,8 +500,8 @@ async function captureSelectedFromMultiSelect(): Promise<number> {
     const row = cb.closest('[role="row"]');
     if (row && !rows.includes(row)) rows.push(row);
   }
-  console.log('[sgc] rows collected =', rows.length);
-  if (rows.length === 0) return 0;
+  console.log('[sgc] rows collected =', rows.length, '(reference 仅用于 fallback)');
+  if (rows.length === 0 && dataIds.length === 0) return 0;
 
   // 退出多选模式（不然 click 图片会被 toggle 选择，不会开 lightbox）
   const cancelBtn = document.querySelector(
@@ -495,12 +510,30 @@ async function captureSelectedFromMultiSelect(): Promise<number> {
   console.log('[sgc] cancel btn?', !!cancelBtn);
   if (cancelBtn) {
     cancelBtn.click();
-    await sleep(400);
+    await sleep(600); // 等 WA re-render
   }
 
   let ok = 0;
-  for (let idx = 0; idx < rows.length; idx++) {
-    const row = rows[idx];
+  // 优先用 data-id 重新查 DOM（避免 stale reference）
+  const rowsToProcess: Element[] = [];
+  for (const id of dataIds) {
+    const fresh = document.querySelector(`[data-id="${CSS.escape(id)}"]`);
+    if (fresh) {
+      // 取最近 [role=row] 包装层（更全面的容器）
+      const wrapper = fresh.closest('[role="row"]') || fresh;
+      rowsToProcess.push(wrapper);
+    } else {
+      console.warn(`[sgc] row gone after cancel: ${id}`);
+    }
+  }
+  // fallback：如果没拿到 data-id，用旧 row 引用（可能是 stale）
+  if (rowsToProcess.length === 0) {
+    rowsToProcess.push(...rows);
+  }
+  console.log('[sgc] rows to process after re-query =', rowsToProcess.length);
+
+  for (let idx = 0; idx < rowsToProcess.length; idx++) {
+    const row = rowsToProcess[idx];
     const inlineVideos = Array.from(row.querySelectorAll('video')).filter(
       (v): v is HTMLVideoElement =>
         v instanceof HTMLVideoElement && Boolean(v.src),
