@@ -163,15 +163,43 @@ function findLightboxImage(): HTMLImageElement | null {
 
 let lastLightboxState: boolean | null = null;
 function lightboxIsOpen(): boolean {
-  // 只用 WA 媒体浏览器特有的"下载"按钮判定 — 它只在全屏图片/视频浏览器里存在
+  // 多重判定：close + (download OR 上下步 OR 大视频/大图)
+  const hasClose = !!document.querySelector(
+    'button[aria-label="关闭"], button[aria-label="Close"]',
+  );
+  if (!hasClose) {
+    if (lastLightboxState !== false) {
+      console.log('[sgc] lightbox -> closed (no close btn)');
+      lastLightboxState = false;
+    }
+    return false;
+  }
   const hasDownload = !!document.querySelector(
     'button[aria-label="下载"], button[aria-label="Download"]',
   );
-  if (hasDownload !== lastLightboxState) {
-    console.log(`[sgc] lightbox state -> ${hasDownload ? 'OPEN' : 'closed'}`);
-    lastLightboxState = hasDownload;
+  const hasNav = !!document.querySelector(
+    'button[aria-label="下一步"], button[aria-label="上一步"], button[aria-label="Next"], button[aria-label="Previous"]',
+  );
+  // 屏幕中央有大视频/大图（>=300px）
+  const bigVideos = Array.from(document.querySelectorAll('video')).filter(
+    (v) => v.getBoundingClientRect().width >= 300,
+  );
+  const bigImgs = Array.from(document.querySelectorAll('img')).filter(
+    (i): i is HTMLImageElement =>
+      i instanceof HTMLImageElement &&
+      i.src.startsWith('blob:') &&
+      i.getBoundingClientRect().width >= 300,
+  );
+  const hasBig = bigVideos.length > 0 || bigImgs.length > 0;
+  // close 是必要的；其他三个任一即可
+  const open = hasClose && (hasDownload || hasNav || hasBig);
+  if (open !== lastLightboxState) {
+    console.log(
+      `[sgc] lightbox state -> ${open ? 'OPEN' : 'closed'} (close=${hasClose}, dl=${hasDownload}, nav=${hasNav}, big=${hasBig} v=${bigVideos.length} i=${bigImgs.length})`,
+    );
+    lastLightboxState = open;
   }
-  return hasDownload;
+  return open;
 }
 
 async function closeLightbox() {
