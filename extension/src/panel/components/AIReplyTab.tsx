@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Database } from '@/lib/database.types';
 import { TranslateReplyPanel } from './TranslateReplyPanel';
 import { GemReplySection } from './GemReplySection';
+import { VehicleRecommendations } from './VehicleRecommendations';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 
@@ -40,6 +41,8 @@ export function AIReplyTab({ orgId, contact, needsJump }: Props) {
 
   return (
     <div className="sgc-ai-reply-tab">
+      <VehicleRecommendations orgId={orgId} contactId={contact.id} />
+
       <div className="sgc-ai-mode-row">
         <label>
           <span className="sgc-muted">模式</span>
