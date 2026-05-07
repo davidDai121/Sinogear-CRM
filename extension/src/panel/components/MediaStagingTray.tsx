@@ -81,13 +81,18 @@ export function MediaStagingTray({ orgId }: Props) {
 }
 
 function TrayItem({ item }: { item: CapturedMedia }) {
+  const ext =
+    item.kind === 'spec'
+      ? item.file.name.match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toUpperCase() ?? 'FILE'
+      : null;
   return (
-    <div className="sgc-tray-item">
+    <div className="sgc-tray-item" title={item.file.name}>
       {item.thumbDataUrl ? (
         <img src={item.thumbDataUrl} alt="" />
       ) : (
         <div className="sgc-tray-doc">
           {item.kind === 'video' ? '🎬' : '📄'}
+          {ext && <span className="sgc-tray-ext">{ext}</span>}
         </div>
       )}
       {item.kind === 'video' && <span className="sgc-tray-play">▶</span>}

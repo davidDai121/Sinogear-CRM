@@ -97,8 +97,81 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return false;
   }
 
+  if (msg?.type === 'BULK_CAPTURE_ARM') {
+    const tabId = _sender.tab?.id;
+    if (typeof tabId === 'number') {
+      bulkArmed = { tabId, armedAt: Date.now() };
+      // 兜底：60s 没收到 disarm 就自动关掉，避免长期挂起
+      setTimeout(() => {
+        if (bulkArmed && Date.now() - bulkArmed.armedAt >= 59000) {
+          console.log('[sgc/sw] bulk capture timeout, auto-disarm');
+          bulkArmed = null;
+        }
+      }, 60000);
+      sendResponse({ ok: true });
+    } else {
+      sendResponse({ ok: false, error: '无 tab' });
+    }
+    return false;
+  }
+
+  if (msg?.type === 'BULK_CAPTURE_DISARM') {
+    bulkArmed = null;
+    sendResponse({ ok: true });
+    return false;
+  }
+
   return false;
 });
+
+// ---- 媒体批量抓取：拦截 WA 触发的 chrome.downloads ----
+// 用户点扩展的"📥 加入车源"工具栏按钮 →
+//   content script 调 BULK_CAPTURE_ARM → 模拟点 WA 原生"下载"按钮 →
+//   每个下载触发 onCreated → SW 立刻取消 + 把 url/filename/mime 发回 content →
+//   content fetch(url) 拿 blob → 按 mime 分到 image/video/spec → 进 tray
+// 完成后 content 调 BULK_CAPTURE_DISARM 关闭拦截。
+let bulkArmed: { tabId: number; armedAt: number } | null = null;
+
+if (chrome.downloads?.onCreated) {
+  chrome.downloads.onCreated.addListener((item) => {
+    if (!bulkArmed) return;
+    if (Date.now() - bulkArmed.armedAt > 60000) {
+      bulkArmed = null;
+      return;
+    }
+    const { tabId } = bulkArmed;
+
+    // 完整记录 onCreated 拿到了啥（debug 看 zip 还是单文件）
+    console.log('[sgc/sw] downloads.onCreated:', {
+      id: item.id,
+      url: item.url,
+      finalUrl: item.finalUrl,
+      filename: item.filename,
+      mime: item.mime,
+      totalBytes: item.totalBytes,
+      referrer: item.referrer,
+    });
+
+    const url = item.url || item.finalUrl || '';
+    const filename = (item.filename || '').split(/[\\/]/).pop() || '';
+    const mime = item.mime || '';
+
+    // 立刻取消，避免真的写到磁盘
+    void chrome.downloads
+      .cancel(item.id)
+      .catch(() => undefined)
+      .then(() => chrome.downloads.erase({ id: item.id }).catch(() => undefined));
+
+    void chrome.tabs
+      .sendMessage(tabId, {
+        type: 'BULK_CAPTURE_DOWNLOAD',
+        url,
+        filename,
+        mime,
+      })
+      .catch(() => undefined);
+  });
+}
 
 interface GemRunRequest {
   type: 'GEM_RUN';

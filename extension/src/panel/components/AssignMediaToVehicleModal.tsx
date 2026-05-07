@@ -29,7 +29,7 @@ export function AssignMediaToVehicleModal({ orgId, items, onClose }: Props) {
   const [newModel, setNewModel] = useState('');
   const [perItemType, setPerItemType] = useState<Record<string, VehicleMediaType>>(() => {
     const init: Record<string, VehicleMediaType> = {};
-    for (const it of items) init[it.id] = it.kind === 'video' ? 'video' : 'image';
+    for (const it of items) init[it.id] = it.kind;
     return init;
   });
   const [busy, setBusy] = useState(false);
@@ -135,7 +135,7 @@ export function AssignMediaToVehicleModal({ orgId, items, onClose }: Props) {
     const succeeded: string[] = [];
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      const targetType = perItemType[it.id] ?? (it.kind === 'video' ? 'video' : 'image');
+      const targetType = perItemType[it.id] ?? it.kind;
       try {
         const result = await uploadToCloudinary(it.file, targetType);
         const { error } = await supabase.from('vehicle_media').insert({

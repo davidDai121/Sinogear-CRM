@@ -3440,30 +3440,52 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
   background: #1976d2;
 }
 
-.sgc-mc-lightbox-btn {
-  position: fixed !important;
-  top: 16px !important;
-  left: 50% !important;
-  right: auto !important;
-  bottom: auto !important;
+.sgc-mc-doc-btn {
+  /* 文档气泡按钮：右上角，紫色区分图片绿/相册蓝 */
+  background: rgba(123, 31, 162, 0.92);
+}
+
+.sgc-mc-doc-btn:hover {
+  background: #6a1b9a;
+}
+
+.sgc-mc-lightbox-wrap {
+  position: fixed;
+  top: 16px;
+  left: 50%;
   transform: translateX(-50%);
-  font-size: 14px;
-  padding: 10px 24px;
-  border-radius: 24px;
+  display: flex;
+  gap: 10px;
   z-index: 2147483647;
+}
+
+.sgc-mc-lightbox-btn {
+  position: static !important;
+  font-size: 14px;
+  padding: 10px 22px;
+  border-radius: 24px;
   opacity: 1 !important;
-  background: #00a884;
   color: #fff;
   border: 2px solid #fff;
   cursor: pointer;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   font-weight: 700;
-  min-width: 200px;
+  min-width: 180px;
   text-align: center;
 }
 
-.sgc-mc-lightbox-btn:hover {
+.sgc-mc-lightbox-btn-img {
+  background: #00a884;
+}
+.sgc-mc-lightbox-btn-img:hover {
   background: #008f6f;
+}
+
+.sgc-mc-lightbox-btn-spec {
+  background: #7b1fa2;
+}
+.sgc-mc-lightbox-btn-spec:hover {
+  background: #6a1b9a;
 }
 
 .sgc-mc-lightbox-btn:disabled {
@@ -3590,9 +3612,18 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
   width: 100%;
   height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  font-size: 24px;
+  font-size: 22px;
+  gap: 2px;
+}
+
+.sgc-tray-ext {
+  font-size: 9px;
+  font-weight: 700;
+  color: #667781;
+  letter-spacing: 0.5px;
 }
 
 .sgc-tray-play {
