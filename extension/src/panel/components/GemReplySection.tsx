@@ -49,6 +49,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
   const [showTemplates, setShowTemplates] = useState(false);
   const [followup, setFollowup] = useState('');
+  const [followupLoaded, setFollowupLoaded] = useState(false);
 
   // Load foreground preference
   useEffect(() => {
@@ -56,6 +57,26 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
       setForeground(Boolean(s.gemForeground));
     });
   }, []);
+
+  // 每个客户独立存草稿；切 tab / 失败 / 切客户回来都能拿回输入
+  const guidanceKey = `gemGuidance:${contact.id}`;
+  useEffect(() => {
+    setFollowupLoaded(false);
+    void chrome.storage.local.get(guidanceKey).then((s) => {
+      const saved = typeof s[guidanceKey] === 'string' ? (s[guidanceKey] as string) : '';
+      setFollowup(saved);
+      setFollowupLoaded(true);
+    });
+  }, [guidanceKey]);
+
+  useEffect(() => {
+    if (!followupLoaded) return;
+    if (followup) {
+      void chrome.storage.local.set({ [guidanceKey]: followup });
+    } else {
+      void chrome.storage.local.remove(guidanceKey);
+    }
+  }, [followup, followupLoaded, guidanceKey]);
 
   const refreshTemplates = async () => {
     const { data } = await supabase
