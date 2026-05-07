@@ -3441,16 +3441,31 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
 }
 
 .sgc-mc-lightbox-btn {
-  position: fixed;
-  top: 16px;
-  right: 80px;
+  position: fixed !important;
+  top: 16px !important;
+  right: 80px !important;
+  left: auto !important;
+  bottom: auto !important;
   font-size: 13px;
   padding: 8px 16px;
   border-radius: 20px;
-  z-index: 9999;
-  opacity: 1;
+  z-index: 2147483647;
+  opacity: 1 !important;
   background: #00a884;
+  color: #fff;
+  border: none;
+  cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  font-weight: 600;
+}
+
+.sgc-mc-lightbox-btn:hover {
+  background: #008f6f;
+}
+
+.sgc-mc-lightbox-btn:disabled {
+  opacity: 0.7 !important;
+  cursor: wait;
 }
 
 .sgc-mc-toolbar-btn {

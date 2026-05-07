@@ -525,30 +525,40 @@ async function captureSelectedFromMultiSelect(): Promise<number> {
   // 用 data-id 重新查 DOM；WA 用虚拟滚动 + 懒加载，需要 scrollIntoView 触发渲染
   const rowsToProcess: Element[] = [];
   for (const id of dataIds) {
+    console.log(`[sgc] re-query for data-id ${id}`);
     let row: Element | null = null;
-    // 6 次 × 500ms = 3s 轮询，等媒体加载
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const fresh = document.querySelector(`[data-id="${CSS.escape(id)}"]`);
-      if (fresh) {
-        const wrapper = fresh.closest('[role="row"]') || fresh;
-        // 第 1 次找到就 scroll 进视口触发懒加载
-        if (attempt === 0) {
-          (fresh as HTMLElement).scrollIntoView({ block: 'center' });
+    try {
+      // 6 次 × 500ms = 3s 轮询，等媒体加载
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const sel = `[data-id="${CSS.escape(id)}"]`;
+        const fresh = document.querySelector(sel);
+        const found = !!fresh;
+        const inWrapper = fresh?.closest('[role="row"]');
+        const imgInWrapper = inWrapper?.querySelectorAll('img').length ?? 0;
+        const vidInWrapper = inWrapper?.querySelectorAll('video').length ?? 0;
+        console.log(`[sgc]   attempt ${attempt + 1}: found=${found} img=${imgInWrapper} video=${vidInWrapper}`);
+
+        if (fresh) {
+          const wrapper = inWrapper || fresh;
+          if (attempt === 0) {
+            try {
+              (fresh as HTMLElement).scrollIntoView({ block: 'center' });
+              console.log(`[sgc]   scrolled into view`);
+            } catch (e) { console.warn('[sgc] scrollIntoView err:', e); }
+          }
+          if (wrapper.querySelector('img, video')) {
+            row = wrapper;
+            console.log(`[sgc]   ✓ found media on attempt ${attempt + 1}`);
+            break;
+          }
         }
-        // 任意 img/video 即可（不要求 blob: src，因为视频未播放时只有 poster img）
-        if (wrapper.querySelector('img, video')) {
-          row = wrapper;
-          console.log(`[sgc] data-id ${id.slice(-8)}: found media on attempt ${attempt + 1}`);
-          break;
-        }
+        await sleep(500);
       }
-      await sleep(500);
+    } catch (e) {
+      console.error('[sgc] re-query error for', id, e);
     }
-    if (row) {
-      rowsToProcess.push(row);
-    } else {
-      console.warn(`[sgc] data-id ${id.slice(-8)}: no media after 3s wait`);
-    }
+    if (row) rowsToProcess.push(row);
+    else console.warn(`[sgc] data-id ${id}: no media after 3s wait`);
   }
   // fallback：如果没拿到 data-id，用旧 row 引用（可能是 stale）
   if (rowsToProcess.length === 0) {
@@ -626,38 +636,49 @@ function injectMultiSelectToolbarButton() {
 }
 
 /**
- * 大屏图片浏览器（用户点开图片后）的全屏覆盖层 — 让用户手动捕获被隐藏的图。
+ * WA 全屏媒体浏览器（用户点开图片/视频后）— 浮动 "📥 抓这张" 按钮。
+ * 用 body 直接子元素 + position:fixed，跟随 lightbox 状态自动显示/隐藏。
  */
+const LIGHTBOX_BTN_ID = 'sgc-mc-lightbox-floating';
+
 function injectLightboxButton() {
-  // 浏览器层一般在 body 直接子元素，class / role 不固定，找显眼的全屏 fixed 层
-  const overlays = document.querySelectorAll('[role="dialog"], [data-animate-modal-popup]');
-  overlays.forEach((overlay) => {
-    if (overlay.getAttribute(BTN_INJECTED_ATTR) === '1') return;
-    const img = overlay.querySelector('img');
-    const video = overlay.querySelector('video');
-    if (!img && !video) return;
-    overlay.setAttribute(BTN_INJECTED_ATTR, '1');
+  const existing = document.getElementById(LIGHTBOX_BTN_ID) as HTMLButtonElement | null;
+  const isOpen = lightboxIsOpen();
 
-    const host = overlay as HTMLElement;
-    if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+  if (!isOpen) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (existing) return; // 已注入
 
-    const btn = document.createElement('button');
-    btn.className = `${BTN_CLASS} sgc-mc-lightbox-btn`;
-    btn.textContent = '📥 抓这张';
-    btn.title = '把当前查看的图片/视频加入车源暂存';
-    btn.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const curImg = overlay.querySelector('img');
-      const curVid = overlay.querySelector('video');
-      if (curImg instanceof HTMLImageElement) {
-        void captureImg(curImg).then(() => flashButton(host, '✓ 已加'));
-      } else if (curVid instanceof HTMLVideoElement) {
-        void captureVideo(curVid).then(() => flashButton(host, '✓ 已加'));
+  const btn = document.createElement('button');
+  btn.id = LIGHTBOX_BTN_ID;
+  btn.className = `${BTN_CLASS} sgc-mc-lightbox-btn`;
+  btn.textContent = '📥 抓这张';
+  btn.title = '把当前查看的图片/视频加入车源暂存';
+  btn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    btn.disabled = true;
+    btn.textContent = '抓取中…';
+    let ok = false;
+    const img = findLightboxImage();
+    const video = findLightboxVideo();
+    if (img) {
+      ok = await captureImg(img);
+    } else if (video && video.src) {
+      ok = await captureVideo(video);
+    }
+    btn.textContent = ok ? '✓ 已加' : '❌ 抓不到';
+    setTimeout(() => {
+      // 如果 lightbox 还开着 reset；否则自然消失（下次 scan 移除）
+      if (document.getElementById(LIGHTBOX_BTN_ID) === btn) {
+        btn.textContent = '📥 抓这张';
+        btn.disabled = false;
       }
-    });
-    host.appendChild(btn);
+    }, 1800);
   });
+  document.body.appendChild(btn);
 }
 
 function flashButton(host: HTMLElement, msg = '✓ 已加') {
