@@ -165,18 +165,6 @@ function lightboxIsOpen(): boolean {
   );
 }
 
-async function waitForLightbox(timeoutMs = 3000): Promise<HTMLImageElement | null> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (lightboxIsOpen()) {
-      const img = findLightboxImage();
-      if (img && img.naturalWidth > 0) return img;
-    }
-    await sleep(150);
-  }
-  return null;
-}
-
 async function closeLightbox() {
   const closeBtn = document.querySelector(
     'button[aria-label="关闭"]',
@@ -198,20 +186,56 @@ async function closeLightbox() {
 }
 
 /**
- * 通过 WA lightbox 抓取消息里所有图片（全清版，包括 +N 隐藏的）。
+ * 找 lightbox 里当前显示的视频元素（如果是视频消息）。
+ * lightbox 视频有 <video> 元素 + blob: src 或 src starts with media URL。
+ */
+function findLightboxVideo(): HTMLVideoElement | null {
+  // lightbox 容器（关闭按钮的祖先）
+  const closeBtn = document.querySelector('button[aria-label="关闭"]');
+  if (!closeBtn) return null;
+  let scope: Element | null = closeBtn;
+  for (let i = 0; i < 12 && scope; i++) {
+    if (
+      scope.querySelector &&
+      scope.querySelector('button[aria-label="下一步"], button[aria-label="上一步"]')
+    ) {
+      break;
+    }
+    scope = scope.parentElement;
+  }
+  if (!scope) return null;
+  const v = scope.querySelector('video');
+  return v instanceof HTMLVideoElement ? v : null;
+}
+
+/**
+ * 通过 WA lightbox 抓取消息里所有图片/视频（全清版，包括 +N 隐藏的）。
  *
- * 流程：click 第一张 img → 等 lightbox 出现 → 抓当前大图 → 点"下一步" →
+ * 流程：click 第一项 → 等 lightbox 出现 → 抓当前大图/视频 → 点"下一步" →
  * 等 src 变化 → 重复 → 看到重复 src 视为遍历完一圈 → ESC 关闭。
  */
 async function captureMessageViaLightbox(rowEl: Element): Promise<number> {
-  const firstImg = rowEl.querySelector('img[src^="blob:"]') as HTMLImageElement | null;
-  if (!firstImg) return 0;
+  // 优先点 img，没图就点 video
+  let trigger: HTMLElement | null = rowEl.querySelector(
+    'img[src^="blob:"]',
+  ) as HTMLImageElement | null;
+  if (!trigger) {
+    trigger = rowEl.querySelector('video') as HTMLVideoElement | null;
+  }
+  if (!trigger) return 0;
 
-  // 模拟 click 打开 lightbox
-  (firstImg as HTMLElement).click();
+  trigger.click();
 
-  const opened = await waitForLightbox(3500);
-  if (!opened) {
+  // 等 lightbox 出现（关闭按钮 / 上一步按钮 出现）
+  const start = Date.now();
+  while (Date.now() - start < 3500) {
+    if (lightboxIsOpen()) {
+      // 看到内容（img 或 video）就够
+      if (findLightboxImage() || findLightboxVideo()) break;
+    }
+    await sleep(150);
+  }
+  if (!lightboxIsOpen()) {
     console.warn('[sgc] lightbox did not open');
     return 0;
   }
@@ -222,29 +246,48 @@ async function captureMessageViaLightbox(rowEl: Element): Promise<number> {
   const MAX_TRAVERSE = 30;
 
   for (let i = 0; i < MAX_TRAVERSE && stagnant < 2; i++) {
-    // 等当前大图 ready
-    let bigImg: HTMLImageElement | null = null;
-    for (let j = 0; j < 25; j++) {
-      bigImg = findLightboxImage();
-      if (bigImg && bigImg.naturalWidth > 0 && bigImg.complete) break;
+    // 当前 lightbox 是 image 还是 video
+    let currentSrc: string | null = null;
+    let captured = false;
+
+    for (let j = 0; j < 30; j++) {
+      const bigImg = findLightboxImage();
+      if (bigImg && bigImg.naturalWidth > 0 && bigImg.complete) {
+        currentSrc = bigImg.src;
+        if (!seenSrcs.has(currentSrc)) {
+          seenSrcs.add(currentSrc);
+          if (await captureImg(bigImg)) {
+            count++;
+            captured = true;
+          }
+        }
+        break;
+      }
+      const bigVideo = findLightboxVideo();
+      if (bigVideo && bigVideo.src) {
+        currentSrc = bigVideo.src;
+        if (!seenSrcs.has(currentSrc)) {
+          seenSrcs.add(currentSrc);
+          if (await captureVideo(bigVideo)) {
+            count++;
+            captured = true;
+          }
+        }
+        break;
+      }
       await sleep(200);
     }
-    if (!bigImg) break;
 
-    if (seenSrcs.has(bigImg.src)) {
-      stagnant++;
-    } else {
-      seenSrcs.add(bigImg.src);
-      stagnant = 0;
-      if (await captureImg(bigImg)) count++;
-    }
+    if (!currentSrc) break;
+    if (!captured) stagnant++;
+    else stagnant = 0;
 
     const nextBtn = document.querySelector(
       'button[aria-label="下一步"]',
     ) as HTMLButtonElement | null;
     if (!nextBtn || nextBtn.disabled) break;
     nextBtn.click();
-    await sleep(700); // 等下一张换 src + 加载
+    await sleep(800);
   }
 
   await closeLightbox();
@@ -331,9 +374,23 @@ function scanAndInject() {
     if (v.getAttribute(BTN_INJECTED_ATTR) === '1') return;
     const host = (v.closest('figure') || v.parentElement) as HTMLElement | null;
     if (!host) return;
-    injectButton(host, '📥', () => {
-      void captureVideo(v);
-      flashButton(host);
+    injectButton(host, '📥', async () => {
+      flashButton(host, '抓取中…');
+      // 直接拿 src（已加载）；否则走 lightbox 让 WA 加载完整视频
+      let ok = false;
+      if (v.src) {
+        ok = await captureVideo(v);
+      }
+      if (!ok) {
+        // 找 row 走 lightbox 抓
+        const row =
+          (v.closest('[role="row"]') as Element | null) ||
+          (v.closest('[data-id]') as Element | null) ||
+          host;
+        const captured = await captureMessageViaLightbox(row);
+        ok = captured > 0;
+      }
+      flashButton(host, ok ? '✓ 已加' : '❌ 抓不到');
     });
   });
 
