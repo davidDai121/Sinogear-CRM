@@ -6,6 +6,7 @@ import {
   type CurrentChat,
 } from './whatsapp-dom';
 import { initAutoTranslate } from './auto-translate';
+import { initChatMediaCapture } from './chat-media-capture';
 import '@/panel/styles.css';
 
 const HOST_ID = 'sgc-extension-host';
@@ -35,6 +36,7 @@ function mount() {
   });
 
   initAutoTranslate();
+  initChatMediaCapture();
 }
 
 if (document.readyState === 'loading') {

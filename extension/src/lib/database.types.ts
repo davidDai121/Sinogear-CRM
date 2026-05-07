@@ -25,6 +25,12 @@ export type ContactEventType =
 export type FuelType = 'gas' | 'diesel' | 'hybrid' | 'ev';
 export type SaleStatus = 'available' | 'paused' | 'expired';
 export type MessageDirection = 'inbound' | 'outbound';
+export type VehicleMediaType = 'image' | 'video' | 'spec';
+
+export interface PricingTier {
+  label: string;
+  price_usd: number;
+}
 
 export interface Database {
   public: {
@@ -170,6 +176,7 @@ export interface Database {
           logistics_cost: number | null;
           sale_status: SaleStatus;
           short_spec: string | null;
+          pricing_tiers: PricingTier[];
           created_by: string | null;
           created_at: string;
           updated_at: string;
@@ -189,6 +196,7 @@ export interface Database {
           logistics_cost?: number | null;
           sale_status?: SaleStatus;
           short_spec?: string | null;
+          pricing_tiers?: PricingTier[];
           created_by?: string | null;
         };
         Update: {
@@ -204,6 +212,42 @@ export interface Database {
           logistics_cost?: number | null;
           sale_status?: SaleStatus;
           short_spec?: string | null;
+          pricing_tiers?: PricingTier[];
+        };
+        Relationships: [];
+      };
+      vehicle_media: {
+        Row: {
+          id: string;
+          vehicle_id: string;
+          media_type: VehicleMediaType;
+          url: string;
+          public_id: string | null;
+          caption: string | null;
+          mime_type: string | null;
+          file_size_bytes: number | null;
+          sort_order: number;
+          created_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          vehicle_id: string;
+          media_type: VehicleMediaType;
+          url: string;
+          public_id?: string | null;
+          caption?: string | null;
+          mime_type?: string | null;
+          file_size_bytes?: number | null;
+          sort_order?: number;
+          created_by?: string | null;
+        };
+        Update: {
+          media_type?: VehicleMediaType;
+          url?: string;
+          public_id?: string | null;
+          caption?: string | null;
+          sort_order?: number;
         };
         Relationships: [];
       };

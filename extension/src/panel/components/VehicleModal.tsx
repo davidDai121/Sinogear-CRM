@@ -1,12 +1,17 @@
 import { useState, type FormEvent } from 'react';
 import { supabase } from '@/lib/supabase';
+import {
+  isCloudinaryConfigured,
+} from '@/lib/cloudinary';
 import type {
   Database,
   VehicleCondition,
   VehicleSteering,
   FuelType,
   SaleStatus,
+  PricingTier,
 } from '@/lib/database.types';
+import { VehicleMediaManager } from './VehicleMediaManager';
 
 type VehicleRow = Database['public']['Tables']['vehicles']['Row'];
 
@@ -17,7 +22,26 @@ interface Props {
   onSaved: () => void;
 }
 
+interface DraftTier {
+  label: string;
+  price: string; // 输入字符串，提交时转 number
+}
+
+function tiersFromRow(v: VehicleRow | null | undefined): DraftTier[] {
+  const arr = (v?.pricing_tiers ?? []) as PricingTier[];
+  if (!Array.isArray(arr) || arr.length === 0) return [];
+  return arr.map((t) => ({
+    label: t.label ?? '',
+    price: t.price_usd != null ? String(t.price_usd) : '',
+  }));
+}
+
 export function VehicleModal({ orgId, vehicle, onClose, onSaved }: Props) {
+  // 创建后可能切到 edit 模式（拿到 id 后才能上传媒体）
+  const [editingVehicle, setEditingVehicle] = useState<VehicleRow | null>(
+    vehicle ?? null,
+  );
+
   const [draft, setDraft] = useState({
     brand: vehicle?.brand ?? '',
     model: vehicle?.model ?? '',
@@ -32,14 +56,24 @@ export function VehicleModal({ orgId, vehicle, onClose, onSaved }: Props) {
     sale_status: vehicle?.sale_status ?? ('available' as SaleStatus),
     short_spec: vehicle?.short_spec ?? '',
   });
+  const [tiers, setTiers] = useState<DraftTier[]>(tiersFromRow(vehicle));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const cloudinaryReady = isCloudinaryConfigured();
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!draft.brand.trim() || !draft.model.trim()) return;
     setBusy(true);
     setError(null);
+
+    const validTiers: PricingTier[] = tiers
+      .map((t) => ({
+        label: t.label.trim(),
+        price_usd: t.price ? Number(t.price) : NaN,
+      }))
+      .filter((t) => t.label && Number.isFinite(t.price_usd) && t.price_usd >= 0);
 
     const payload = {
       brand: draft.brand.trim(),
@@ -54,40 +88,59 @@ export function VehicleModal({ orgId, vehicle, onClose, onSaved }: Props) {
       logistics_cost: draft.logistics_cost ? Number(draft.logistics_cost) : null,
       sale_status: draft.sale_status,
       short_spec: draft.short_spec.trim() || null,
+      pricing_tiers: validTiers,
     };
 
-    if (vehicle) {
-      const { error } = await supabase
+    if (editingVehicle) {
+      const { data, error } = await supabase
         .from('vehicles')
         .update(payload)
-        .eq('id', vehicle.id);
+        .eq('id', editingVehicle.id)
+        .select('*')
+        .single();
       if (error) {
         setError(error.message);
         setBusy(false);
         return;
       }
+      if (data) setEditingVehicle(data as VehicleRow);
     } else {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('vehicles')
-        .insert({ ...payload, org_id: orgId });
+        .insert({ ...payload, org_id: orgId })
+        .select('*')
+        .single();
       if (error) {
         setError(error.message);
         setBusy(false);
         return;
       }
+      // 创建成功 → 切到 edit 模式（保持 modal 开着，让用户上传媒体）
+      if (data) setEditingVehicle(data as VehicleRow);
     }
 
     setBusy(false);
     onSaved();
-    onClose();
+    // 不自动关闭 — 留着让用户上传媒体；用户点 "完成" 关闭
   };
+
+  // ---- pricing tier ops ----
+  const addTier = () =>
+    setTiers([...tiers, { label: '', price: '' }]);
+  const updateTier = (i: number, field: keyof DraftTier, value: string) => {
+    const next = tiers.slice();
+    next[i] = { ...next[i], [field]: value };
+    setTiers(next);
+  };
+  const removeTier = (i: number) =>
+    setTiers(tiers.filter((_, idx) => idx !== i));
 
   return (
     <>
       <div className="sgc-modal-backdrop" onClick={onClose} />
       <div className="sgc-modal sgc-modal-wide" role="dialog">
         <header className="sgc-modal-header">
-          <strong>{vehicle ? '编辑车源' : '新建车源'}</strong>
+          <strong>{editingVehicle ? '编辑车源' : '新建车源'}</strong>
           <button
             className="sgc-drawer-close"
             onClick={onClose}
@@ -237,21 +290,83 @@ export function VehicleModal({ orgId, vehicle, onClose, onSaved }: Props) {
             />
           </label>
 
+          {/* ---- 阶梯价格 ---- */}
+          <div className="sgc-pricing-tiers">
+            <div className="sgc-section-head">
+              <strong>阶梯价格</strong>
+              <span className="sgc-muted">不同条件下的报价（FOB / CIF / 批量等）</span>
+            </div>
+            {tiers.length === 0 && (
+              <div className="sgc-muted" style={{ marginBottom: 8 }}>
+                还没有阶梯价。点下面 + 添加。
+              </div>
+            )}
+            {tiers.map((t, i) => (
+              <div key={i} className="sgc-tier-row">
+                <input
+                  className="sgc-tier-label"
+                  placeholder="如：FOB 单台 / CIF 蒙巴萨 / 10台以上"
+                  value={t.label}
+                  onChange={(e) => updateTier(i, 'label', e.target.value)}
+                />
+                <input
+                  className="sgc-tier-price"
+                  type="number"
+                  step="0.01"
+                  placeholder="USD"
+                  value={t.price}
+                  onChange={(e) => updateTier(i, 'price', e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="sgc-btn-icon"
+                  aria-label="删除"
+                  onClick={() => removeTier(i)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button type="button" className="sgc-btn-link" onClick={addTier}>
+              + 添加阶梯价
+            </button>
+          </div>
+
           {error && <div className="sgc-error">{error}</div>}
 
           <div className="sgc-modal-actions">
             <button type="button" className="sgc-btn-link" onClick={onClose}>
-              取消
+              {editingVehicle ? '完成' : '取消'}
             </button>
             <button
               type="submit"
               className="sgc-btn-primary"
               disabled={busy || !draft.brand.trim() || !draft.model.trim()}
             >
-              {busy ? '保存中…' : vehicle ? '保存' : '创建'}
+              {busy ? '保存中…' : editingVehicle ? '保存' : '创建'}
             </button>
           </div>
         </form>
+
+        {/* ---- 媒体管理（创建后才显示） ---- */}
+        {editingVehicle && (
+          <div className="sgc-modal-section">
+            {!cloudinaryReady ? (
+              <div className="sgc-warn">
+                Cloudinary 未配置 — 请在 .env 添加 VITE_CLOUDINARY_CLOUD_NAME +
+                VITE_CLOUDINARY_UPLOAD_PRESET 后重启 dev server
+              </div>
+            ) : (
+              <VehicleMediaManager vehicleId={editingVehicle.id} />
+            )}
+          </div>
+        )}
+
+        {!editingVehicle && (
+          <div className="sgc-modal-section sgc-muted" style={{ fontSize: 12 }}>
+            💡 保存车源后即可上传图片、视频、配置表
+          </div>
+        )}
       </div>
     </>
   );

@@ -58,3 +58,32 @@ export function fillWhatsAppCompose(text: string): boolean {
 
   return true;
 }
+
+/**
+ * 把若干 File 通过 paste 事件粘到当前 WhatsApp 输入框 → WA 跳出附件预览，
+ * 用户在预览里 caption + 点发送。
+ *
+ * 不自动发送（图片附件预览界面有它自己的输入框 + 发送按钮，由用户决定）。
+ *
+ * @returns 成功 paste 的文件数（== files.length 时全部成功）
+ */
+export function pasteFilesToWhatsApp(files: File[]): boolean {
+  if (files.length === 0) return false;
+  const input = findCompose();
+  if (!input) return false;
+
+  input.focus();
+
+  const dt = new DataTransfer();
+  for (const f of files) dt.items.add(f);
+
+  // WhatsApp Web 监听 paste 事件并把 clipboardData.files 转成附件预览
+  const pasteEvent = new ClipboardEvent('paste', {
+    clipboardData: dt,
+    bubbles: true,
+    cancelable: true,
+  });
+  input.dispatchEvent(pasteEvent);
+
+  return true;
+}

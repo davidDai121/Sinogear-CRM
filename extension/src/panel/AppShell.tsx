@@ -10,6 +10,7 @@ import { VehiclesPage } from './pages/VehiclesPage';
 import { TasksPage } from './pages/TasksPage';
 import { TagsPage } from './pages/TagsPage';
 import { DashboardPage } from './pages/DashboardPage';
+import { MediaStagingTray } from './components/MediaStagingTray';
 
 export function AppShell() {
   const { session, user, loading: authLoading } = useAuth();
@@ -92,6 +93,8 @@ export function AppShell() {
           {tab === 'tags' && <TagsPage orgId={org.orgId} />}
         </div>
       )}
+
+      <MediaStagingTray orgId={org.orgId} />
     </div>
   );
 }

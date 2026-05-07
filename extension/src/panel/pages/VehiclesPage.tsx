@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
-import type { Database, SaleStatus } from '@/lib/database.types';
+import { thumbnailUrl } from '@/lib/cloudinary';
+import type {
+  Database,
+  PricingTier,
+  SaleStatus,
+} from '@/lib/database.types';
 import { VehicleModal } from '../components/VehicleModal';
+import { CloudinaryImg } from '../components/CloudinaryImg';
 
 type VehicleRow = Database['public']['Tables']['vehicles']['Row'];
+type MediaRow = Database['public']['Tables']['vehicle_media']['Row'];
 
 const STATUS_LABEL: Record<SaleStatus, string> = {
   available: '在售',
@@ -17,6 +24,7 @@ interface Props {
 
 export function VehiclesPage({ orgId }: Props) {
   const [items, setItems] = useState<VehicleRow[]>([]);
+  const [covers, setCovers] = useState<Record<string, MediaRow>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -31,9 +39,33 @@ export function VehiclesPage({ orgId }: Props) {
       .select('*')
       .eq('org_id', orgId)
       .order('updated_at', { ascending: false });
-    if (error) setError(error.message);
-    else setItems(data ?? []);
+    if (error) {
+      setError(error.message);
+      setLoading(false);
+      return;
+    }
+    const rows = data ?? [];
+    setItems(rows);
     setLoading(false);
+
+    // 取每个车型的第一张图片作为封面（最便宜：拉所有 image 然后客户端按 vehicle_id 取 sort_order 最小）
+    if (rows.length > 0) {
+      const ids = rows.map((v) => v.id);
+      const { data: media } = await supabase
+        .from('vehicle_media')
+        .select('*')
+        .in('vehicle_id', ids)
+        .eq('media_type', 'image')
+        .order('sort_order')
+        .order('created_at');
+      const map: Record<string, MediaRow> = {};
+      for (const m of media ?? []) {
+        if (!map[m.vehicle_id]) map[m.vehicle_id] = m;
+      }
+      setCovers(map);
+    } else {
+      setCovers({});
+    }
   }, [orgId]);
 
   useEffect(() => {
@@ -108,55 +140,87 @@ export function VehiclesPage({ orgId }: Props) {
         </div>
       ) : (
         <div className="sgc-vehicle-grid">
-          {filtered.map((v) => (
-            <article
-              key={v.id}
-              className="sgc-vehicle-card"
-              onClick={() => setModalItem(v)}
-            >
-              <header className="sgc-vehicle-head">
-                <div>
-                  <strong>
-                    {v.brand} {v.model}
-                  </strong>
-                  <span className="sgc-muted">
-                    {v.year ? `${v.year} ` : ''}
-                    {v.version ?? ''}
+          {filtered.map((v) => {
+            const cover = covers[v.id];
+            const tiers = (v.pricing_tiers ?? []) as PricingTier[];
+            return (
+              <article
+                key={v.id}
+                className="sgc-vehicle-card"
+                onClick={() => setModalItem(v)}
+              >
+                {cover ? (
+                  <div className="sgc-vehicle-cover">
+                    <CloudinaryImg
+                      src={thumbnailUrl(cover.url, 480)}
+                      alt={v.model}
+                      loading="lazy"
+                    />
+                  </div>
+                ) : (
+                  <div className="sgc-vehicle-cover sgc-vehicle-cover-empty">
+                    <span>🚗</span>
+                  </div>
+                )}
+
+                <header className="sgc-vehicle-head">
+                  <div>
+                    <strong>
+                      {v.brand} {v.model}
+                    </strong>
+                    <span className="sgc-muted">
+                      {v.year ? `${v.year} ` : ''}
+                      {v.version ?? ''}
+                    </span>
+                  </div>
+                  <span className={`sgc-stage sgc-sale-${v.sale_status}`}>
+                    {STATUS_LABEL[v.sale_status]}
                   </span>
-                </div>
-                <span className={`sgc-stage sgc-sale-${v.sale_status}`}>
-                  {STATUS_LABEL[v.sale_status]}
-                </span>
-              </header>
+                </header>
 
-              <div className="sgc-vehicle-meta">
-                <div>
-                  <span>状态</span>
-                  <strong>{v.vehicle_condition === 'new' ? '新车' : '二手'}</strong>
+                <div className="sgc-vehicle-meta">
+                  <div>
+                    <span>状态</span>
+                    <strong>{v.vehicle_condition === 'new' ? '新车' : '二手'}</strong>
+                  </div>
+                  <div>
+                    <span>动力</span>
+                    <strong>{v.fuel_type ? fuelLabel(v.fuel_type) : '—'}</strong>
+                  </div>
+                  <div>
+                    <span>转向</span>
+                    <strong>{v.steering ?? '—'}</strong>
+                  </div>
+                  <div>
+                    <span>基准价</span>
+                    <strong>
+                      {v.base_price
+                        ? `${v.currency} ${v.base_price.toLocaleString()}`
+                        : '—'}
+                    </strong>
+                  </div>
                 </div>
-                <div>
-                  <span>动力</span>
-                  <strong>{v.fuel_type ? fuelLabel(v.fuel_type) : '—'}</strong>
-                </div>
-                <div>
-                  <span>转向</span>
-                  <strong>{v.steering ?? '—'}</strong>
-                </div>
-                <div>
-                  <span>价格</span>
-                  <strong>
-                    {v.base_price
-                      ? `${v.currency} ${v.base_price.toLocaleString()}`
-                      : '—'}
-                  </strong>
-                </div>
-              </div>
 
-              {v.short_spec && (
-                <p className="sgc-vehicle-spec">{v.short_spec}</p>
-              )}
-            </article>
-          ))}
+                {tiers.length > 0 && (
+                  <div className="sgc-vehicle-tiers">
+                    {tiers.slice(0, 3).map((t, i) => (
+                      <span key={i} className="sgc-tier-chip">
+                        {t.label}
+                        <strong> ${t.price_usd.toLocaleString()}</strong>
+                      </span>
+                    ))}
+                    {tiers.length > 3 && (
+                      <span className="sgc-muted">+{tiers.length - 3}</span>
+                    )}
+                  </div>
+                )}
+
+                {v.short_spec && (
+                  <p className="sgc-vehicle-spec">{v.short_spec}</p>
+                )}
+              </article>
+            );
+          })}
         </div>
       )}
 

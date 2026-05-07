@@ -31,7 +31,9 @@
     "https://gemini.google.com/*",
     "https://*.supabase.co/*",
     "https://dashscope.aliyuncs.com/*",
-    "https://translate.googleapis.com/*"
+    "https://translate.googleapis.com/*",
+    "https://api.cloudinary.com/*",
+    "https://res.cloudinary.com/*"
   ],
   "icons": {
     "16": "public/icons/icon-16.png",
