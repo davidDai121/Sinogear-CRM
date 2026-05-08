@@ -17,9 +17,10 @@ Supabase（托管 Postgres + Auth）
   ├── 多租户：organizations + organization_members + RLS
   ├── 表：contacts / contact_tags / vehicle_interests / vehicles
   │       vehicle_tags / vehicle_media / tasks / quotes / messages
-  │       contact_events / gem_templates / gem_conversations
+  │       contact_events / contact_handlers / gem_templates / gem_conversations
   ├── chrome.storage 持久化 session
   ├── pg_cron 心跳防免费层 7 日自动暂停（0012_keepalive）
+  ├── 团队多用户视图：contact_handlers 主理人表 + 撞单检测（0014）
   └── Google 联系人同步（chrome.identity OAuth + People API）
 
 外部服务
@@ -79,9 +80,13 @@ Supabase（托管 Postgres + Auth）
 │   │   ├── panel/
 │   │   │   ├── AppShell.tsx            顶层组件，路由 6 个 tab + body class 切换
 │   │   │   ├── styles.css              所有面板样式
+│   │   │   ├── contexts/
+│   │   │   │   └── ScopeContext.tsx    "只看我的 / 全部"视图 + handlers/members
+│   │   │   │                            maps + 30s 轮询 + 一次性孤儿认领
 │   │   │   ├── components/
 │   │   │   │   ├── TopNav.tsx          顶部 6 tab + 翻译开关 + 重译按钮 +
-│   │   │   │   │                       🤖 Gem 模板 + 👥 团队成员
+│   │   │   │   │                       🤖 Gem 模板 + 👥 团队成员 + ScopePicker
+│   │   │   │   ├── ScopePicker.tsx     "👤 只看我的 / 🏢 全部"下拉 + 数量徽标
 │   │   │   │   ├── LoginForm.tsx       注册/登录
 │   │   │   │   ├── OrgSetup.tsx        首次创建团队
 │   │   │   │   ├── TeamMembersModal.tsx 成员列表 + 邀请 / 改角色 / 移除
@@ -139,9 +144,13 @@ Supabase（托管 Postgres + Auth）
 │   │   │       ├── useCrmData.ts       中心 CRM 数据 + WhatsApp IDB 合并 +
 │   │   │       │                       20s 轮询 + fire-and-forget syncAutoStages
 │   │   │       ├── useAutoExtract.ts   自动 AI 字段抽取 + 写 ai_extracted/vehicle_added 事件
-│   │   │       └── useMessageSync.ts   按 contactId 自动 sync 当前可见消息 → messages 表
+│   │   │       ├── useMessageSync.ts   按 contactId 自动 sync 当前可见消息 → messages 表 +
+│   │   │       │                       顺便 bumpHandler（登记当前用户为该客户主理人）
+│   │   │       └── useOrgMembers.ts    list_org_members RPC + email→shortName 工具
 │   │   └── lib/
 │   │       ├── supabase.ts             Supabase client（chrome.storage 适配器）
+│   │       ├── contact-handlers.ts     主理人表读写：fetchHandlersForOrg / buildHandlerMaps
+│   │       │                           / batchBumpHandlers / bumpHandler / getOtherHandlers
 │   │       ├── database.types.ts       完整数据库类型（含 quotes/contact_events/
 │   │       │                            messages/vehicle_media/PricingTier）
 │   │       ├── errors.ts               错误格式化（"扩展刚更新，请刷新" 友好提示）
@@ -192,8 +201,11 @@ Supabase（托管 Postgres + Auth）
 │       │                                + 'inbound'/'outbound' 方向枚举
 │       ├── 0012_keepalive.sql           pg_cron 每日心跳（防 Supabase 免费层
 │       │                                7 日无活动自动暂停，跟 SW 无关）
-│       └── 0013_vehicle_media_and_pricing.sql
-│                                        vehicle_media (img/video/spec) + 定价扩展
+│       ├── 0013_vehicle_media_and_pricing.sql
+│       │                                vehicle_media (img/video/spec) + 定价扩展
+│       └── 0014_handlers_and_per_user_gem.sql
+│                                        contact_handlers (per-user 主理人) +
+│                                        gem_templates RLS 改 created_by=auth.uid()
 └── （仅此一个目录；旧 backend/ frontend/ docs/ 已删）
 ```
 
@@ -232,8 +244,14 @@ contact_events          id, contact_id, event_type, payload jsonb, created_at
                         event_type: created/stage_changed/tag_added/
                                     vehicle_added/quote_created/
                                     task_created/ai_extracted
+contact_handlers        contact_id, user_id, last_seen_at
+                        PRIMARY KEY (contact_id, user_id)
+                        创建客户时 trigger 自动注册创建者；进入聊天 useMessageSync
+                        心跳 upsert；同 contact 出现 2+ user_id → 撞单
 gem_templates           id, org_id, name, gem_url, description, is_default,
                         created_by, *_at
+                        ⚠️ 0014 起 RLS 改 per-user：只能读写 created_by=auth.uid()
+                           的模板；is_default 含义从 "org 默认" 变为 "我的默认"
 gem_conversations       id, contact_id, template_id, gem_chat_url,
                         last_used_at, created_at
                         UNIQUE(contact_id, template_id)
@@ -245,9 +263,11 @@ _keepalive              singleton (id=1, last_ping) — pg_cron 每日心跳
 ```
 
 **RLS：** 所有表的 SELECT/INSERT/UPDATE/DELETE 都要求 `auth.uid()` 是 `org_id` 成员（通过 `is_org_member(org_id)` SECURITY DEFINER 函数）。
-- quotes / contact_events / gem_conversations / messages 通过 contact 反查 org_id（无 org_id 列）
+- quotes / contact_events / gem_conversations / messages / contact_handlers 通过 contact 反查 org_id（无 org_id 列）
 - vehicle_media 通过 vehicle 反查 org_id
 - contact_events 只有 SELECT/INSERT policy（append-only）
+- contact_handlers：读取要求同 org，写入只能 user_id=auth.uid()
+- gem_templates：0014 起改 per-user，只能 created_by=auth.uid()
 - _keepalive 全部 deny，仅 pg_cron 内部 postgres role 可写
 
 **Helpers：**
@@ -255,7 +275,7 @@ _keepalive              singleton (id=1, last_ping) — pg_cron 每日心跳
 - `is_org_member(org_id)` — RLS 用
 - `touch_updated_at()` trigger — contacts/vehicles/quotes/gem_templates 自动更新 updated_at
 
-**所有 13 个 migration 都已应用到生产 Supabase。**
+**所有 14 个 migration 都已应用到生产 Supabase。**
 
 ## 启动
 
@@ -373,6 +393,16 @@ npm run build
 - [x] **AssignMediaToVehicleModal**：选已有车型 / 创建新车型（仅填 brand+model）→ 上传 Cloudinary + 批量插入 vehicle_media + 清空暂存
 - [x] **不持久化**：File 对象不能 serialize，blob URL 跨页面无效——刷新即清空（设计取舍）
 
+### 团队多用户视图（2026-05-08，migration 0014）
+- [x] **contact_handlers 主理人表**：(contact_id, user_id) 复合主键，记录"谁打开/聊过这个客户"
+  - 创建客户时 trigger 自动注册 created_by 为 handler
+  - 进入 WA 聊天时 useMessageSync 心跳 upsert（顺便 bumpHandler）
+  - 一次性"孤儿认领"：ScopeContext 启动时把没有任何 handler 的老客户全部归到当前用户
+- [x] **ScopeContext + ScopePicker**：顶栏下拉切"👤 只看我的 / 🏢 全部"，按 chrome.storage 持久化；默认 owner/admin → 全部，member → 只看我的
+- [x] **scope=mine 视图过滤**：聊天列表 / 客户 tab / 任务 tab / 看板 tab 全部支持，过滤都走服务端 join `contact_handlers!inner(user_id)`，**不要用 `.in('id', myIds)` 否则几百个 UUID 进 URL 触发 Failed to fetch**
+- [x] **撞单检测**：同 contact 出现 2+ user_id 时，列表项右侧显示其他主理人 short name（email @ 前段）；ChatPage / ContactsPage / FilteredChatList 都展示
+- [x] **Gem 模板改 per-user**：0014 RLS 改 created_by=auth.uid()，每个销售只看到自己 Google 账号下建的 Gem（别人的 URL 自己也打不开）；is_default 含义变为"我的默认"
+
 ### 其他
 - [x] **客户质量分级**：⭐⭐⭐ 大客户 / ⭐⭐ 有潜力（默认）/ ⭐ 普通 / 🗑 垃圾
 - [x] **跟进提醒**：`stalled` 阶段 + `reminder_ack_at` + `reminder_disabled`
@@ -433,6 +463,7 @@ WhatsApp 绿色主题：
 - **WA MediaSource 视频**：blob: video src 是 MediaSource 流，直接 fetch 得 0 字节——视频抓取一律走 WA 自带"下载"按钮（chat-media-capture 的多选 toolbar 路径），SW 拦 chrome.downloads 转发回来
 - **chat-media-capture DOM 依赖**：lightbox 关闭按钮 `aria-label="关闭"`、下载按钮 `aria-label="下载"`、多选取消 `aria-label="取消选择"`、"已选 N 项" span 文案——WA 改 i18n 或 ARIA 时要修
 - **暂存盘不持久化**：刷新页面 / 切扩展 tab 即清空（File 对象不能 serialize），不是 bug 是设计
+- **`.in('id', myIds)` URL 长度炸弹**：scope=mine 视图下 myContactIds 可能含数百 UUID，PostgREST 把它们全塞进 query string（每个 37 字符），URL 超 ~12KB 被网络层直接拒，错误是 `TypeError: Failed to fetch`（不是 Supabase 返回的 PostgrestError）。**新加按主理人过滤的查询一律走服务端 join：`.select('..., contact_handlers!inner(user_id)').eq('contact_handlers.user_id', myUserId)`**（嵌套关系用 `'contacts.contact_handlers.user_id'`），URL 长度恒定。已修复点：DashboardPage / TasksPage
 
 ## 用户偏好
 
