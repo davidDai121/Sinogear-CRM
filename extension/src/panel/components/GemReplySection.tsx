@@ -8,6 +8,7 @@ import {
   waitForChatMessages,
   type ChatMessage,
 } from '@/content/whatsapp-messages';
+import { loadMessages } from '@/lib/message-sync';
 import { formatNewCustomer, formatUpdate } from '@/lib/gem-prompt';
 import {
   parseBudgetValue,
@@ -36,9 +37,16 @@ interface Props {
 type Status =
   | { kind: 'idle' }
   | { kind: 'reading' }
-  | { kind: 'sending'; foreground: boolean }
+  | { kind: 'sending'; foreground: boolean; source: 'dom' | 'db'; count: number }
   | { kind: 'waiting' }
-  | { kind: 'done'; text: string; chatUrl: string; model: string | null }
+  | {
+      kind: 'done';
+      text: string;
+      chatUrl: string;
+      model: string | null;
+      source: 'dom' | 'db';
+      count: number;
+    }
   | { kind: 'error'; message: string };
 
 export function GemReplySection({ orgId, contact, needsJump }: Props) {
@@ -130,8 +138,9 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
 
     setStatus({ kind: 'reading' });
     try {
-      // 1. Read chat messages
+      // 1. Read chat messages — DOM 优先；DOM 空时 fallback 到 messages 表（导入的历史）
       let messages: ChatMessage[] = [];
+      let messageSource: 'dom' | 'db' = 'dom';
       if (needsJump && contact.phone) {
         const ok = await jumpToChat(contact.phone.replace(/^\+/, ''));
         if (!ok) throw new Error('未能跳转到该客户聊天');
@@ -140,7 +149,20 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         messages = readChatMessages(30);
       }
       if (messages.length === 0) {
-        throw new Error('当前聊天没有可读消息');
+        // DOM 没消息（手机端聊天 / WA Web 还没加载），用导入的历史
+        const rows = await loadMessages(contact.id, 50);
+        if (rows.length === 0) {
+          throw new Error(
+            '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，或在「客户」tab 用「📥 导入手机聊天」导入 .txt 历史。',
+          );
+        }
+        messages = rows.map((r) => ({
+          id: r.wa_message_id,
+          fromMe: r.direction === 'outbound',
+          text: r.text,
+          timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
+        }));
+        messageSource = 'db';
       }
 
       // 2. Load vehicle interests for richer context (only on new conversation)
@@ -169,7 +191,12 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         : basePrompt;
 
       // 4. Run Gem
-      setStatus({ kind: 'sending', foreground });
+      setStatus({
+        kind: 'sending',
+        foreground,
+        source: messageSource,
+        count: messages.length,
+      });
       const response = await chrome.runtime.sendMessage({
         type: 'GEM_RUN',
         url,
@@ -206,6 +233,8 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         text: response.responseText,
         chatUrl: newChatUrl,
         model: response.modelSelected ?? null,
+        source: messageSource,
+        count: messages.length,
       });
       setFollowup('');
     } catch (err) {
@@ -385,6 +414,9 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
 
           {status.kind === 'sending' && (
             <div className="sgc-gem-progress">
+              {status.source === 'db' && (
+                <>📜 用导入的历史记录（{status.count} 条）·{' '}</>
+              )}
               正在{status.foreground ? '前台' : '后台'}打开 Gemini 并发送 prompt…
             </div>
           )}
@@ -398,6 +430,9 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
               {status.model && (
                 <div className="sgc-gem-progress">
                   ✅ 用模型：{status.model}
+                  {status.source === 'db' && (
+                    <> · 📜 基于导入的历史（{status.count} 条）</>
+                  )}
                 </div>
               )}
 
