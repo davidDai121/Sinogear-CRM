@@ -89,7 +89,9 @@ export function AppShell() {
             />
           )}
           {tab === 'vehicles' && <VehiclesPage orgId={org.orgId} />}
-          {tab === 'tasks' && <TasksPage orgId={org.orgId} />}
+          {tab === 'tasks' && (
+            <TasksPage orgId={org.orgId} onJumpToChat={() => setTab('chat')} />
+          )}
           {tab === 'tags' && <TagsPage orgId={org.orgId} />}
         </div>
       )}

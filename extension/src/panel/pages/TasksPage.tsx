@@ -2,12 +2,14 @@ import { useEffect, useMemo, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Database, TaskStatus } from '@/lib/database.types';
 import { TaskModal } from '../components/TaskModal';
+import { jumpToChat } from '@/lib/jump-to-chat';
 
 type TaskRow = Database['public']['Tables']['tasks']['Row'];
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 
 interface Props {
   orgId: string;
+  onJumpToChat?: () => void;
 }
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
@@ -44,7 +46,7 @@ function shortName(c: ContactRow | undefined, fallbackPhone: string): string {
   return raw.length > 8 ? raw.slice(0, 7) + '…' : raw;
 }
 
-export function TasksPage({ orgId }: Props) {
+export function TasksPage({ orgId, onJumpToChat }: Props) {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [contactMap, setContactMap] = useState<Record<string, ContactRow>>({});
   const [statusFilter, setStatusFilter] = useState<TaskStatus>('open');
@@ -357,6 +359,7 @@ export function TasksPage({ orgId }: Props) {
               <th>任务</th>
               <th>截止</th>
               <th>状态</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -365,6 +368,13 @@ export function TasksPage({ orgId }: Props) {
               const time = t.due_at
                 ? new Date(t.due_at).toLocaleString()
                 : '未设定';
+              const handleJump = (e: React.MouseEvent) => {
+                e.stopPropagation();
+                if (!contact?.phone) return;
+                const digits = contact.phone.replace(/^\+/, '');
+                void jumpToChat(digits);
+                onJumpToChat?.();
+              };
               return (
                 <tr key={t.id} onClick={() => setModalTask(t)}>
                   <td onClick={(e) => e.stopPropagation()}>
@@ -393,6 +403,18 @@ export function TasksPage({ orgId }: Props) {
                   <td>{time}</td>
                   <td>
                     <span className="sgc-muted">{STATUS_LABEL[t.status]}</span>
+                  </td>
+                  <td>
+                    {contact?.phone && (
+                      <button
+                        type="button"
+                        className="sgc-btn-link"
+                        onClick={handleJump}
+                        title="跳转到 WhatsApp 聊天"
+                      >
+                        💬 聊天
+                      </button>
+                    )}
                   </td>
                 </tr>
               );
