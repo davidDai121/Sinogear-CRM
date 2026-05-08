@@ -56,7 +56,7 @@ function startOfPeriod(period: Period): Date {
 }
 
 export function DashboardPage({ orgId }: Props) {
-  const { scope, myContactIds } = useScope();
+  const { scope, myContactIds, myUserId } = useScope();
   const [period, setPeriod] = useState<Period>('week');
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -76,10 +76,10 @@ export function DashboardPage({ orgId }: Props) {
     (async () => {
       try {
         const startIso = start.toISOString();
-        const myIds = scope === 'mine' ? Array.from(myContactIds) : null;
+        const filterMine = scope === 'mine' && !!myUserId;
 
         // scope=mine 时如果没有任何主理客户，全部清零
-        if (myIds && myIds.length === 0) {
+        if (scope === 'mine' && myContactIds.size === 0) {
           if (!cancelled) {
             setData({
               newContacts: 0,
@@ -104,49 +104,74 @@ export function DashboardPage({ orgId }: Props) {
           return;
         }
 
+        // 服务端 join 过滤"我的客户"：
+        // 老方案 `.in('id', myIds)` 把几百个 UUID 塞 URL → 12KB+ 被网络层拒（Failed to fetch）。
+        // 新方案：通过 contact_handlers!inner(user_id=myUserId) 让 Postgres 端做过滤，URL 长度恒定。
+        const contactsSel = filterMine
+          ? 'id, contact_handlers!inner(user_id)'
+          : 'id';
+        const stagesSel = filterMine
+          ? 'customer_stage, contact_handlers!inner(user_id)'
+          : 'customer_stage';
+        const childSel = filterMine
+          ? 'contacts!inner(org_id, contact_handlers!inner(user_id))'
+          : 'contacts!inner(org_id)';
+        const vehiclesSel = filterMine
+          ? 'model, contacts!inner(org_id, contact_handlers!inner(user_id))'
+          : 'model, contacts!inner(org_id)';
+
         let newContactsQ = supabase
           .from('contacts')
-          .select('id', { count: 'exact', head: true })
+          .select(contactsSel, { count: 'exact', head: true })
           .eq('org_id', orgId)
           .gte('created_at', startIso);
         let stagesQ = supabase
           .from('contacts')
-          .select('customer_stage')
+          .select(stagesSel)
           .eq('org_id', orgId);
         let newQuotesQ = supabase
           .from('quotes')
-          .select('id, contacts!inner(org_id)', {
-            count: 'exact',
-            head: true,
-          })
+          .select(`id, ${childSel}`, { count: 'exact', head: true })
           .eq('contacts.org_id', orgId)
           .gte('created_at', startIso);
         let newTasksQ = supabase
           .from('tasks')
-          .select('id', { count: 'exact', head: true })
+          .select(filterMine ? `id, ${childSel}` : 'id', {
+            count: 'exact',
+            head: true,
+          })
           .eq('org_id', orgId)
           .gte('created_at', startIso);
         let aiExtractsQ = supabase
           .from('contact_events')
-          .select('id, contacts!inner(org_id)', {
-            count: 'exact',
-            head: true,
-          })
+          .select(`id, ${childSel}`, { count: 'exact', head: true })
           .eq('contacts.org_id', orgId)
           .eq('event_type', 'ai_extracted')
           .gte('created_at', startIso);
         let vehiclesQ = supabase
           .from('vehicle_interests')
-          .select('model, contacts!inner(org_id)')
+          .select(vehiclesSel)
           .eq('contacts.org_id', orgId);
 
-        if (myIds) {
-          newContactsQ = newContactsQ.in('id', myIds);
-          stagesQ = stagesQ.in('id', myIds);
-          newQuotesQ = newQuotesQ.in('contact_id', myIds);
-          newTasksQ = newTasksQ.in('contact_id', myIds);
-          aiExtractsQ = aiExtractsQ.in('contact_id', myIds);
-          vehiclesQ = vehiclesQ.in('contact_id', myIds);
+        if (filterMine) {
+          newContactsQ = newContactsQ.eq('contact_handlers.user_id', myUserId);
+          stagesQ = stagesQ.eq('contact_handlers.user_id', myUserId);
+          newQuotesQ = newQuotesQ.eq(
+            'contacts.contact_handlers.user_id',
+            myUserId,
+          );
+          newTasksQ = newTasksQ.eq(
+            'contacts.contact_handlers.user_id',
+            myUserId,
+          );
+          aiExtractsQ = aiExtractsQ.eq(
+            'contacts.contact_handlers.user_id',
+            myUserId,
+          );
+          vehiclesQ = vehiclesQ.eq(
+            'contacts.contact_handlers.user_id',
+            myUserId,
+          );
         }
 
         const [
@@ -182,7 +207,7 @@ export function DashboardPage({ orgId }: Props) {
           won: 0,
           lost: 0,
         };
-        for (const row of (stagesRes.data ?? []) as Array<{
+        for (const row of (stagesRes.data ?? []) as unknown as Array<{
           customer_stage: CustomerStage;
         }>) {
           stageDist[row.customer_stage] = (stageDist[row.customer_stage] ?? 0) + 1;
@@ -221,7 +246,7 @@ export function DashboardPage({ orgId }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [orgId, start.getTime(), scope, myContactIdsKey]);
+  }, [orgId, start.getTime(), scope, myContactIdsKey, myUserId]);
 
   const periodLabel = period === 'week' ? '本周' : '本月';
   const totalContacts = data

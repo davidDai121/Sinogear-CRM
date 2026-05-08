@@ -72,23 +72,34 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
     setLoading(true);
     setError(null);
 
+    // 服务端 join 过滤："我的客户"通过 contact_handlers!inner(user_id) 过滤，
+    // 避免把数百个 UUID 塞进 .in() URL 触发网络层 Failed to fetch。
+    const filterMine = scope === 'mine' && !!myUserId;
+
+    if (scope === 'mine' && myContactIds.size === 0) {
+      setTasks([]);
+      setContactMap({});
+      setStalledTotal(0);
+      setLoading(false);
+      return;
+    }
+
     let tasksQuery = supabase
       .from('tasks')
-      .select('*')
+      .select(
+        filterMine
+          ? '*, contacts!inner(contact_handlers!inner(user_id))'
+          : '*',
+      )
       .eq('org_id', orgId)
       .eq('status', statusFilter)
       .order('due_at', { ascending: true, nullsFirst: false });
 
-    if (scope === 'mine') {
-      const ids = Array.from(myContactIds);
-      if (ids.length === 0) {
-        setTasks([]);
-        setContactMap({});
-        setStalledTotal(0);
-        setLoading(false);
-        return;
-      }
-      tasksQuery = tasksQuery.in('contact_id', ids);
+    if (filterMine) {
+      tasksQuery = tasksQuery.eq(
+        'contacts.contact_handlers.user_id',
+        myUserId,
+      );
     }
 
     const tasksRes = await tasksQuery;
@@ -99,7 +110,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
       return;
     }
 
-    const taskList = tasksRes.data ?? [];
+    const taskList = (tasksRes.data ?? []) as unknown as TaskRow[];
     setTasks(taskList);
 
     const contactIds = Array.from(new Set(taskList.map((t) => t.contact_id)));
@@ -119,18 +130,20 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
 
     let stalledQuery = supabase
       .from('contacts')
-      .select('id', { count: 'exact', head: true })
+      .select(
+        filterMine ? 'id, contact_handlers!inner(user_id)' : 'id',
+        { count: 'exact', head: true },
+      )
       .eq('org_id', orgId)
       .eq('customer_stage', 'stalled');
-    if (scope === 'mine') {
-      const ids = Array.from(myContactIds);
-      stalledQuery = stalledQuery.in('id', ids);
+    if (filterMine) {
+      stalledQuery = stalledQuery.eq('contact_handlers.user_id', myUserId);
     }
     const stalledRes = await stalledQuery;
     if (!stalledRes.error) setStalledTotal(stalledRes.count ?? 0);
 
     setLoading(false);
-  }, [orgId, statusFilter, scope, myContactIdsKey]);
+  }, [orgId, statusFilter, scope, myContactIdsKey, myUserId]);
 
   useEffect(() => {
     let cancelled = false;
