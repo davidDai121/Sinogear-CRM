@@ -362,6 +362,16 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
             <div className="sgc-gem-progress">
               已有对话 · 最近使用{' '}
               {new Date(existingConv.last_used_at).toLocaleString()}
+              <a
+                className="sgc-btn-link"
+                href={existingConv.gem_chat_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ marginLeft: 8 }}
+                title="在新标签页打开此客户在 Gemini 上的对话"
+              >
+                🔗 打开 Gemini
+              </a>
               <button
                 type="button"
                 className="sgc-btn-link sgc-btn-danger-link"

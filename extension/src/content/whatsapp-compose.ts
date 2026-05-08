@@ -36,8 +36,13 @@ export function fillWhatsAppCompose(text: string): boolean {
   input.focus();
 
   // 1. paste 事件 — text/plain 含 \n，Lexical 会渲成多行
+  // 检测策略：比较 dispatch 前后的 textContent 长度 + 看 defaultPrevented
+  //   - WA Lexical 的 onPaste 会同步调 preventDefault → defaultPrevented = true 表示它接管了
+  //   - 长度变化兜底（万一某天它不调 preventDefault 但确实插入了）
+  // 不要用 `textContent.trim().length > 0`：用户已经在输入框里打过字时会误判 true
   let pasteOk = false;
   try {
+    const before = input.textContent?.length ?? 0;
     const dt = new DataTransfer();
     dt.setData('text/plain', text);
     const pasteEvent = new ClipboardEvent('paste', {
@@ -46,12 +51,14 @@ export function fillWhatsAppCompose(text: string): boolean {
       cancelable: true,
     });
     input.dispatchEvent(pasteEvent);
-    pasteOk = (input.textContent ?? '').trim().length > 0;
+    const after = input.textContent?.length ?? 0;
+    pasteOk = pasteEvent.defaultPrevented || after > before;
   } catch {
     pasteOk = false;
   }
 
   // 2. Fallback：手动按行写入（execCommand insertText 单次会丢 \n）
+  // 仅在 paste 完全没被 WA 处理时走（pasteOk=false），否则会双填
   if (!pasteOk) {
     try {
       const lines = text.split('\n');

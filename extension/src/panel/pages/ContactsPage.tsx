@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import type { Database, CustomerStage } from '@/lib/database.types';
 import { ContactDetailDrawer } from '../components/ContactDetailDrawer';
 import { GoogleSyncDialog } from '../components/GoogleSyncDialog';
+import { ImportChatModal } from '../components/ImportChatModal';
 import { jumpToChat } from '@/lib/jump-to-chat';
 import { useScope } from '../contexts/ScopeContext';
 import { shortNameOf } from '../hooks/useOrgMembers';
@@ -34,6 +35,7 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
   const [stageFilter, setStageFilter] = useState<CustomerStage | ''>('');
   const [openId, setOpenId] = useState<string | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -81,6 +83,14 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
         <h1>客户管理</h1>
         <div className="sgc-page-actions">
           <span className="sgc-page-count">共 {filtered.length} 条</span>
+          <button
+            className="sgc-btn-secondary"
+            onClick={() => setImportOpen(true)}
+            type="button"
+            title="把手机端导出的 WhatsApp 聊天 .txt 导入到 CRM"
+          >
+            📥 导入手机聊天
+          </button>
           <button
             className="sgc-btn-secondary"
             onClick={() => setSyncOpen(true)}
@@ -214,6 +224,16 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
         <GoogleSyncDialog
           orgId={orgId}
           onClose={() => setSyncOpen(false)}
+          onDone={() => {
+            void refresh();
+          }}
+        />
+      )}
+
+      {importOpen && (
+        <ImportChatModal
+          orgId={orgId}
+          onClose={() => setImportOpen(false)}
           onDone={() => {
             void refresh();
           }}

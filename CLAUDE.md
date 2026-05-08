@@ -293,6 +293,9 @@ npm run dev
 npm run build
 # chrome://extensions/ → 加载 extension/dist 文件夹
 # 改了代码后 → 点扩展卡片上的 ↻ 重新加载 → web.whatsapp.com 刷新
+
+# 给团队打 zip（dist-zips/sino-gear-crm-vX.Y.Z-YYYYMMDD.zip）
+npm run package
 ```
 
 **扩展 ID 已用 manifest.json 的 key 字段固定为 `mjleiklkaailpmmclejegahkfnjhjkpj`**——这样 Google OAuth 配置不用每次重装扩展都改。
@@ -321,7 +324,7 @@ npm run build
 
 ### 基础设施
 - [x] Chrome 扩展骨架（MV3 + Vite + React + TS，@crxjs/vite-plugin 2.4 正式版）
-- [x] Supabase 多租户 schema + RLS（**13 个 migration 全部上线**）
+- [x] Supabase 多租户 schema + RLS（**14 个 migration 全部上线**）
 - [x] 邮箱密码登录（chrome.storage 持久 session）+ 创建团队
 - [x] **团队成员管理 UI**（顶栏 👥 团队）：list / invite / 改角色 / 移除（仅 owner/admin）
 - [x] **Supabase 免费层防自动暂停**：0012 `pg_cron` 每日 03:00 UTC 写心跳到 `_keepalive` 表
@@ -422,11 +425,23 @@ npm run build
 - [x] **@crxjs/vite-plugin 升级**（`^2.0.0-beta.27` → `^2.4.0` 正式版）
 - [x] **FilterSidebar 拆子组件**（811 → 451 行，分出 `FilterPrimitives` / `FilterMaintenancePanel` / `FilterTodoList`）
 
+### 近期补完（2026-05-08）
+
+- [x] **团队多用户视图**（migration `0014_handlers_and_per_user_gem.sql` + `lib/contact-handlers.ts` + `panel/contexts/ScopeContext.tsx` + `panel/components/ScopePicker.tsx` + `panel/hooks/useOrgMembers.ts`）：scope=mine/all 切换 + 撞单 tag + per-user Gem 模板
+- [x] **DashboardPage / TasksPage 服务端 join 过滤**：用 `contact_handlers!inner(user_id)` 替代 `.in('id', myIds)`，避免几百个 UUID 把 URL 撑爆
+- [x] **今日待办加 "📋 所有客户" 一档**（filters.ts TodoBucket + matchTodoBucket + todoCounts）
+- [x] **维护工具折叠**（FilterMaintenancePanel 用 chrome.storage 记展开状态，默认收起到 "🔧 维护工具 ▸"）
+- [x] **打包脚本**（`extension/scripts/package.mjs` + `npm run package`）：build + 自动产 dated zip 到 `dist-zips/`
+- [x] **团队使用手册.md**：发给销售员工的中文操作指南（scope / 撞单 / per-user Gem / FAQ）
+- [x] **垃圾客户清理**：一次性 SQL DELETE 把"完全空壳 + 无消息"的 ~2900 个历史 contact 删了（cascade 一并清 contact_tags / vehicle_interests / quotes / tasks / contact_handlers / messages）
+
 ### 还可以做的（不急）
 
 - [ ] WA Web DOM / IDB schema 漂移自动监测（目前靠用户报告失效）
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
 - [ ] Cloudinary 用量监控（25 GB/月免费），临近上限提醒
+- [ ] OrgSetup 加"是否被邀请的员工"二次确认，防止新员工误建独立 org（导致 CRM 数据隔离）
+- [ ] Chrome Web Store 私有发布（$5 + 1-3 天审核 → 全员自动更新，告别 zip 分发）
 
 ## Gem 配置流程（用户首次设置）
 
@@ -464,6 +479,8 @@ WhatsApp 绿色主题：
 - **chat-media-capture DOM 依赖**：lightbox 关闭按钮 `aria-label="关闭"`、下载按钮 `aria-label="下载"`、多选取消 `aria-label="取消选择"`、"已选 N 项" span 文案——WA 改 i18n 或 ARIA 时要修
 - **暂存盘不持久化**：刷新页面 / 切扩展 tab 即清空（File 对象不能 serialize），不是 bug 是设计
 - **`.in('id', myIds)` URL 长度炸弹**：scope=mine 视图下 myContactIds 可能含数百 UUID，PostgREST 把它们全塞进 query string（每个 37 字符），URL 超 ~12KB 被网络层直接拒，错误是 `TypeError: Failed to fetch`（不是 Supabase 返回的 PostgrestError）。**新加按主理人过滤的查询一律走服务端 join：`.select('..., contact_handlers!inner(user_id)').eq('contact_handlers.user_id', myUserId)`**（嵌套关系用 `'contacts.contact_handlers.user_id'`），URL 长度恒定。已修复点：DashboardPage / TasksPage
+- **Supabase 默认 1000 行返回上限**：`.select()` 不加 range 默认最多返回 1000 行，超了静默截断（不报错）。涉及 contact_handlers 全量 / contacts 全量 id 列表的查询要分页拉（`fetchHandlersForOrg` / ScopeContext 孤儿认领都已改）
+- **新员工误建独立 org**：被邀请的员工注册后看到 `OrgSetup` 界面会以为该建团队 → 建出来一个孤立 org，CRM 跟主 org 完全隔离（看不到客户、看不到 Gem、撞单不触发）。临时修复：手动 SQL 把员工 `organization_members` 行从空 org 删了再插到主 org，并删空 org（contacts cascade）。长期修复：OrgSetup 加二次确认 / 默认隐藏入口
 
 ## 用户偏好
 

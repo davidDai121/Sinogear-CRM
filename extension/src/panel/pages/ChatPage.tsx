@@ -12,6 +12,7 @@ interface Props {
 }
 
 const SIDEBAR_COLLAPSED_KEY = 'sgc:filter-sidebar-collapsed';
+const SIDE_PANEL_COLLAPSED_KEY = 'sgc:side-panel-collapsed';
 
 export function ChatPage({ orgId }: Props) {
   const chat = useCurrentChat();
@@ -19,6 +20,7 @@ export function ChatPage({ orgId }: Props) {
   const { scope, myContactIds, myUserId, refresh: refreshScope } = useScope();
   const [filtered, setFiltered] = useState<CrmContact[] | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
   const [clearSignal, setClearSignal] = useState(0);
   const autoAttributedRef = useRef(false);
 
@@ -57,14 +59,22 @@ export function ChatPage({ orgId }: Props) {
   }, [crm.contacts, scope, myContactIds, chat.phone]);
 
   useEffect(() => {
-    void chrome.storage.local.get(SIDEBAR_COLLAPSED_KEY).then((r) => {
-      if (r[SIDEBAR_COLLAPSED_KEY] === true) setSidebarCollapsed(true);
-    });
+    void chrome.storage.local
+      .get([SIDEBAR_COLLAPSED_KEY, SIDE_PANEL_COLLAPSED_KEY])
+      .then((r) => {
+        if (r[SIDEBAR_COLLAPSED_KEY] === true) setSidebarCollapsed(true);
+        if (r[SIDE_PANEL_COLLAPSED_KEY] === true) setSidePanelCollapsed(true);
+      });
   }, []);
 
   const toggleSidebar = (collapsed: boolean) => {
     setSidebarCollapsed(collapsed);
     void chrome.storage.local.set({ [SIDEBAR_COLLAPSED_KEY]: collapsed });
+  };
+
+  const toggleSidePanel = (collapsed: boolean) => {
+    setSidePanelCollapsed(collapsed);
+    void chrome.storage.local.set({ [SIDE_PANEL_COLLAPSED_KEY]: collapsed });
   };
 
   useEffect(() => {
@@ -79,14 +89,29 @@ export function ChatPage({ orgId }: Props) {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    // 只有 sidebar 没折叠 + 有筛选结果时才占用宽度
+    // sidebar 折叠了 FilteredChatList 本身也会被 unmount，body class 也得跟着去掉
     document.body.classList.toggle(
       'sgc-filter-results-visible',
-      filtered !== null,
+      filtered !== null && !sidebarCollapsed,
     );
     return () => {
       document.body.classList.remove('sgc-filter-results-visible');
     };
-  }, [filtered]);
+  }, [filtered, sidebarCollapsed]);
+
+  // 右侧客户卡折叠：折叠时移除 sgc-side-panel-visible 让 WA 占满右边
+  // ChatPage 独占管理这个 class（AppShell 不再插手），unmount 时清理
+  useEffect(() => {
+    if (sidePanelCollapsed) {
+      document.body.classList.remove('sgc-side-panel-visible');
+    } else {
+      document.body.classList.add('sgc-side-panel-visible');
+    }
+    return () => {
+      document.body.classList.remove('sgc-side-panel-visible');
+    };
+  }, [sidePanelCollapsed]);
 
   // 不自动关闭筛选 — 用户点 × 才关
 
@@ -136,25 +161,49 @@ export function ChatPage({ orgId }: Props) {
         />
       )}
 
-      <aside className="sgc-side-panel">
-        <div className="sgc-side-panel-header">
-          <strong className="sgc-side-panel-name">{headerName}</strong>
-          {collisionNames && (
-            <span
-              className="sgc-collision-tag"
-              title={`同事 ${collisionNames} 也在跟这个客户`}
+      {!sidePanelCollapsed && (
+        <aside className="sgc-side-panel">
+          <div className="sgc-side-panel-header">
+            <button
+              type="button"
+              className="sgc-side-panel-collapse"
+              onClick={() => toggleSidePanel(true)}
+              title="收起右侧客户卡"
+              aria-label="收起右侧客户卡"
             >
-              撞单：{collisionNames}
-            </span>
-          )}
-          {chat.phone && headerName !== chat.phone && (
-            <span className="sgc-side-panel-phone">{chat.phone}</span>
-          )}
-        </div>
-        <div className="sgc-side-panel-body">
-          <ContactCard chat={chat} orgId={orgId} />
-        </div>
-      </aside>
+              ›
+            </button>
+            <strong className="sgc-side-panel-name">{headerName}</strong>
+            {collisionNames && (
+              <span
+                className="sgc-collision-tag"
+                title={`同事 ${collisionNames} 也在跟这个客户`}
+              >
+                撞单：{collisionNames}
+              </span>
+            )}
+            {chat.phone && headerName !== chat.phone && (
+              <span className="sgc-side-panel-phone">{chat.phone}</span>
+            )}
+          </div>
+          <div className="sgc-side-panel-body">
+            <ContactCard chat={chat} orgId={orgId} />
+          </div>
+        </aside>
+      )}
+
+      {sidePanelCollapsed && (
+        <button
+          type="button"
+          className="sgc-side-panel-expander"
+          onClick={() => toggleSidePanel(false)}
+          title="展开右侧客户卡"
+          aria-label="展开右侧客户卡"
+        >
+          <span className="sgc-side-panel-expander-icon">👤</span>
+          <span className="sgc-side-panel-expander-arrow">‹</span>
+        </button>
+      )}
     </>
   );
 }

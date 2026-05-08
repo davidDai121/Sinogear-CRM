@@ -19,12 +19,10 @@ export function AppShell() {
   const [tab, setTab] = useState<TabKey>('chat');
 
   useEffect(() => {
-    const showSide = !!session && !!org.orgId && tab === 'chat';
+    // sgc-side-panel-visible 由 ChatPage 自己管（含折叠状态），AppShell 只管覆盖层
     const showOverlay = !!session && !!org.orgId && tab !== 'chat';
-    document.body.classList.toggle('sgc-side-panel-visible', showSide);
     document.body.classList.toggle('sgc-page-overlay-active', showOverlay);
     return () => {
-      document.body.classList.remove('sgc-side-panel-visible');
       document.body.classList.remove('sgc-page-overlay-active');
     };
   }, [session, org.orgId, tab]);
