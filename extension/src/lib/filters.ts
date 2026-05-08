@@ -3,6 +3,7 @@ import type { CrmContact } from '@/panel/hooks/useCrmData';
 import { getBrandOverride } from './brand-overrides';
 
 export type TodoBucket =
+  | 'all'
   | 'needs_reply'
   | 'negotiating'
   | 'priority'
@@ -162,6 +163,7 @@ export function isFilterEmpty(f: FilterState): boolean {
 }
 
 function matchTodoBucket(c: CrmContact, bucket: TodoBucket): boolean {
+  if (bucket === 'all') return true;
   const cls = c.classification;
   if (!cls) return false;
   if (bucket === 'needs_reply') return cls.needsReply;
@@ -261,6 +263,7 @@ export function applyFilter(
 
 export function todoCounts(contacts: CrmContact[]): Record<TodoBucket, number> {
   const counts: Record<TodoBucket, number> = {
+    all: 0,
     needs_reply: 0,
     negotiating: 0,
     priority: 0,
@@ -270,6 +273,7 @@ export function todoCounts(contacts: CrmContact[]): Record<TodoBucket, number> {
   for (const c of contacts) {
     if (c.chat?.archive) continue;
     if (c.contact?.quality === 'spam') continue;
+    counts.all++;
     if (!c.classification) continue;
     if (c.classification.needsReply) counts.needs_reply++;
     if (c.contact && NEGOTIATING_STAGES.has(c.contact.customer_stage)) {

@@ -11,6 +11,7 @@ import { TasksPage } from './pages/TasksPage';
 import { TagsPage } from './pages/TagsPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { MediaStagingTray } from './components/MediaStagingTray';
+import { ScopeProvider } from './contexts/ScopeContext';
 
 export function AppShell() {
   const { session, user, loading: authLoading } = useAuth();
@@ -67,36 +68,38 @@ export function AppShell() {
   }
 
   return (
-    <div className="sgc-shell">
-      <TopNav
-        active={tab}
-        onChange={setTab}
-        orgId={org.orgId}
-        orgName={org.orgName}
-        userEmail={user?.email ?? null}
-        onSignOut={signOut}
-      />
+    <ScopeProvider orgId={org.orgId}>
+      <div className="sgc-shell">
+        <TopNav
+          active={tab}
+          onChange={setTab}
+          orgId={org.orgId}
+          orgName={org.orgName}
+          userEmail={user?.email ?? null}
+          onSignOut={signOut}
+        />
 
-      {tab === 'chat' && <ChatPage orgId={org.orgId} />}
+        {tab === 'chat' && <ChatPage orgId={org.orgId} />}
 
-      {tab !== 'chat' && (
-        <div className="sgc-page-overlay">
-          {tab === 'dashboard' && <DashboardPage orgId={org.orgId} />}
-          {tab === 'contacts' && (
-            <ContactsPage
-              orgId={org.orgId}
-              onJumpToChat={() => setTab('chat')}
-            />
-          )}
-          {tab === 'vehicles' && <VehiclesPage orgId={org.orgId} />}
-          {tab === 'tasks' && (
-            <TasksPage orgId={org.orgId} onJumpToChat={() => setTab('chat')} />
-          )}
-          {tab === 'tags' && <TagsPage orgId={org.orgId} />}
-        </div>
-      )}
+        {tab !== 'chat' && (
+          <div className="sgc-page-overlay">
+            {tab === 'dashboard' && <DashboardPage orgId={org.orgId} />}
+            {tab === 'contacts' && (
+              <ContactsPage
+                orgId={org.orgId}
+                onJumpToChat={() => setTab('chat')}
+              />
+            )}
+            {tab === 'vehicles' && <VehiclesPage orgId={org.orgId} />}
+            {tab === 'tasks' && (
+              <TasksPage orgId={org.orgId} onJumpToChat={() => setTab('chat')} />
+            )}
+            {tab === 'tags' && <TagsPage orgId={org.orgId} />}
+          </div>
+        )}
 
-      <MediaStagingTray orgId={org.orgId} />
-    </div>
+        <MediaStagingTray orgId={org.orgId} />
+      </div>
+    </ScopeProvider>
   );
 }

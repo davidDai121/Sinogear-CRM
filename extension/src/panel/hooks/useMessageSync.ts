@@ -4,6 +4,7 @@ import {
   waitForChatMessages,
 } from '@/content/whatsapp-messages';
 import { countMessages, syncMessages } from '@/lib/message-sync';
+import { bumpHandler } from '@/lib/contact-handlers';
 
 interface UseMessageSyncResult {
   /** Supabase 中已存的消息总数 */
@@ -41,10 +42,11 @@ export function useMessageSync(
     void countMessages(contactId).then(setCount);
   }, [contactId, refreshKey]);
 
-  // 自动 sync
+  // 自动 sync + 登记 contact_handlers 心跳（标记我在跟这个客户）
   useEffect(() => {
     if (!contactId || needsJump) return;
     let cancelled = false;
+    void bumpHandler(contactId);
     (async () => {
       setSyncing(true);
       try {

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { bulkSyncWhatsAppChats, type BulkSyncResult } from '@/lib/bulk-sync';
 import { syncWhatsAppLabels, type LabelSyncResult } from '@/lib/label-sync';
 import {
@@ -24,7 +24,24 @@ interface Props {
   onRefresh: () => void;
 }
 
+const MAINT_OPEN_KEY = 'sgc:maint-open';
+
 export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
+  const [open, setOpen] = useState(false);
+
+  // 持久化展开状态（默认折叠）
+  useEffect(() => {
+    void chrome.storage.local.get(MAINT_OPEN_KEY).then((s) => {
+      if (s[MAINT_OPEN_KEY] === true) setOpen(true);
+    });
+  }, []);
+
+  const toggleOpen = () => {
+    const next = !open;
+    setOpen(next);
+    void chrome.storage.local.set({ [MAINT_OPEN_KEY]: next });
+  };
+
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<BulkSyncResult | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -172,6 +189,17 @@ export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
   return (
     <div className="sgc-filter-sync">
       <button
+        type="button"
+        className="sgc-maint-toggle"
+        onClick={toggleOpen}
+        aria-expanded={open}
+      >
+        <span className="sgc-maint-toggle-label">🔧 维护工具</span>
+        <span className="sgc-maint-toggle-caret">{open ? '▾' : '▸'}</span>
+      </button>
+
+      {!open ? null : <>
+      <button
         className="sgc-btn-secondary sgc-filter-sync-btn"
         onClick={runBulkSync}
         disabled={syncing}
@@ -291,6 +319,7 @@ export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
       {repairError && (
         <div className="sgc-filter-sync-error">{repairError}</div>
       )}
+      </>}
     </div>
   );
 }

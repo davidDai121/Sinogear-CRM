@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { manualRetranslate } from '@/content/auto-translate';
 import { GemTemplatesModal } from './GemTemplatesModal';
 import { TeamMembersModal } from './TeamMembersModal';
+import { ScopePicker } from './ScopePicker';
+import { useScope } from '../contexts/ScopeContext';
+import { supabase } from '@/lib/supabase';
 
 export type TabKey =
   | 'dashboard'
@@ -66,8 +69,27 @@ export function TopNav({
   onSignOut,
 }: Props) {
   const translate = useAutoTranslateToggle();
+  const scope = useScope();
   const [showGemTemplates, setShowGemTemplates] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
+  const [allCount, setAllCount] = useState<number | undefined>();
+
+  // 拉一次 org 总客户数（30s 一次跟着 ScopeContext 节奏）
+  useEffect(() => {
+    if (!orgId) return;
+    let cancelled = false;
+    void (async () => {
+      const { count } = await supabase
+        .from('contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('org_id', orgId);
+      if (!cancelled) setAllCount(count ?? 0);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId, scope.handlersByContact]);
+
   return (
     <div className="sgc-topnav">
       <div className="sgc-topnav-brand">
@@ -76,6 +98,10 @@ export function TopNav({
           Sino Gear CRM
           {orgName && <span className="sgc-topnav-org"> · {orgName}</span>}
         </span>
+        <ScopePicker
+          mineCount={scope.myContactIds.size}
+          allCount={allCount}
+        />
       </div>
 
       <nav className="sgc-topnav-tabs">

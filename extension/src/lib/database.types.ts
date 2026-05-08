@@ -408,6 +408,22 @@ export interface Database {
         };
         Relationships: [];
       };
+      contact_handlers: {
+        Row: {
+          contact_id: string;
+          user_id: string;
+          last_seen_at: string;
+        };
+        Insert: {
+          contact_id: string;
+          user_id: string;
+          last_seen_at?: string;
+        };
+        Update: {
+          last_seen_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {

@@ -3,6 +3,8 @@ import { supabase } from '@/lib/supabase';
 import type { Database, TaskStatus } from '@/lib/database.types';
 import { TaskModal } from '../components/TaskModal';
 import { jumpToChat } from '@/lib/jump-to-chat';
+import { useScope } from '../contexts/ScopeContext';
+import { shortNameOf } from '../hooks/useOrgMembers';
 
 type TaskRow = Database['public']['Tables']['tasks']['Row'];
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
@@ -47,6 +49,8 @@ function shortName(c: ContactRow | undefined, fallbackPhone: string): string {
 }
 
 export function TasksPage({ orgId, onJumpToChat }: Props) {
+  const { scope, myContactIds, handlersByContact, membersById, myUserId } =
+    useScope();
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [contactMap, setContactMap] = useState<Record<string, ContactRow>>({});
   const [statusFilter, setStatusFilter] = useState<TaskStatus>('open');
@@ -59,16 +63,35 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
   );
   const [stalledTotal, setStalledTotal] = useState(0);
 
+  const myContactIdsKey = useMemo(
+    () => Array.from(myContactIds).sort().join(','),
+    [myContactIds],
+  );
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
 
-    const tasksRes = await supabase
+    let tasksQuery = supabase
       .from('tasks')
       .select('*')
       .eq('org_id', orgId)
       .eq('status', statusFilter)
       .order('due_at', { ascending: true, nullsFirst: false });
+
+    if (scope === 'mine') {
+      const ids = Array.from(myContactIds);
+      if (ids.length === 0) {
+        setTasks([]);
+        setContactMap({});
+        setStalledTotal(0);
+        setLoading(false);
+        return;
+      }
+      tasksQuery = tasksQuery.in('contact_id', ids);
+    }
+
+    const tasksRes = await tasksQuery;
 
     if (tasksRes.error) {
       setError(tasksRes.error.message);
@@ -94,15 +117,20 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
       setContactMap({});
     }
 
-    const stalledRes = await supabase
+    let stalledQuery = supabase
       .from('contacts')
       .select('id', { count: 'exact', head: true })
       .eq('org_id', orgId)
       .eq('customer_stage', 'stalled');
+    if (scope === 'mine') {
+      const ids = Array.from(myContactIds);
+      stalledQuery = stalledQuery.in('id', ids);
+    }
+    const stalledRes = await stalledQuery;
     if (!stalledRes.error) setStalledTotal(stalledRes.count ?? 0);
 
     setLoading(false);
-  }, [orgId, statusFilter]);
+  }, [orgId, statusFilter, scope, myContactIdsKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -389,6 +417,24 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
                       <strong>
                         {contact?.name || contact?.wa_name || contact?.phone || '—'}
                       </strong>
+                      {contact &&
+                        (() => {
+                          const others = (
+                            handlersByContact.get(contact.id) ?? []
+                          ).filter((u) => u !== myUserId);
+                          if (others.length === 0) return null;
+                          const names = others
+                            .map((u) => shortNameOf(membersById.get(u)))
+                            .join('、');
+                          return (
+                            <span
+                              className="sgc-collision-tag"
+                              title={`同事 ${names} 也在跟这个客户`}
+                            >
+                              撞单：{names}
+                            </span>
+                          );
+                        })()}
                       {contact?.country && (
                         <span className="sgc-muted"> · {contact.country}</span>
                       )}

@@ -3,6 +3,8 @@ import type { CrmContact } from '../hooks/useCrmData';
 import { jumpToChat } from '@/lib/jump-to-chat';
 import { stringifyError } from '@/lib/errors';
 import { supabase } from '@/lib/supabase';
+import { useScope } from '../contexts/ScopeContext';
+import { shortNameOf } from '../hooks/useOrgMembers';
 
 interface Props {
   contacts: CrmContact[];
@@ -36,6 +38,7 @@ export function FilteredChatList({
   onClose,
   onAction,
 }: Props) {
+  const { handlersByContact, membersById, myUserId } = useScope();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const activeRowRef = useRef<HTMLDivElement | null>(null);
@@ -144,6 +147,24 @@ export function FilteredChatList({
                     <span className="sgc-filtered-row-name">
                       {c.displayName}
                     </span>
+                    {(() => {
+                      if (!c.contact) return null;
+                      const others = (
+                        handlersByContact.get(c.contact.id) ?? []
+                      ).filter((u) => u !== myUserId);
+                      if (others.length === 0) return null;
+                      const names = others
+                        .map((u) => shortNameOf(membersById.get(u)))
+                        .join('、');
+                      return (
+                        <span
+                          className="sgc-collision-tag"
+                          title={`同事 ${names} 也在跟这个客户`}
+                        >
+                          撞单：{names}
+                        </span>
+                      );
+                    })()}
                     <span className="sgc-filtered-row-quality">
                       {QUALITY_ICON[q]}
                     </span>

@@ -4,6 +4,8 @@ import type { Database, CustomerStage } from '@/lib/database.types';
 import { ContactDetailDrawer } from '../components/ContactDetailDrawer';
 import { GoogleSyncDialog } from '../components/GoogleSyncDialog';
 import { jumpToChat } from '@/lib/jump-to-chat';
+import { useScope } from '../contexts/ScopeContext';
+import { shortNameOf } from '../hooks/useOrgMembers';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 
@@ -23,6 +25,8 @@ interface Props {
 }
 
 export function ContactsPage({ orgId, onJumpToChat }: Props) {
+  const { scope, myContactIds, handlersByContact, membersById, myUserId } =
+    useScope();
   const [contacts, setContacts] = useState<ContactRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +61,8 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
 
   const filtered = contacts.filter((c) => {
     if (stageFilter && c.customer_stage !== stageFilter) return false;
+    // 视图过滤：搜索时永远查全部（方便查同事客户），否则按 scope 限制
+    if (!search && scope === 'mine' && !myContactIds.has(c.id)) return false;
     if (search) {
       const q = search.toLowerCase();
       return (
@@ -145,7 +151,26 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
                     void jumpToChat(digits);
                   }}
                 >
-                  <td>{c.name || c.wa_name || '—'}</td>
+                  <td>
+                    {c.name || c.wa_name || '—'}
+                    {(() => {
+                      const others = (handlersByContact.get(c.id) ?? []).filter(
+                        (u) => u !== myUserId,
+                      );
+                      if (others.length === 0) return null;
+                      const names = others
+                        .map((u) => shortNameOf(membersById.get(u)))
+                        .join('、');
+                      return (
+                        <span
+                          className="sgc-collision-tag"
+                          title={`同事 ${names} 也在跟这个客户`}
+                        >
+                          撞单：{names}
+                        </span>
+                      );
+                    })()}
+                  </td>
                   <td>{c.phone}</td>
                   <td>{c.country || '—'}</td>
                   <td>

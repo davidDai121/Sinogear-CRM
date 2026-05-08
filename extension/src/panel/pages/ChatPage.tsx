@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCurrentChat } from '../hooks/useCurrentChat';
 import { useCrmData, type CrmContact } from '../hooks/useCrmData';
 import { ContactCard } from '../components/ContactCard';
 import { FilterSidebar } from '../components/FilterSidebar';
 import { FilteredChatList } from '../components/FilteredChatList';
+import { useCollisionTag, useScope } from '../contexts/ScopeContext';
+import { batchBumpHandlers } from '@/lib/contact-handlers';
 
 interface Props {
   orgId: string;
@@ -14,9 +16,45 @@ const SIDEBAR_COLLAPSED_KEY = 'sgc:filter-sidebar-collapsed';
 export function ChatPage({ orgId }: Props) {
   const chat = useCurrentChat();
   const crm = useCrmData(orgId);
+  const { scope, myContactIds, myUserId, refresh: refreshScope } = useScope();
   const [filtered, setFiltered] = useState<CrmContact[] | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [clearSignal, setClearSignal] = useState(0);
+  const autoAttributedRef = useRef(false);
+
+  // 自动归属：扩展加载时，把当前用户 WA 聊天里的所有联系人一次性登记到我名下
+  // 这样老客户（created_by=null 没被 migration 回填的）也能被识别为"我的"
+  // 只跑一次（每次 reload extension 一次），避免 20s 轮询时反复 upsert
+  useEffect(() => {
+    if (autoAttributedRef.current) return;
+    if (!myUserId || crm.loading || crm.contacts.length === 0) return;
+    const toBump = crm.contacts
+      .filter((c) => c.contact && !myContactIds.has(c.contact.id))
+      .map((c) => c.contact!.id);
+    if (toBump.length === 0) {
+      autoAttributedRef.current = true;
+      return;
+    }
+    autoAttributedRef.current = true;
+    void batchBumpHandlers(toBump, myUserId).then((n) => {
+      if (n > 0) {
+        console.log(`[scope] 自动归属 ${n} 个客户到当前用户`);
+        refreshScope();
+      }
+    });
+  }, [myUserId, crm.loading, crm.contacts, myContactIds, refreshScope]);
+
+  // 视图过滤：scope=mine 时只保留 myContactIds 里的客户
+  // 当前打开的客户始终显示（即使不是我的，方便接同事单时对照）
+  const scopedContacts = useMemo(() => {
+    if (scope === 'all') return crm.contacts;
+    return crm.contacts.filter((c) => {
+      if (!c.contact) return false; // 没建 contact 的 WA 聊天，scope=mine 时隐藏
+      return (
+        myContactIds.has(c.contact.id) || c.phone === chat.phone
+      );
+    });
+  }, [crm.contacts, scope, myContactIds, chat.phone]);
 
   useEffect(() => {
     void chrome.storage.local.get(SIDEBAR_COLLAPSED_KEY).then((r) => {
@@ -62,12 +100,13 @@ export function ChatPage({ orgId }: Props) {
     chat.name ||
     chat.phone ||
     '当前客户';
+  const collisionNames = useCollisionTag(currentCrmContact?.contact?.id);
 
   return (
     <>
       {!sidebarCollapsed && (
         <FilterSidebar
-          contacts={crm.contacts}
+          contacts={scopedContacts}
           loading={crm.loading}
           orgId={orgId}
           onFilterChange={setFiltered}
@@ -100,6 +139,14 @@ export function ChatPage({ orgId }: Props) {
       <aside className="sgc-side-panel">
         <div className="sgc-side-panel-header">
           <strong className="sgc-side-panel-name">{headerName}</strong>
+          {collisionNames && (
+            <span
+              className="sgc-collision-tag"
+              title={`同事 ${collisionNames} 也在跟这个客户`}
+            >
+              撞单：{collisionNames}
+            </span>
+          )}
           {chat.phone && headerName !== chat.phone && (
             <span className="sgc-side-panel-phone">{chat.phone}</span>
           )}

@@ -4,6 +4,7 @@ import type { CustomerStage } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
 import { canonicalizeModel } from '@/lib/vehicle-aliases';
 import { brandOf } from '@/lib/filters';
+import { useScope } from '../contexts/ScopeContext';
 
 interface Props {
   orgId: string;
@@ -55,12 +56,17 @@ function startOfPeriod(period: Period): Date {
 }
 
 export function DashboardPage({ orgId }: Props) {
+  const { scope, myContactIds } = useScope();
   const [period, setPeriod] = useState<Period>('week');
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const start = useMemo(() => startOfPeriod(period), [period]);
+  const myContactIdsKey = useMemo(
+    () => Array.from(myContactIds).sort().join(','),
+    [myContactIds],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -70,6 +76,79 @@ export function DashboardPage({ orgId }: Props) {
     (async () => {
       try {
         const startIso = start.toISOString();
+        const myIds = scope === 'mine' ? Array.from(myContactIds) : null;
+
+        // scope=mine 时如果没有任何主理客户，全部清零
+        if (myIds && myIds.length === 0) {
+          if (!cancelled) {
+            setData({
+              newContacts: 0,
+              newQuotes: 0,
+              newTasks: 0,
+              aiExtracts: 0,
+              stageDist: {
+                new: 0,
+                qualifying: 0,
+                negotiating: 0,
+                stalled: 0,
+                quoted: 0,
+                won: 0,
+                lost: 0,
+              },
+              topVehicles: [],
+              stalledTotal: 0,
+              wonTotal: 0,
+            });
+            setLoading(false);
+          }
+          return;
+        }
+
+        let newContactsQ = supabase
+          .from('contacts')
+          .select('id', { count: 'exact', head: true })
+          .eq('org_id', orgId)
+          .gte('created_at', startIso);
+        let stagesQ = supabase
+          .from('contacts')
+          .select('customer_stage')
+          .eq('org_id', orgId);
+        let newQuotesQ = supabase
+          .from('quotes')
+          .select('id, contacts!inner(org_id)', {
+            count: 'exact',
+            head: true,
+          })
+          .eq('contacts.org_id', orgId)
+          .gte('created_at', startIso);
+        let newTasksQ = supabase
+          .from('tasks')
+          .select('id', { count: 'exact', head: true })
+          .eq('org_id', orgId)
+          .gte('created_at', startIso);
+        let aiExtractsQ = supabase
+          .from('contact_events')
+          .select('id, contacts!inner(org_id)', {
+            count: 'exact',
+            head: true,
+          })
+          .eq('contacts.org_id', orgId)
+          .eq('event_type', 'ai_extracted')
+          .gte('created_at', startIso);
+        let vehiclesQ = supabase
+          .from('vehicle_interests')
+          .select('model, contacts!inner(org_id)')
+          .eq('contacts.org_id', orgId);
+
+        if (myIds) {
+          newContactsQ = newContactsQ.in('id', myIds);
+          stagesQ = stagesQ.in('id', myIds);
+          newQuotesQ = newQuotesQ.in('contact_id', myIds);
+          newTasksQ = newTasksQ.in('contact_id', myIds);
+          aiExtractsQ = aiExtractsQ.in('contact_id', myIds);
+          vehiclesQ = vehiclesQ.in('contact_id', myIds);
+        }
+
         const [
           newContactsRes,
           stagesRes,
@@ -78,38 +157,12 @@ export function DashboardPage({ orgId }: Props) {
           aiExtractsRes,
           vehiclesRes,
         ] = await Promise.all([
-          supabase
-            .from('contacts')
-            .select('id', { count: 'exact', head: true })
-            .eq('org_id', orgId)
-            .gte('created_at', startIso),
-          supabase.from('contacts').select('customer_stage').eq('org_id', orgId),
-          supabase
-            .from('quotes')
-            .select('id, contacts!inner(org_id)', {
-              count: 'exact',
-              head: true,
-            })
-            .eq('contacts.org_id', orgId)
-            .gte('created_at', startIso),
-          supabase
-            .from('tasks')
-            .select('id', { count: 'exact', head: true })
-            .eq('org_id', orgId)
-            .gte('created_at', startIso),
-          supabase
-            .from('contact_events')
-            .select('id, contacts!inner(org_id)', {
-              count: 'exact',
-              head: true,
-            })
-            .eq('contacts.org_id', orgId)
-            .eq('event_type', 'ai_extracted')
-            .gte('created_at', startIso),
-          supabase
-            .from('vehicle_interests')
-            .select('model, contacts!inner(org_id)')
-            .eq('contacts.org_id', orgId),
+          newContactsQ,
+          stagesQ,
+          newQuotesQ,
+          newTasksQ,
+          aiExtractsQ,
+          vehiclesQ,
         ]);
 
         if (cancelled) return;
@@ -168,7 +221,7 @@ export function DashboardPage({ orgId }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [orgId, start.getTime()]);
+  }, [orgId, start.getTime(), scope, myContactIdsKey]);
 
   const periodLabel = period === 'week' ? '本周' : '本月';
   const totalContacts = data

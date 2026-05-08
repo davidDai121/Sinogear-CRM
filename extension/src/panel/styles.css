@@ -2307,6 +2307,154 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
   background: rgba(255, 255, 255, 0.28);
 }
 
+/* Scope picker (我的客户 / 全部) in topnav */
+.sgc-scope-picker {
+  position: relative;
+  margin-left: 12px;
+}
+
+.sgc-scope-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 12px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.sgc-scope-trigger:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.sgc-scope-count {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.sgc-scope-caret {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.sgc-scope-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 240px;
+  background: #fff;
+  border: 1px solid #e9edef;
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  padding: 4px;
+}
+
+.sgc-scope-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  color: #111b21;
+  font-size: 13px;
+}
+
+.sgc-scope-item:hover {
+  background: #f0f2f5;
+}
+
+.sgc-scope-item-active {
+  background: #e7f3ee;
+}
+
+.sgc-scope-icon {
+  font-size: 16px;
+}
+
+.sgc-scope-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sgc-scope-text strong {
+  font-size: 13px;
+}
+
+.sgc-scope-text .sgc-muted {
+  font-size: 11px;
+}
+
+.sgc-scope-num {
+  font-size: 12px;
+  color: #667781;
+  background: #f0f2f5;
+  border-radius: 8px;
+  padding: 1px 8px;
+  font-weight: 600;
+}
+
+.sgc-scope-check {
+  color: #00a884;
+  font-weight: 700;
+  margin-left: 4px;
+}
+
+/* 维护工具折叠头 */
+.sgc-maint-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 8px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #667781;
+  cursor: pointer;
+  text-align: left;
+  border-bottom: 1px solid #e9edef;
+}
+
+.sgc-maint-toggle:hover {
+  color: #111b21;
+}
+
+.sgc-maint-toggle-caret {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* 撞单 tag — 名字旁的橙色提示 */
+.sgc-collision-tag {
+  display: inline-block;
+  background: #fff4e5;
+  color: #b06b00;
+  border: 1px solid #f3d8a5;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 4px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 /* Auto-translation line injected under WhatsApp message bubbles */
 .sgc-translation {
   margin-top: 4px;
