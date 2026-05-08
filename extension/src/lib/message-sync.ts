@@ -56,11 +56,13 @@ export async function loadMessages(
   contactId: string,
   limit = 200,
 ): Promise<MessageRow[]> {
+  // 按 sent_at DESC 取最近 N 条，再反转成正序返回
+  // 之前用 ASC + limit 拿到的是最老的 N 条，导入大量历史后 Gem 看到的是开头不是最近
   const { data } = await supabase
     .from('messages')
     .select('*')
     .eq('contact_id', contactId)
-    .order('sent_at', { ascending: true, nullsFirst: false })
+    .order('sent_at', { ascending: false, nullsFirst: false })
     .limit(limit);
-  return data ?? [];
+  return (data ?? []).reverse();
 }
