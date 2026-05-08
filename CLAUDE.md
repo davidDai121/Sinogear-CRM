@@ -101,7 +101,9 @@ Supabase（托管 Postgres + Auth）
 │   │   │   │   ├── TimelineSection.tsx 客户事件时间线（图标 + 相对时间）
 │   │   │   │   ├── MessagesHistorySection.tsx  聊天历史入口 +
 │   │   │   │   │                                  useMessageSync 自动 upsert 当前可见消息
-│   │   │   │   ├── MessagesHistoryModal.tsx    分页加载 messages 表（最多 500 条）
+│   │   │   │   ├── MessagesHistoryModal.tsx    分页加载 messages 表（最近 500 条）
+│   │   │   │   ├── ImportChatModal.tsx 客户 tab 顶部「📥 导入手机聊天」：
+│   │   │   │   │                       选 .txt → 预览发件人/条数 → 写 messages 表（幂等）
 │   │   │   │   ├── AIReplyTab.tsx      AI 回复 tab：顶部 dropdown 切换"翻译"/"Gem"
 │   │   │   │   │                       + 上方常驻 VehicleRecommendations
 │   │   │   │   ├── TranslateReplyPanel.tsx  直翻模式：中文 → 客户语言 → 一键填入
@@ -172,13 +174,20 @@ Supabase（托管 Postgres + Auth）
 │   │       ├── vehicle-cleanup.ts      重命名 + 去重 + 删噪音
 │   │       ├── brand-overrides.ts      用户右键改品牌分组（chrome.storage）
 │   │       ├── gem-prompt.ts           Gem prompt 格式化（formatNewCustomer/Update/Guidance）
+│   │       │                            含 collapseMediaRuns（连续附件 → 1 行 summary）
 │   │       ├── gem-automation.ts       Gem 网页端自动化（chrome.tabs + executeScript
 │   │       │                            + 模型选择 + 等响应停止生成按钮 + busy 串行）
 │   │       ├── gem-parser.ts           解析 Gem 响应：[Client Record] / [WhatsApp Reply] /
 │   │       │                            [Translation]，无标签时按 CJK 比例 fallback 拆分
 │   │       ├── cloudinary.ts           unsigned upload preset 直传 + thumbnailUrl 缩略
 │   │       ├── media-tray-store.ts     聊天媒体捕获暂存（内存 Map + subscribe，不持久化）
-│   │       ├── message-sync.ts         syncMessages upsert + countMessages + loadMessages
+│   │       ├── message-sync.ts         syncMessages upsert + countMessages +
+│   │       │                            loadMessages（DESC + reverse 取最近 N 条）
+│   │       ├── import-chat-parser.ts   解析手机端 WhatsApp 导出 .txt：
+│   │       │                            双时间格式 + 多行延续 + 系统行过滤 +
+│   │       │                            自动识别 me/customer + phoneFromFilename
+│   │       ├── chat-import.ts          ParsedChat → upsert messages 表：
+│   │       │                            wa_message_id='import:<sha16>' 幂等 + 自动建 contact
 │   │       └── repair-extraction.ts    扫描国家 / 区号不匹配的客户 + 重置字段 + 删错抽车型
 │   └── supabase/migrations/
 │       ├── 0001_init.sql               表 + RLS 策略
@@ -434,6 +443,18 @@ npm run package
 - [x] **打包脚本**（`extension/scripts/package.mjs` + `npm run package`）：build + 自动产 dated zip 到 `dist-zips/`
 - [x] **团队使用手册.md**：发给销售员工的中文操作指南（scope / 撞单 / per-user Gem / FAQ）
 - [x] **垃圾客户清理**：一次性 SQL DELETE 把"完全空壳 + 无消息"的 ~2900 个历史 contact 删了（cascade 一并清 contact_tags / vehicle_interests / quotes / tasks / contact_handlers / messages）
+- [x] **手机端 .txt 聊天记录导入**（`lib/import-chat-parser.ts` + `lib/chat-import.ts` + `panel/components/ImportChatModal.tsx`）：客户 tab 顶部「📥 导入手机聊天」→ 解析 WhatsApp 手机端导出 → 写 messages 表
+  - 支持两种时间格式：`2026/5/7 08:46`（24h）和 `2026/4/6 下午1:54`（中文 AM/PM 凌晨/早上/上午/中午/下午/晚上）
+  - 多行延续（form-fill key:value、多段消息）合并为同一条消息的 text
+  - 自动识别"我"vs"客户"：手机号格式发件人 = 客户，最高频非手机号 = 我（多销售也能正确归类）
+  - `wa_message_id = 'import:' + sha256(ts|direction|text).slice(0,16)`，重复导入幂等
+  - 没找到 contact 自动按 phone+org_id 创建（country 按区号推）
+- [x] **Gem 回复 fallback 到 messages 表**（`GemReplySection.tsx` generate()）：DOM 读不到消息时自动 `loadMessages(50)` 走数据库——配合上面的导入，手机端独有的聊天也能让 Gem 接着写
+  - UI 上显示来源："📜 用导入的历史记录（N 条）"
+  - 完全没历史时报错文案直接告诉用户去导入
+- [x] **Gem prompt 媒体附件合并**（`gem-prompt.ts` collapseMediaRuns）：同一发件人连续 N 条纯附件（`IMG-...jpg (文件附件)` / `[媒体]` / 空文本）→ `<sent N media items in a row>` 一行；同时把 slice(-20) 提到 slice(-50)
+  - 之前 Gem 看到的最近 20 条里大半是图片占位，真实对话被挤出去；现在 224 客户聊天 prompt 总长 8.6k 字符，完整保留销售脉络
+- [x] **loadMessages 修 ASC bug**（`lib/message-sync.ts`）：之前 `order ASC + limit N` 拿的是最老 N 条，导大量历史后 Gem fallback 看到的是开头不是最近——改 DESC + reverse，调用方拿到正序但内容是最近 N 条；MessagesHistoryModal 也跟着对齐
 
 ### 还可以做的（不急）
 
@@ -481,6 +502,8 @@ WhatsApp 绿色主题：
 - **`.in('id', myIds)` URL 长度炸弹**：scope=mine 视图下 myContactIds 可能含数百 UUID，PostgREST 把它们全塞进 query string（每个 37 字符），URL 超 ~12KB 被网络层直接拒，错误是 `TypeError: Failed to fetch`（不是 Supabase 返回的 PostgrestError）。**新加按主理人过滤的查询一律走服务端 join：`.select('..., contact_handlers!inner(user_id)').eq('contact_handlers.user_id', myUserId)`**（嵌套关系用 `'contacts.contact_handlers.user_id'`），URL 长度恒定。已修复点：DashboardPage / TasksPage
 - **Supabase 默认 1000 行返回上限**：`.select()` 不加 range 默认最多返回 1000 行，超了静默截断（不报错）。涉及 contact_handlers 全量 / contacts 全量 id 列表的查询要分页拉（`fetchHandlersForOrg` / ScopeContext 孤儿认领都已改）
 - **新员工误建独立 org**：被邀请的员工注册后看到 `OrgSetup` 界面会以为该建团队 → 建出来一个孤立 org，CRM 跟主 org 完全隔离（看不到客户、看不到 Gem、撞单不触发）。临时修复：手动 SQL 把员工 `organization_members` 行从空 org 删了再插到主 org，并删空 org（contacts cascade）。长期修复：OrgSetup 加二次确认 / 默认隐藏入口
+- **手机端 .txt 导入靠正则识别附件占位**：`isMediaOnly()` 匹配 `IMG-/VID-/AUD-/DOC-/PTT-/STK-/PHOTO-...(文件附件)` 形如的文件名 + `[媒体]`（解析时把 `<省略影音内容>` 替换成的占位）。WhatsApp 改导出格式或换 i18n 文案（如英文环境是 `(file attached)`）时要扩 `isMediaOnly` 和 import-chat-parser 的清洗规则
+- **`loadMessages` 现在是 DESC + reverse 取最近 N 条**：改自之前的 ASC + limit N（最老 N 条）。所有现有调用方拿到的列表顺序不变（仍按 sent_at 正序），但内容变成"最近 N"。如果未来有"显示完整历史"需求，limit 要给足够大（500 已经够覆盖大多数客户，特别长的几千条聊天会被截断）
 
 ## 用户偏好
 
