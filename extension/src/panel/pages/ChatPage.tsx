@@ -4,6 +4,7 @@ import { useCrmData, type CrmContact } from '../hooks/useCrmData';
 import { ContactCard } from '../components/ContactCard';
 import { FilterSidebar } from '../components/FilterSidebar';
 import { FilteredChatList } from '../components/FilteredChatList';
+import { LocalTimeBadge } from '../components/LocalTimeBadge';
 import { useCollisionTag, useScope } from '../contexts/ScopeContext';
 import { batchBumpHandlers } from '@/lib/contact-handlers';
 
@@ -185,6 +186,7 @@ export function ChatPage({ orgId }: Props) {
             {chat.phone && headerName !== chat.phone && (
               <span className="sgc-side-panel-phone">{chat.phone}</span>
             )}
+            {chat.phone && <LocalTimeBadge phone={chat.phone} />}
           </div>
           <div className="sgc-side-panel-body">
             <ContactCard chat={chat} orgId={orgId} />

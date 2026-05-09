@@ -279,6 +279,36 @@ body.sgc-page-overlay-active #app {
   color: #667781;
 }
 
+.sgc-local-time {
+  font-size: 12px;
+  color: #16a34a;
+  background: #dcfce7;
+  padding: 1px 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.sgc-local-time-offset {
+  color: #15803d;
+  opacity: 0.7;
+  margin-left: 2px;
+}
+
+.sgc-local-time-night {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.sgc-local-time-night .sgc-local-time-offset {
+  color: #92400e;
+}
+
+.sgc-local-time-inline {
+  margin-left: 6px;
+  font-size: 11px;
+}
+
 .sgc-side-panel-body {
   flex: 1;
   overflow-y: auto;

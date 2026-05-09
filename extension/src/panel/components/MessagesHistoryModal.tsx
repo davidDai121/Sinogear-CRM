@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Database } from '@/lib/database.types';
-import { loadMessages } from '@/lib/message-sync';
+import { loadAllMessages } from '@/lib/message-sync';
 
 type MessageRow = Database['public']['Tables']['messages']['Row'];
 
@@ -17,7 +17,7 @@ export function MessagesHistoryModal({ contactId, contactName, onClose }: Props)
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    void loadMessages(contactId, 500).then((data) => {
+    void loadAllMessages(contactId).then((data) => {
       if (!cancelled) {
         setMessages(data);
         setLoading(false);

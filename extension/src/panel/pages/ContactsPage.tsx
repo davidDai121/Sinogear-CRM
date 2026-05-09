@@ -4,6 +4,8 @@ import type { Database, CustomerStage } from '@/lib/database.types';
 import { ContactDetailDrawer } from '../components/ContactDetailDrawer';
 import { GoogleSyncDialog } from '../components/GoogleSyncDialog';
 import { ImportChatModal } from '../components/ImportChatModal';
+import { ImportBackupModal } from '../components/ImportBackupModal';
+import { LocalTimeBadge } from '../components/LocalTimeBadge';
 import { jumpToChat } from '@/lib/jump-to-chat';
 import { useScope } from '../contexts/ScopeContext';
 import { shortNameOf } from '../hooks/useOrgMembers';
@@ -36,6 +38,7 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [importBackupOpen, setImportBackupOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -90,6 +93,14 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
             title="把手机端导出的 WhatsApp 聊天 .txt 导入到 CRM"
           >
             📥 导入手机聊天
+          </button>
+          <button
+            className="sgc-btn-secondary"
+            onClick={() => setImportBackupOpen(true)}
+            type="button"
+            title="一次性把整个 WhatsApp Business 加密备份（msgstore.db.crypt15）导进来"
+          >
+            🔓 导入加密备份
           </button>
           <button
             className="sgc-btn-secondary"
@@ -182,7 +193,14 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
                     })()}
                   </td>
                   <td>{c.phone}</td>
-                  <td>{c.country || '—'}</td>
+                  <td>
+                    {c.country || '—'}
+                    <LocalTimeBadge
+                      phone={c.phone}
+                      compact
+                      className="sgc-local-time-inline"
+                    />
+                  </td>
                   <td>
                     {c.budget_usd ? `USD ${c.budget_usd.toLocaleString()}` : '—'}
                   </td>
@@ -234,6 +252,16 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
         <ImportChatModal
           orgId={orgId}
           onClose={() => setImportOpen(false)}
+          onDone={() => {
+            void refresh();
+          }}
+        />
+      )}
+
+      {importBackupOpen && (
+        <ImportBackupModal
+          orgId={orgId}
+          onClose={() => setImportBackupOpen(false)}
           onDone={() => {
             void refresh();
           }}

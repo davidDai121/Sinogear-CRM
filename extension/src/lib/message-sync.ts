@@ -66,3 +66,29 @@ export async function loadMessages(
     .limit(limit);
   return (data ?? []).reverse();
 }
+
+/**
+ * 拉某个 contact 的全部消息，正序返回。用于消息历史 modal 显示完整记录。
+ *
+ * Supabase / PostgREST 单次 select 默认上限 1000 行，所以分页 fetch 直到拿完。
+ */
+export async function loadAllMessages(contactId: string): Promise<MessageRow[]> {
+  const PAGE = 1000;
+  const out: MessageRow[] = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('contact_id', contactId)
+      .order('sent_at', { ascending: false, nullsFirst: false })
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    const rows = data ?? [];
+    if (rows.length === 0) break;
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+    from += PAGE;
+  }
+  return out.reverse();
+}

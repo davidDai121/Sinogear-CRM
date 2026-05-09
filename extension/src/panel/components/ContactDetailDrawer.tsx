@@ -10,6 +10,7 @@ import { ContactTasksSection } from './ContactTasksSection';
 import { TimelineSection } from './TimelineSection';
 import { MessagesHistorySection } from './MessagesHistorySection';
 import { AIReplyTab } from './AIReplyTab';
+import { LocalTimeBadge } from './LocalTimeBadge';
 
 type CardTab = 'profile' | 'ai';
 const TAB_KEY = 'contactCardTab';
@@ -105,6 +106,7 @@ export function ContactDetailDrawer({ contactId, orgId, onClose, onChanged }: Pr
           <div className="sgc-drawer-title">
             <strong>{contact?.name || contact?.wa_name || '客户'}</strong>
             <span className="sgc-drawer-subtitle">{contact?.phone}</span>
+            {contact?.phone && <LocalTimeBadge phone={contact.phone} />}
           </div>
           <button
             className="sgc-drawer-close"
