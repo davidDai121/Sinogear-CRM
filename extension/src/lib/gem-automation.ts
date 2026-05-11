@@ -290,36 +290,120 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
   if (!ok) throw new Error('无法填入 Gemini 输入框');
   await sleep(800);
 
-  // Click send button
+  // Click send button.
+  //
+  // 雷区：以前用 button[aria-label*="Send" i] 模糊匹配，命中了"Send feedback"
+  // / "Send to ..." 之类同样含 Send 的按钮，导致点偏。
+  //
+  // 修法：
+  //   1. 锁定输入框 → 向上走父级找包裹整个 input bar 的容器
+  //   2. 在容器内严格匹配 send/submit 关键词 + 黑名单排除 feedback/share/mic/stop
+  //   3. 多个候选按"离输入框最近 + 在输入框右下"挑（发送键的固定位置）
+  //   4. 实在找不到再 fallback Enter（contenteditable 上不是每个都接 Enter）
   const clicked = await execute<boolean>(tabId, () => {
-    const btn = document.querySelector(
-      'button[aria-label*="Send" i], button[aria-label*="发送"], button[aria-label*="Submit" i]',
-    ) as HTMLElement | null;
-    if (btn && !(btn as HTMLButtonElement).disabled) {
-      btn.click();
-      return true;
-    }
-    // Fallback: simulate Enter on input
-    const sels = [
+    const inputSels = [
       '.ql-editor',
       'rich-textarea [contenteditable="true"]',
       '[contenteditable="true"]',
       'textarea',
       '[role="textbox"]',
     ];
-    for (const s of sels) {
-      const input = document.querySelector(s) as HTMLElement | null;
-      if (input) {
-        input.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'Enter',
-            code: 'Enter',
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-        return true;
+    let input: HTMLElement | null = null;
+    for (const s of inputSels) {
+      input = document.querySelector(s) as HTMLElement | null;
+      if (input) break;
+    }
+
+    function isSendCandidate(btn: HTMLButtonElement): boolean {
+      if (btn.disabled) return false;
+      const r = btn.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+
+      const label = (btn.getAttribute('aria-label') ?? '').toLowerCase().trim();
+      const testId = (btn.getAttribute('data-test-id') ?? '').toLowerCase();
+      const cls = (btn.className ?? '').toString().toLowerCase();
+      const haystack = `${label} ${testId} ${cls}`;
+
+      // 黑名单：明确不是发送键的
+      if (
+        /(feedback|反馈|share|分享|gmail|copy|复制|microphone|mic|麦克风|voice|录音|attach|附件|upload|上传|image|图片|file|文件|stop|停止|cancel|取消|new\s*chat|新对话|history|历史|settings|设置|menu|菜单|account|账户)/i.test(
+          haystack,
+        )
+      ) {
+        return false;
       }
+
+      // 白名单：发送键典型标识
+      const isSend =
+        /^send$/i.test(label) ||
+        /^submit$/i.test(label) ||
+        /^发送$/.test(label) ||
+        /send\s*(message|prompt)/i.test(label) ||
+        /发送(消息|提示)/.test(label) ||
+        /submit\s*(message|prompt)/i.test(label) ||
+        /send[-_]?button/i.test(testId) ||
+        /send[-_]?button/i.test(cls);
+
+      return isSend;
+    }
+
+    // 候选搜索：从输入框向上找容器，scope 缩到 input bar
+    let scope: HTMLElement | Document = document;
+    if (input) {
+      let parent: HTMLElement | null = input.parentElement;
+      for (let i = 0; i < 8 && parent; i++) {
+        // 在该父级内找候选——找到至少一个就锁定这层
+        const within = Array.from(
+          parent.querySelectorAll('button'),
+        ) as HTMLButtonElement[];
+        if (within.some(isSendCandidate)) {
+          scope = parent;
+          break;
+        }
+        parent = parent.parentElement;
+      }
+    }
+
+    const candidates = (
+      Array.from(scope.querySelectorAll('button')) as HTMLButtonElement[]
+    ).filter(isSendCandidate);
+
+    if (candidates.length > 0) {
+      // 多个候选 → 按"离输入框最近"挑（发送键紧贴输入框）
+      let best = candidates[0];
+      if (candidates.length > 1 && input) {
+        const ir = input.getBoundingClientRect();
+        const inputCenter = { x: ir.right, y: ir.bottom };
+        candidates.sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          const aDist = Math.hypot(
+            ar.left + ar.width / 2 - inputCenter.x,
+            ar.top + ar.height / 2 - inputCenter.y,
+          );
+          const bDist = Math.hypot(
+            br.left + br.width / 2 - inputCenter.x,
+            br.top + br.height / 2 - inputCenter.y,
+          );
+          return aDist - bDist;
+        });
+        best = candidates[0];
+      }
+      best.click();
+      return true;
+    }
+
+    // Fallback: simulate Enter on input
+    if (input) {
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      return true;
     }
     return false;
   });
