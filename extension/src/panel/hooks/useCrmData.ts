@@ -8,6 +8,7 @@ import {
   type WALabel,
   type WALabelAssociation,
 } from '@/lib/whatsapp-idb';
+import { ensureJidPhoneCacheLoaded } from '@/lib/jid-phone-cache';
 import { classifyChat, type ChatClassification } from '@/lib/chat-classifier';
 import { countryToRegion } from '@/lib/regions';
 import { stringifyError } from '@/lib/errors';
@@ -16,6 +17,21 @@ import { syncAutoStages } from '@/lib/stage-sync';
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type VehicleInterestRow = Database['public']['Tables']['vehicle_interests']['Row'];
 type ContactTagRow = Database['public']['Tables']['contact_tags']['Row'];
+
+/**
+ * 从 chat.name 兜底解析手机号。WA 业务号（@lid）在没把
+ * lid→phone 映射写进 IDB 之前，name 字段往往存的就是"+591 69820483"，
+ * 直接抓数字位返回 +-prefix 标准格式。
+ */
+function extractPhoneFromName(name: string | null): string | null {
+  if (!name) return null;
+  const trimmed = name.trim();
+  // 必须看起来是手机号（开头 + 或第一个字符是数字，后面 7+ 位有效数字）
+  if (!/^\+?\s*\d/.test(trimmed)) return null;
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length < 7) return null;
+  return `+${digits}`;
+}
 
 export interface CrmContact {
   contact: ContactRow | null;
@@ -74,28 +90,70 @@ export function useCrmData(orgId: string | null): CrmData {
 
   useEffect(() => {
     if (!orgId) return;
+    const org = orgId; // narrowed const for inner closures
     let cancelled = false;
     if (nonce === 0) {
       setState((s) => ({ ...s, loading: true, error: null }));
     }
 
+    // 突破 Supabase 1000 行默认上限：分页拉
+    async function fetchAllContacts(): Promise<ContactRow[]> {
+      const PAGE = 1000;
+      const out: ContactRow[] = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from('contacts')
+          .select('*')
+          .eq('org_id', org)
+          .range(from, from + PAGE - 1);
+        if (error) throw error;
+        const rows = (data ?? []) as ContactRow[];
+        out.push(...rows);
+        if (rows.length < PAGE) break;
+      }
+      return out;
+    }
+
+    async function fetchAllVehicleInterests(): Promise<VehicleInterestRow[]> {
+      const PAGE = 1000;
+      const out: VehicleInterestRow[] = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from('vehicle_interests')
+          .select('*, contacts!inner(org_id)')
+          .eq('contacts.org_id', org)
+          .range(from, from + PAGE - 1);
+        if (error) throw error;
+        const rows = (data ?? []) as unknown as VehicleInterestRow[];
+        out.push(...rows);
+        if (rows.length < PAGE) break;
+      }
+      return out;
+    }
+
+    async function fetchAllContactTags(): Promise<ContactTagRow[]> {
+      const PAGE = 1000;
+      const out: ContactTagRow[] = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from('contact_tags')
+          .select('*, contacts!inner(org_id)')
+          .eq('contacts.org_id', org)
+          .range(from, from + PAGE - 1);
+        if (error) throw error;
+        const rows = (data ?? []) as unknown as ContactTagRow[];
+        out.push(...rows);
+        if (rows.length < PAGE) break;
+      }
+      return out;
+    }
+
     void (async () => {
       try {
-        const [
-          { data: contactRows, error: contactErr },
-          { data: vehicleRows, error: vehicleErr },
-          { data: tagRows, error: tagErr },
-          wa,
-        ] = await Promise.all([
-          supabase.from('contacts').select('*').eq('org_id', orgId),
-          supabase
-            .from('vehicle_interests')
-            .select('*, contacts!inner(org_id)')
-            .eq('contacts.org_id', orgId),
-          supabase
-            .from('contact_tags')
-            .select('*, contacts!inner(org_id)')
-            .eq('contacts.org_id', orgId),
+        const [contacts, vehicles, tags, wa, jidPhoneCache] = await Promise.all([
+          fetchAllContacts(),
+          fetchAllVehicleInterests(),
+          fetchAllContactTags(),
           readWhatsAppData().catch(() => ({
             labels: [] as WALabel[],
             associations: [] as WALabelAssociation[],
@@ -103,15 +161,8 @@ export function useCrmData(orgId: string | null): CrmData {
             contacts: [],
             jidToPhoneJid: new Map<string, string>(),
           })),
+          ensureJidPhoneCacheLoaded().catch(() => ({}) as Record<string, string>),
         ]);
-
-        if (contactErr) throw contactErr;
-        if (vehicleErr) throw vehicleErr;
-        if (tagErr) throw tagErr;
-
-        const contacts = (contactRows ?? []) as ContactRow[];
-        const vehicles = (vehicleRows ?? []) as VehicleInterestRow[];
-        const tags = (tagRows ?? []) as ContactTagRow[];
 
         const vehicleByContact = new Map<string, VehicleInterestRow[]>();
         for (const v of vehicles) {
@@ -131,7 +182,13 @@ export function useCrmData(orgId: string | null): CrmData {
         const chatByJid = new Map<string, WAChat>();
         for (const c of wa.chats) {
           chatByJid.set(c.id, c);
-          const phone = resolvePhone(c.id, wa.jidToPhoneJid);
+          let phone = resolvePhone(c.id, wa.jidToPhoneJid);
+          // @lid 业务号兜底链：
+          //   1. chrome.storage 持久缓存（用户打开过聊天时 readCurrentChat 已写入）
+          //   2. 从 chat.name 抓手机号（部分情况 IDB 也存的是 "+591 ..." 字串）
+          if (!phone && c.id.endsWith('@lid')) {
+            phone = jidPhoneCache[c.id] ?? extractPhoneFromName(c.name);
+          }
           if (phone) {
             const existing = chatByPhone.get(phone);
             if (!existing || c.t > existing.t) chatByPhone.set(phone, c);
@@ -142,10 +199,12 @@ export function useCrmData(orgId: string | null): CrmData {
 
         const now = Date.now() / 1000;
 
+        // 群聊（phone=null, group_jid=...）不参与 WA chat 列表合并；
+        // 群聊通过 useCurrentChat 即时识别，不走这个 lens
         const merged: CrmContact[] = contacts
-          .filter((c) => chatByPhone.has(c.phone))
+          .filter((c) => c.phone != null && chatByPhone.has(c.phone))
           .map((c) => {
-            const chat = chatByPhone.get(c.phone)!;
+            const chat = chatByPhone.get(c.phone!)!;
             const jid = chat.id;
             const classification = classifyChat(
               chat,
@@ -161,8 +220,8 @@ export function useCrmData(orgId: string | null): CrmData {
               contact: c,
               chat,
               jid,
-              phone: c.phone,
-              displayName: c.name || c.wa_name || chat.name || c.phone,
+              phone: c.phone!,
+              displayName: c.name || c.wa_name || chat.name || c.phone!,
               labels: labelsByJid.get(jid) ?? [],
               vehicleInterests: vehicleByContact.get(c.id) ?? [],
               tags: tagsByContact.get(c.id) ?? [],

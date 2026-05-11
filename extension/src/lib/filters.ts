@@ -7,8 +7,10 @@ export type TodoBucket =
   | 'needs_reply'
   | 'negotiating'
   | 'priority'
-  | 'stalled'
-  | 'new';
+  | 'new'      // ≤ 1 天
+  | 'active'   // 1-3 天（NEW）
+  | 'stalled'  // 3-7 天
+  | 'lost';    // > 7 天（NEW）
 
 /**
  * 标记某客户是"重点客户"——基于真实业务信号 + 近期活跃：
@@ -173,8 +175,10 @@ function matchTodoBucket(c: CrmContact, bucket: TodoBucket): boolean {
     );
   }
   if (bucket === 'priority') return isPriorityContact(c);
-  if (bucket === 'stalled') return cls.autoStage === 'stalled';
   if (bucket === 'new') return cls.autoStage === 'new';
+  if (bucket === 'active') return cls.autoStage === 'active';
+  if (bucket === 'stalled') return cls.autoStage === 'stalled';
+  if (bucket === 'lost') return cls.autoStage === 'lost';
   return false;
 }
 
@@ -267,8 +271,10 @@ export function todoCounts(contacts: CrmContact[]): Record<TodoBucket, number> {
     needs_reply: 0,
     negotiating: 0,
     priority: 0,
-    stalled: 0,
     new: 0,
+    active: 0,
+    stalled: 0,
+    lost: 0,
   };
   for (const c of contacts) {
     if (c.chat?.archive) continue;
@@ -280,8 +286,10 @@ export function todoCounts(contacts: CrmContact[]): Record<TodoBucket, number> {
       counts.negotiating++;
     }
     if (isPriorityContact(c)) counts.priority++;
-    if (c.classification.autoStage === 'stalled') counts.stalled++;
     if (c.classification.autoStage === 'new') counts.new++;
+    if (c.classification.autoStage === 'active') counts.active++;
+    if (c.classification.autoStage === 'stalled') counts.stalled++;
+    if (c.classification.autoStage === 'lost') counts.lost++;
   }
   return counts;
 }

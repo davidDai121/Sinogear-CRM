@@ -16,6 +16,7 @@ export function useContact(
   orgId: string | null,
   phone: string | null,
   waName: string | null,
+  groupJid: string | null = null,
 ): ContactState & { save: (patch: Partial<ContactRow>) => Promise<void> } {
   const [state, setState] = useState<ContactState>({
     contact: null,
@@ -24,7 +25,8 @@ export function useContact(
   });
 
   useEffect(() => {
-    if (!orgId || !phone) {
+    // 必须至少有 phone（个人）或 groupJid（群聊）之一
+    if (!orgId || (!phone && !groupJid)) {
       setState({ contact: null, loading: false, error: null });
       return;
     }
@@ -32,13 +34,16 @@ export function useContact(
     let cancelled = false;
     setState((s) => ({ ...s, loading: true, error: null }));
 
+    const lookupCol: 'phone' | 'group_jid' = groupJid ? 'group_jid' : 'phone';
+    const lookupVal = groupJid ?? phone!;
+
     (async () => {
       try {
         const existing = await supabase
           .from('contacts')
           .select('*')
           .eq('org_id', orgId)
-          .eq('phone', phone)
+          .eq(lookupCol, lookupVal)
           .maybeSingle();
 
         if (existing.error) throw existing.error;
@@ -50,27 +55,30 @@ export function useContact(
           return;
         }
 
+        const insertRow: Database['public']['Tables']['contacts']['Insert'] = {
+          org_id: orgId,
+          wa_name: waName,
+          name: waName,
+        };
+        if (groupJid) insertRow.group_jid = groupJid;
+        else insertRow.phone = phone;
+
         const inserted = await supabase
           .from('contacts')
-          .insert({
-            org_id: orgId,
-            phone,
-            wa_name: waName,
-            name: waName,
-          })
+          .insert(insertRow)
           .select('*')
           .single();
 
         if (inserted.error) {
           // 23505 = race with another path (bulk-sync, label-sync's auto, etc.)
-          // creating the same (org_id, phone). Re-fetch and use the existing row.
+          // creating the same (org_id, phone) or (org_id, group_jid). Re-fetch.
           const code = (inserted.error as { code?: string }).code;
           if (code === '23505') {
             const refetched = await supabase
               .from('contacts')
               .select('*')
               .eq('org_id', orgId)
-              .eq('phone', phone)
+              .eq(lookupCol, lookupVal)
               .single();
             if (refetched.error) throw refetched.error;
             if (!cancelled) {
@@ -88,6 +96,7 @@ export function useContact(
         if (inserted.data) {
           void logContactEvent(inserted.data.id, 'created', {
             phone: inserted.data.phone,
+            group_jid: inserted.data.group_jid,
             wa_name: inserted.data.wa_name,
           });
         }
@@ -104,7 +113,7 @@ export function useContact(
     return () => {
       cancelled = true;
     };
-  }, [orgId, phone, waName]);
+  }, [orgId, phone, waName, groupJid]);
 
   const save = async (patch: Partial<ContactRow>) => {
     if (!state.contact) return;

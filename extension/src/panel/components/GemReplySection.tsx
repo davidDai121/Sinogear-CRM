@@ -136,15 +136,30 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
     const template = templates.find((t) => t.id === selectedTemplateId);
     if (!template) return;
 
+    const isGroup = !!contact.group_jid;
+
     setStatus({ kind: 'reading' });
     try {
       // 1. Read chat messages — DOM 优先；DOM 空时 fallback 到 messages 表（导入的历史）
+      // 注意：这里的 jumpToChat 不开启 deep-link fallback——若开启会触发 reload，
+      // 中断当前 generate() 调用。正常跳不到（如 David Eze 这类 WA Web 本地无 chat
+      // 但已导入 .txt 的客户）时，让它静默失败、走下面的 DB messages fallback。
       let messages: ChatMessage[] = [];
       let messageSource: 'dom' | 'db' = 'dom';
-      if (needsJump && contact.phone) {
-        const ok = await jumpToChat(contact.phone.replace(/^\+/, ''));
-        if (!ok) throw new Error('未能跳转到该客户聊天');
-        messages = await waitForChatMessages(5000, 30, 1);
+      if (needsJump) {
+        // 个人按手机号跳，群按群名跳（jumpToChat 会按搜索匹配上）
+        const query = contact.phone
+          ? contact.phone.replace(/^\+/, '')
+          : contact.name?.trim() || contact.wa_name?.trim() || '';
+        if (query) {
+          const ok = await jumpToChat(query);
+          if (ok) {
+            messages = await waitForChatMessages(5000, 30, 1);
+          }
+          // 跳不到：messages 留空，下面的"DOM 没消息时读 DB"分支接管
+        } else {
+          messages = readChatMessages(30);
+        }
       } else {
         messages = readChatMessages(30);
       }
@@ -161,6 +176,9 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
           fromMe: r.direction === 'outbound',
           text: r.text,
           timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
+          // DB 加载的历史消息没存 sender；群聊从 messages 表 fallback 时拿不到，
+          // 但 Gem prompt 里仍能正常按 fromMe 区分销售/客户
+          sender: null,
         }));
         messageSource = 'db';
       }
@@ -175,14 +193,42 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         vehicleInterests = data ?? [];
       }
 
+      // 2.5. 群聊：从 IDB 拉成员名单给 Gem 用
+      let groupMemberNames: string[] | undefined;
+      if (isGroup && contact.group_jid && !existingConv) {
+        try {
+          const { readWhatsAppData } = await import('@/lib/whatsapp-idb');
+          const wa = await readWhatsAppData();
+          const chat = wa.chats.find((c) => c.id === contact.group_jid);
+          if (chat) {
+            const contactByJid = new Map(wa.contacts.map((c) => [c.id, c]));
+            groupMemberNames = chat.participants.map((jid) => {
+              const c = contactByJid.get(jid);
+              return (
+                (c?.name ?? '').trim() ||
+                (c?.shortName ?? '').trim() ||
+                (c?.pushname ?? '').trim() ||
+                jid.split('@')[0]
+              );
+            });
+          }
+        } catch {
+          // 拿不到成员不致命
+        }
+      }
+
       // 3. Build prompt + url
       const url = existingConv?.gem_chat_url ?? template.gem_url;
+      const updateLabel = isGroup
+        ? contact.name?.trim() || contact.wa_name?.trim() || null
+        : contact.phone;
       const basePrompt = existingConv
-        ? formatUpdate(contact.phone, messages.slice(-5))
+        ? formatUpdate(updateLabel, messages.slice(-5), isGroup)
         : formatNewCustomer({
             contact,
             vehicleInterests,
             messages,
+            groupMemberNames,
           });
       // 销售自定义指令（来自 textarea）— 高优先级，覆盖默认风格
       const guidance = followup.trim();
@@ -278,13 +324,18 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
 
   const fillReply = async (text: string) => {
     try {
-      if (needsJump && contact.phone) {
-        const ok = await jumpToChat(contact.phone.replace(/^\+/, ''));
-        if (!ok) {
-          alert('未能跳转到该客户聊天，请先手动打开聊天再点填入');
-          return;
+      if (needsJump) {
+        const query = contact.phone
+          ? contact.phone.replace(/^\+/, '')
+          : contact.name?.trim() || contact.wa_name?.trim() || '';
+        if (query) {
+          const ok = await jumpToChat(query, { allowDeepLink: true });
+          if (!ok) {
+            alert('未能跳转到该聊天，请先手动打开后再点填入');
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 800));
         }
-        await new Promise((r) => setTimeout(r, 800));
       }
       const ok = fillWhatsAppCompose(text);
       if (!ok) {

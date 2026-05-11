@@ -25,6 +25,22 @@ function isPhoneShaped(value: string): boolean {
   return /^[+\d\s\-()]{6,}$/.test(value);
 }
 
+const GREETING_RE = /^(hi|hello|hey|hola|bonjour|你好|您好|喂|salam|salaam|olá|ciao|namaste)[\s!.?。！?]*$/i;
+const MEDIA_PLACEHOLDER_RE = /^(\[媒体\]|\[media\]|<省略影音内容>|(IMG|VID|AUD|DOC|PTT|STK|PHOTO)[-_].*?(\(文件附件\)|\(file attached\)))\s*$/i;
+
+function isMeaningfulCustomerLine(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (t.length < 4) return false;
+  if (GREETING_RE.test(t)) return false;
+  if (MEDIA_PLACEHOLDER_RE.test(t)) return false;
+  return true;
+}
+
+function hasSubstantiveCustomerContent(messages: { fromMe: boolean; text: string }[]): boolean {
+  return messages.some((m) => !m.fromMe && isMeaningfulCustomerLine(m.text));
+}
+
 function effectivelyEmpty(
   field: SuggestedField,
   contact: ContactRow,
@@ -144,7 +160,7 @@ export function useAutoExtract({ contact, save, enabled }: Args) {
 
         let suggestions: FieldSuggestion[] = [];
         let vehicles: VehicleSuggestion[] = [];
-        if (messages.length) {
+        if (hasSubstantiveCustomerContent(messages)) {
           const response = (await chrome.runtime.sendMessage({
             type: 'EXTRACT_FIELDS',
             messages,

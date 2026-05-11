@@ -120,6 +120,33 @@ export function ChatPage({ orgId }: Props) {
   const currentCrmContact = chat.phone
     ? crm.contacts.find((c) => c.phone === chat.phone)
     : undefined;
+
+  // ⚙️ 诊断：每次聊天切换 / 数据刷新自动打印一行
+  // （Chrome 扩展 content script 跟页面是隔离 world，window.__sgcDiag 设了你 console 也访问不到，
+  //  所以走 console.log 路径——content script 的 console.log 会出现在页面 DevTools 里）
+  useEffect(() => {
+    if (!chat.phone && !chat.groupJid) return;
+    const inCrm = chat.phone
+      ? crm.contacts.find((c) => c.phone === chat.phone)
+      : crm.contacts.find((c) => c.contact?.group_jid === chat.groupJid);
+    const inScoped = scopedContacts.find(
+      (c) =>
+        (chat.phone && c.phone === chat.phone) ||
+        (chat.groupJid && c.contact?.group_jid === chat.groupJid),
+    );
+    console.log('[sgc/diag]', {
+      phone: chat.phone,
+      groupJid: chat.groupJid,
+      name: chat.name,
+      scope,
+      myContactIdsCount: myContactIds.size,
+      crmContactsCount: crm.contacts.length,
+      scopedContactsCount: scopedContacts.length,
+      inCrmContacts: !!inCrm,
+      inScopedContacts: !!inScoped,
+      contactId: inCrm?.contact?.id ?? null,
+    });
+  }, [chat.phone, chat.groupJid, chat.name, crm.contacts, scopedContacts, scope, myContactIds]);
   const headerName =
     currentCrmContact?.contact?.name ||
     currentCrmContact?.contact?.wa_name ||

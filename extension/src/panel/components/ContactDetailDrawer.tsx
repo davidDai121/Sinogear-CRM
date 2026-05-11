@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { logContactEvent } from '@/lib/events-log';
 import { ContactEditForm } from './ContactEditForm';
+import { GroupMembersSection } from './GroupMembersSection';
 import { TagsSection } from './TagsSection';
 import { VehicleInterestsSection } from './VehicleInterestsSection';
 import { QuotesSection } from './QuotesSection';
@@ -104,8 +105,13 @@ export function ContactDetailDrawer({ contactId, orgId, onClose, onChanged }: Pr
       <aside className="sgc-drawer" role="dialog" aria-label="客户详情">
         <header className="sgc-drawer-header">
           <div className="sgc-drawer-title">
-            <strong>{contact?.name || contact?.wa_name || '客户'}</strong>
-            <span className="sgc-drawer-subtitle">{contact?.phone}</span>
+            <strong>
+              {contact?.group_jid ? '👥 ' : ''}
+              {contact?.name || contact?.wa_name || (contact?.group_jid ? '群聊' : '客户')}
+            </strong>
+            <span className="sgc-drawer-subtitle">
+              {contact?.phone ?? (contact?.group_jid ? '群聊' : '')}
+            </span>
             {contact?.phone && <LocalTimeBadge phone={contact.phone} />}
           </div>
           <button
@@ -152,17 +158,19 @@ export function ContactDetailDrawer({ contactId, orgId, onClose, onChanged }: Pr
                     />
                   </section>
 
-                  <TagsSection contactId={contact.id} contactPhone={contact.phone} />
+                  {contact.group_jid && <GroupMembersSection groupJid={contact.group_jid} />}
+
+                  <TagsSection contactId={contact.id} contactPhone={contact.phone ?? undefined} />
                   <VehicleInterestsSection contactId={contact.id} />
                   <QuotesSection contactId={contact.id} />
                   <ContactTasksSection
                     contactId={contact.id}
                     orgId={orgId}
-                    contactPhone={contact.phone}
+                    contactPhone={contact.phone ?? undefined}
                   />
                   <MessagesHistorySection
                     contactId={contact.id}
-                    contactName={contact.name || contact.wa_name || contact.phone}
+                    contactName={contact.name || contact.wa_name || contact.phone || '群聊'}
                     needsJump
                   />
                   <TimelineSection contactId={contact.id} />

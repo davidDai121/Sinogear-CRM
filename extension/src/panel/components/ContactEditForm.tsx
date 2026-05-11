@@ -88,52 +88,64 @@ export function ContactEditForm({
     }
   };
 
+  const isGroup = !!contact.group_jid;
+
   const fieldsBlock = (
     <>
       <label className="sgc-field">
-        <span>姓名</span>
+        <span>{isGroup ? '群名' : '姓名'}</span>
         <input
           value={draft.name}
           onChange={(e) => setDraft({ ...draft, name: e.target.value })}
         />
       </label>
-      {showPhone && (
+      {showPhone && !isGroup && (
         <label className="sgc-field">
           <span>手机号</span>
-          <input value={contact.phone} disabled />
+          <input value={contact.phone ?? ''} disabled />
         </label>
       )}
-      <label className="sgc-field">
-        <span>国家</span>
-        <input
-          value={draft.country}
-          onChange={(e) => setDraft({ ...draft, country: e.target.value })}
-        />
-      </label>
-      <label className="sgc-field">
-        <span>语言</span>
-        <input
-          value={draft.language}
-          onChange={(e) => setDraft({ ...draft, language: e.target.value })}
-        />
-      </label>
-      <label className="sgc-field">
-        <span>预算 (USD)</span>
-        <input
-          type="number"
-          value={draft.budget_usd}
-          onChange={(e) => setDraft({ ...draft, budget_usd: e.target.value })}
-        />
-      </label>
-      <label className="sgc-field">
-        <span>目的港</span>
-        <input
-          value={draft.destination_port}
-          onChange={(e) =>
-            setDraft({ ...draft, destination_port: e.target.value })
-          }
-        />
-      </label>
+      {showPhone && isGroup && (
+        <label className="sgc-field">
+          <span>群 JID</span>
+          <input value={contact.group_jid ?? ''} disabled />
+        </label>
+      )}
+      {!isGroup && (
+        <>
+          <label className="sgc-field">
+            <span>国家</span>
+            <input
+              value={draft.country}
+              onChange={(e) => setDraft({ ...draft, country: e.target.value })}
+            />
+          </label>
+          <label className="sgc-field">
+            <span>语言</span>
+            <input
+              value={draft.language}
+              onChange={(e) => setDraft({ ...draft, language: e.target.value })}
+            />
+          </label>
+          <label className="sgc-field">
+            <span>预算 (USD)</span>
+            <input
+              type="number"
+              value={draft.budget_usd}
+              onChange={(e) => setDraft({ ...draft, budget_usd: e.target.value })}
+            />
+          </label>
+          <label className="sgc-field">
+            <span>目的港</span>
+            <input
+              value={draft.destination_port}
+              onChange={(e) =>
+                setDraft({ ...draft, destination_port: e.target.value })
+              }
+            />
+          </label>
+        </>
+      )}
       <label className="sgc-field">
         <span>客户质量</span>
         <select

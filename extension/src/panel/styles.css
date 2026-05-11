@@ -2,26 +2,54 @@
 /* Layout: shift WhatsApp Web's #app container to make room for our UI */
 /* WhatsApp Web's #app is position:absolute filling viewport, so we    */
 /* override top/width directly. Body padding alone is ignored.         */
+/*                                                                     */
+/* 用 CSS 变量 + media query 适配 13" 笔记本（1280-1440 宽）—         */
+/* 默认 360 + 240，13" 收缩到 320 + 220，给对话区多 60px 透气          */
 /* ------------------------------------------------------------------ */
 
+:root {
+  --sgc-side-panel-w: 360px;
+  --sgc-filter-sidebar-w: 240px;
+  --sgc-filtered-list-w: 300px;
+  --sgc-topnav-h: 48px;
+}
+
+@media (max-width: 1366px) {
+  :root {
+    --sgc-side-panel-w: 320px;
+    --sgc-filter-sidebar-w: 220px;
+    --sgc-filtered-list-w: 250px;
+  }
+}
+
+@media (max-width: 1280px) {
+  :root {
+    --sgc-side-panel-w: 300px;
+    --sgc-filter-sidebar-w: 200px;
+    --sgc-filtered-list-w: 230px;
+  }
+}
+
 body.sgc-body-shifted #app {
-  top: 48px !important;
+  top: var(--sgc-topnav-h) !important;
   left: 0 !important;
   width: 100vw !important;
-  height: calc(100vh - 48px) !important;
+  height: calc(100vh - var(--sgc-topnav-h)) !important;
 }
 
 body.sgc-side-panel-visible #app {
-  width: calc(100vw - 360px) !important;
+  width: calc(100vw - var(--sgc-side-panel-w)) !important;
 }
 
 body.sgc-filter-sidebar-visible #app {
-  left: 240px !important;
-  width: calc(100vw - 240px) !important;
+  left: var(--sgc-filter-sidebar-w) !important;
+  width: calc(100vw - var(--sgc-filter-sidebar-w)) !important;
 }
 
 body.sgc-filter-sidebar-visible.sgc-side-panel-visible #app {
-  width: calc(100vw - 240px - 360px) !important;
+  width: calc(
+    100vw - var(--sgc-filter-sidebar-w) - var(--sgc-side-panel-w)
+  ) !important;
 }
 
 body.sgc-page-overlay-active #app {
@@ -54,7 +82,7 @@ body.sgc-page-overlay-active #app {
   top: 0;
   left: 0;
   right: 0;
-  height: 48px;
+  height: var(--sgc-topnav-h);
   background: #00a884;
   color: #fff;
   display: flex;
@@ -70,6 +98,48 @@ body.sgc-page-overlay-active #app {
   align-items: center;
   gap: 8px;
   min-width: 220px;
+}
+
+/* 13" 笔记本 / 1366 屏：top nav 紧致化 */
+@media (max-width: 1366px) {
+  .sgc-topnav {
+    padding: 0 10px;
+    gap: 8px;
+  }
+  .sgc-topnav-brand {
+    min-width: 0;
+    gap: 6px;
+  }
+  .sgc-topnav-title {
+    font-size: 13px;
+  }
+  .sgc-topnav-org {
+    display: none; /* 隐藏 "· Miles"，省空间 */
+  }
+  .sgc-topnav-user {
+    gap: 6px;
+  }
+  .sgc-topnav-email {
+    display: none; /* 13" 隐藏邮箱，需要看的话点登出按钮 hover 也行 */
+  }
+  .sgc-tab {
+    padding: 6px 10px;
+    font-size: 13px;
+  }
+  .sgc-topnav-toggle {
+    padding: 4px 8px !important;
+    font-size: 12px !important;
+  }
+}
+
+@media (max-width: 1280px) {
+  .sgc-topnav-logo {
+    display: none; /* 进一步省，连 logo 也藏，留 "Sino Gear CRM" 标题就够认 */
+  }
+  .sgc-tab {
+    padding: 5px 8px;
+    font-size: 12px;
+  }
 }
 
 .sgc-topnav-logo {
@@ -182,10 +252,10 @@ body.sgc-page-overlay-active #app {
 
 .sgc-side-panel {
   position: fixed;
-  top: 48px;
+  top: var(--sgc-topnav-h);
   right: 0;
   bottom: 0;
-  width: 360px;
+  width: var(--sgc-side-panel-w);
   background: #fff;
   border-left: 1px solid #e9edef;
   box-shadow: -4px 0 12px rgba(0, 0, 0, 0.06);
@@ -321,7 +391,7 @@ body.sgc-page-overlay-active #app {
 
 .sgc-page-overlay {
   position: fixed;
-  top: 48px;
+  top: var(--sgc-topnav-h);
   left: 0;
   right: 0;
   bottom: 0;
@@ -433,7 +503,7 @@ body.sgc-page-overlay-active #app {
 
 .sgc-drawer-backdrop {
   position: fixed;
-  top: 48px;
+  top: var(--sgc-topnav-h);
   left: 0;
   right: 0;
   bottom: 0;
@@ -444,7 +514,7 @@ body.sgc-page-overlay-active #app {
 
 .sgc-drawer {
   position: fixed;
-  top: 48px;
+  top: var(--sgc-topnav-h);
   right: 0;
   bottom: 0;
   width: 480px;
@@ -765,7 +835,7 @@ body.sgc-page-overlay-active #app {
 
 .sgc-modal-backdrop {
   position: fixed;
-  top: 48px;
+  top: var(--sgc-topnav-h);
   left: 0;
   right: 0;
   bottom: 0;
@@ -1284,10 +1354,10 @@ body.sgc-page-overlay-active #app {
 
 .sgc-filter-sidebar {
   position: fixed;
-  top: 48px;
+  top: var(--sgc-topnav-h);
   left: 0;
   bottom: 0;
-  width: 240px;
+  width: var(--sgc-filter-sidebar-w);
   background: #f6f7f9;
   border-right: 1px solid #e9edef;
   overflow-y: auto;
@@ -1745,10 +1815,10 @@ body.sgc-page-overlay-active #app {
 
 .sgc-filtered-list {
   position: fixed;
-  top: 48px;
-  left: 240px;
+  top: var(--sgc-topnav-h);
+  left: var(--sgc-filter-sidebar-w);
   bottom: 0;
-  width: 360px;
+  width: var(--sgc-filtered-list-w);
   background: #fff;
   border-right: 1px solid #e9edef;
   z-index: 2147483599;
@@ -1758,12 +1828,19 @@ body.sgc-page-overlay-active #app {
 }
 
 body.sgc-filter-results-visible #app {
-  left: 600px !important;
-  width: calc(100vw - 600px) !important;
+  left: calc(
+    var(--sgc-filter-sidebar-w) + var(--sgc-filtered-list-w)
+  ) !important;
+  width: calc(
+    100vw - var(--sgc-filter-sidebar-w) - var(--sgc-filtered-list-w)
+  ) !important;
 }
 
 body.sgc-filter-results-visible.sgc-side-panel-visible #app {
-  width: calc(100vw - 600px - 360px) !important;
+  width: calc(
+    100vw - var(--sgc-filter-sidebar-w) - var(--sgc-filtered-list-w) -
+      var(--sgc-side-panel-w)
+  ) !important;
 }
 
 .sgc-filtered-list-header {

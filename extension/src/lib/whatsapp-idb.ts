@@ -18,6 +18,8 @@ export interface WAChat {
   unreadCount: number;
   archive: boolean;
   name: string | null;
+  /** 群聊：成员 JID 列表（@c.us / @lid 都有可能）。个人聊天为 [] */
+  participants: string[];
 }
 
 export interface WAContact {
@@ -78,13 +80,44 @@ export async function readWhatsAppData(): Promise<{
     ]);
     const chats: WAChat[] = rawChats
       .filter((c) => typeof c.id === 'string')
-      .map((c) => ({
-        id: c.id as string,
-        t: typeof c.t === 'number' ? c.t : 0,
-        unreadCount: typeof c.unreadCount === 'number' ? c.unreadCount : 0,
-        archive: Boolean(c.archive),
-        name: typeof c.name === 'string' ? c.name : null,
-      }));
+      .map((c) => {
+        const r = c as unknown as Record<string, unknown>;
+        // 群聊的显示名往往不在 chat.name 而在 groupMetadata.subject
+        const meta = r.groupMetadata as Record<string, unknown> | undefined;
+        const subject =
+          meta && typeof meta.subject === 'string' ? (meta.subject as string) : null;
+        const name =
+          (typeof c.name === 'string' && c.name) ||
+          subject ||
+          (typeof r.formattedTitle === 'string' ? (r.formattedTitle as string) : null);
+        // 群成员：groupMetadata.participants 是 [{ id, isAdmin, ... }] 数组
+        const rawParts = meta?.participants;
+        const participants: string[] = Array.isArray(rawParts)
+          ? rawParts
+              .map((p) => {
+                if (typeof p === 'string') return p;
+                if (p && typeof p === 'object') {
+                  const pid = (p as Record<string, unknown>).id;
+                  if (typeof pid === 'string') return pid;
+                  // 有时 id 是个对象 { _serialized: '...@c.us' }
+                  if (pid && typeof pid === 'object') {
+                    const ser = (pid as Record<string, unknown>)._serialized;
+                    if (typeof ser === 'string') return ser;
+                  }
+                }
+                return null;
+              })
+              .filter((s): s is string => !!s)
+          : [];
+        return {
+          id: c.id as string,
+          t: typeof c.t === 'number' ? c.t : 0,
+          unreadCount: typeof c.unreadCount === 'number' ? c.unreadCount : 0,
+          archive: Boolean(c.archive),
+          name,
+          participants,
+        };
+      });
     const contacts: WAContact[] = rawContacts
       .filter((c) => typeof c.id === 'string')
       .map((c) => {

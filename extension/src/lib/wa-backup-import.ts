@@ -79,7 +79,7 @@ async function lookupContactsByPhone(
       .in('phone', chunk);
     if (error) throw new Error(`查 contacts 失败：${error.message}`);
     for (const row of data ?? []) {
-      found.set(row.phone, row.id);
+      if (row.phone) found.set(row.phone, row.id);
     }
   }
   return found;
@@ -106,9 +106,11 @@ async function bulkInsertContacts(
       .select('id, phone');
     if (error) throw new Error(`建 contacts 失败：${error.message}`);
     for (const row of data ?? []) {
-      created.set(row.phone, row.id);
-      // 不 await — 时间轴日志失败不影响主流程
-      void logContactEvent(row.id, 'created', { phone: row.phone, source: 'crypt15-import' });
+      if (row.phone) {
+        created.set(row.phone, row.id);
+        // 不 await — 时间轴日志失败不影响主流程
+        void logContactEvent(row.id, 'created', { phone: row.phone, source: 'crypt15-import' });
+      }
     }
   }
   return created;

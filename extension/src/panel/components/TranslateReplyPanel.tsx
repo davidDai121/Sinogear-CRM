@@ -59,7 +59,9 @@ export function TranslateReplyPanel({
     setError(null);
     try {
       if (needsJump && contactPhone) {
-        const ok = await jumpToChat(contactPhone.replace(/^\+/, ''));
+        const ok = await jumpToChat(contactPhone.replace(/^\+/, ''), {
+          allowDeepLink: true,
+        });
         if (!ok) {
           setError('未能跳转到该客户聊天，请先手动打开聊天再点填入');
           return;

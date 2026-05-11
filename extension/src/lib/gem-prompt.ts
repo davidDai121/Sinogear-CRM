@@ -8,6 +8,7 @@ export interface GemPromptContext {
   contact: Pick<
     ContactRow,
     | 'phone'
+    | 'group_jid'
     | 'name'
     | 'wa_name'
     | 'country'
@@ -22,12 +23,19 @@ export interface GemPromptContext {
     'model' | 'year' | 'condition' | 'steering' | 'target_price_usd'
   >[];
   messages: ChatMessage[];
+  /** 群成员名（Phase 2 GroupMembersSection 已能拿到）— 用于让 Gem 知道这个群里都有谁 */
+  groupMemberNames?: string[];
 }
 
 /**
- * 第一次给 Gem 发完整上下文（手机号 + 客户资料 + 车辆兴趣 + 最近 20 条消息）
+ * 第一次给 Gem 发完整上下文。
+ * 自动判断个人 vs 群聊：contact.group_jid 非空时切到群聊格式。
  */
 export function formatNewCustomer(ctx: GemPromptContext): string {
+  return ctx.contact.group_jid ? formatNewGroup(ctx) : formatNewIndividual(ctx);
+}
+
+function formatNewIndividual(ctx: GemPromptContext): string {
   const phone = normalizePhone(ctx.contact.phone);
   const lines = [`[Customer Phone: ${phone}]`];
 
@@ -53,7 +61,50 @@ export function formatNewCustomer(ctx: GemPromptContext): string {
   const collapsed = collapseMediaRuns(ctx.messages);
   const recent = collapsed.slice(-50);
   for (const msg of recent) {
-    lines.push(formatMessage(msg));
+    lines.push(formatMessage(msg, false));
+  }
+
+  lines.push('', FORMAT_CONSTRAINT);
+  return lines.join('\n');
+}
+
+function formatNewGroup(ctx: GemPromptContext): string {
+  const groupName = ctx.contact.name?.trim() || ctx.contact.wa_name?.trim() || '(unnamed group)';
+  const memberCount = ctx.groupMemberNames?.length;
+  const lines = [
+    `[WhatsApp Group Chat]`,
+    `Group Name: ${groupName}`,
+    memberCount ? `Members (${memberCount}): ${ctx.groupMemberNames!.join(', ')}` : `(member list unavailable)`,
+    '',
+    `This is a multi-person group chat, NOT a single-customer 1:1 conversation.`,
+    `Multiple people may be asking questions, comparing notes, or chatting casually.`,
+    `Treat each non-Sales message as coming from the named sender (shown in [Chat Messages]).`,
+    `When drafting [WhatsApp Reply], address the group as a whole or address the most recent asker by name.`,
+    `Skip [Client Record] — there's no single buyer to record fields for.`,
+  ];
+
+  // group context can still have notes (sales' own group memo) but country/language/budget skipped
+  if (ctx.contact.notes?.trim()) {
+    lines.push('', '[Sales Notes about this group]', ctx.contact.notes.trim());
+  }
+
+  if (ctx.vehicleInterests?.length) {
+    lines.push('', '[Vehicle Interests discussed in group]');
+    for (const vi of ctx.vehicleInterests) {
+      const parts: string[] = [vi.model];
+      if (vi.year) parts.push(String(vi.year));
+      if (vi.condition) parts.push(vi.condition);
+      if (vi.steering) parts.push(vi.steering);
+      if (vi.target_price_usd) parts.push(`target $${vi.target_price_usd}`);
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+
+  lines.push('', '[Chat Messages]');
+  const collapsed = collapseMediaRuns(ctx.messages);
+  const recent = collapsed.slice(-50);
+  for (const msg of recent) {
+    lines.push(formatMessage(msg, true));
   }
 
   lines.push('', FORMAT_CONSTRAINT);
@@ -64,13 +115,17 @@ export function formatNewCustomer(ctx: GemPromptContext): string {
  * 已有 Gem 对话，只发新消息（最近 5 条逻辑消息，媒体连发已合并）
  */
 export function formatUpdate(
-  phone: string,
+  phoneOrGroupName: string | null,
   newMessages: ChatMessage[],
+  isGroup = false,
 ): string {
-  const lines = [`[Update - Phone: ${normalizePhone(phone)}]`];
+  const header = isGroup
+    ? `[Update - Group: ${phoneOrGroupName ?? '(unknown)'}]`
+    : `[Update - Phone: ${normalizePhone(phoneOrGroupName)}]`;
+  const lines = [header];
   const collapsed = collapseMediaRuns(newMessages).slice(-5);
   for (const msg of collapsed) {
-    lines.push(formatMessage(msg));
+    lines.push(formatMessage(msg, isGroup));
   }
   lines.push('', FORMAT_CONSTRAINT);
   return lines.join('\n');
@@ -109,9 +164,17 @@ function buildProfileLines(
   return lines;
 }
 
-function formatMessage(msg: ChatMessage): string {
+function formatMessage(msg: ChatMessage, isGroup: boolean): string {
   const ts = formatTimestamp(msg.timestamp);
-  const role = msg.fromMe ? 'Sales' : 'Customer';
+  let role: string;
+  if (msg.fromMe) {
+    role = 'Sales';
+  } else if (isGroup) {
+    // 群里发言人优先用 sender，没有就用通用 "Member"
+    role = msg.sender ? `Member (${msg.sender})` : 'Member';
+  } else {
+    role = 'Customer';
+  }
   return `[${ts}] ${role}: ${msg.text}`;
 }
 
@@ -157,6 +220,7 @@ function collapseMediaRuns(messages: ChatMessage[]): ChatMessage[] {
           ? '<sent 1 media item>'
           : `<sent ${n} media items in a row>`,
       timestamp: last.timestamp ?? first.timestamp,
+      sender: first.sender,
     });
     run = [];
   };
@@ -187,6 +251,7 @@ function formatTimestamp(ms: number | null): string {
   return `${month}-${day} ${hour}:${minute}`;
 }
 
-function normalizePhone(phone: string): string {
+function normalizePhone(phone: string | null): string {
+  if (!phone) return '(group chat)';
   return phone.startsWith('+') ? phone : `+${phone}`;
 }

@@ -1,7 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { supabase } from '@/lib/supabase';
 import { jumpToChat } from '@/lib/jump-to-chat';
-import { readChatMessages, waitForChatMessages } from '@/content/whatsapp-messages';
+import {
+  readChatMessages,
+  waitForChatMessages,
+  type ChatMessage,
+} from '@/content/whatsapp-messages';
+import { loadMessages } from '@/lib/message-sync';
 import { stringifyError } from '@/lib/errors';
 import { logContactEvent } from '@/lib/events-log';
 import type {
@@ -87,17 +92,32 @@ export function TagsSection({ contactId, contactPhone }: Props) {
     setAiError(null);
     setSuggestions([]);
     try {
-      let messages;
+      // 1. 先试 DOM（WA Web 当前打开的聊天）；跳不到（如 David Eze 这类 WA Web
+      //    本地无 chat 但已导入 .txt 的客户）就让 messages 留空，下面 fallback
+      //    到 messages 表。这里 jumpToChat 不开 deep-link：reload 会中断这次 AI 调用。
+      let messages: ChatMessage[] = [];
       if (contactPhone) {
         const queryDigits = contactPhone.replace(/^\+/, '');
         const ok = await jumpToChat(queryDigits);
-        if (!ok) throw new Error('未能跳转到该客户聊天，请手动打开');
-        messages = await waitForChatMessages(5000, 30, 1);
+        if (ok) messages = await waitForChatMessages(5000, 30, 1);
       } else {
         messages = readChatMessages(30);
       }
+      // 2. DOM 空 → fallback 到数据库（导入的历史 + 之前 useMessageSync 同步过的）
       if (!messages.length) {
-        throw new Error('当前聊天没有可读消息');
+        const rows = await loadMessages(contactId, 50);
+        if (!rows.length) {
+          throw new Error(
+            '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，或在「客户」tab 用「📥 导入手机聊天」导入 .txt 历史。',
+          );
+        }
+        messages = rows.map((r) => ({
+          id: r.wa_message_id,
+          fromMe: r.direction === 'outbound',
+          text: r.text,
+          timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
+          sender: null,
+        }));
       }
       const response = (await chrome.runtime.sendMessage({
         type: 'EXTRACT_TAGS',

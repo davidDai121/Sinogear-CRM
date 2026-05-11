@@ -64,7 +64,7 @@ export function FilteredChatList({
     setError(null);
     try {
       const query = c.phone.replace(/^\+/, '');
-      const ok = await jumpToChat(query);
+      const ok = await jumpToChat(query, { allowDeepLink: true });
       if (!ok) setError('未找到聊天，可能需要手动打开');
     } catch (err) {
       setError(stringifyError(err));

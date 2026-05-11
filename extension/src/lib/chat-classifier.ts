@@ -39,18 +39,12 @@ export function classifyChat(
     autoStage = 'active';
   }
 
-  const hasUnread = chat.unreadCount > 0;
-  const customerLastAt = chat.t;
-  const ackBlocks =
-    reminder.reminderAckAt != null && customerLastAt <= reminder.reminderAckAt;
+  // "只要有新消息来 = 我该回" —— 不再考虑 reminder_disabled / reminder_ack_at，
+  // 客户每次发消息都触发重新进 bucket（reminder 仅用于个别业务场景，UI 别用它过滤）
+  const needsReply = !chat.archive && chat.unreadCount > 0;
 
-  // 只要有未读 + 没归档 + 没标已处理 = 我该回
-  // (之前有 8 小时阈值，太保守，客户发消息 8 小时内不算"该回"不符合实际工作流)
-  const needsReply =
-    !chat.archive &&
-    hasUnread &&
-    !reminder.reminderDisabled &&
-    !ackBlocks;
+  // reminder 字段保留接口（返回结构没变）以免外面调用方报错；不再影响 needsReply
+  void reminder;
 
   return { autoStage, needsReply, stalledDays };
 }

@@ -59,35 +59,65 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export async function jumpToChat(query: string): Promise<boolean> {
+const ONLY_DIGITS = /^\d+$/;
+
+export interface JumpOptions {
+  /**
+   * 搜索框找不到时是否 fallback 到 WA Web 的 /send?phone= 协议。
+   * - true：触发当前 tab 内 reload 跳到 send 协议（WA Web 的 ServiceWorker
+   *   会快速重启 SPA 并打开/创建对应 chat）。适用于"用户点了 💬 跳转"这类
+   *   主动操作。代价：CRM panel 状态会重置（Gem 草稿等已用 chrome.storage
+   *   持久化，影响有限）。
+   * - false（默认）：搜索失败直接 return false，不 reload。适用于批量/自动
+   *   场景（bulk-extract、活性体检"实测验证"），避免反复 reload 中断脚本。
+   */
+  allowDeepLink?: boolean;
+}
+
+export async function jumpToChat(
+  query: string,
+  opts: JumpOptions = {},
+): Promise<boolean> {
   if (chatOpenForQuery(query)) return true;
 
   const input = findSearchInput();
-  if (!input) return false;
+  if (input) {
+    input.focus();
 
-  input.focus();
+    if (input instanceof HTMLInputElement) {
+      setNativeInputValue(input, '');
+      await sleep(80);
+      setNativeInputValue(input, query);
+    } else {
+      typeIntoEditable(input, query);
+    }
 
-  if (input instanceof HTMLInputElement) {
-    setNativeInputValue(input, '');
-    await sleep(80);
-    setNativeInputValue(input, query);
-  } else {
-    typeIntoEditable(input, query);
+    await sleep(600);
+
+    pressEnter(input);
+
+    for (let i = 0; i < 20; i++) {
+      await sleep(150);
+      if (chatOpenForQuery(query)) return true;
+    }
+
+    pressEnter(input);
+    for (let i = 0; i < 10; i++) {
+      await sleep(200);
+      if (chatOpenForQuery(query)) return true;
+    }
   }
 
-  await sleep(600);
-
-  pressEnter(input);
-
-  for (let i = 0; i < 20; i++) {
-    await sleep(150);
-    if (chatOpenForQuery(query)) return true;
-  }
-
-  pressEnter(input);
-  for (let i = 0; i < 10; i++) {
-    await sleep(200);
-    if (chatOpenForQuery(query)) return true;
+  // Fallback：WA Web 内置搜索找不到，但号码可能在 WhatsApp 注册过（手机端能搜到、
+  // 或我们已经导入过该客户的 .txt 聊天历史）。走 WA Web 官方的 click-to-chat 协议
+  // (/send?phone=...) 让服务端解析号码 + 创建会话。会触发当前 tab 内 reload，
+  // 所以仅在调用方明确允许时启用。
+  if (opts.allowDeepLink && ONLY_DIGITS.test(query)) {
+    window.location.href = `${location.origin}/send?phone=${query}`;
+    // navigate 已经发起，页面即将 reload — 这里 await 一段时间让浏览器走完，
+    // 永远不会真的 resolve（reload 中断了 JS 执行）。返回 true 表达"已触发跳转"。
+    await sleep(5000);
+    return true;
   }
 
   return false;

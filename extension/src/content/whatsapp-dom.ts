@@ -1,37 +1,54 @@
 import { readWhatsAppData, jidToPhone } from '@/lib/whatsapp-idb';
+import { rememberJidPhone } from '@/lib/jid-phone-cache';
 
 export interface CurrentChat {
   name: string | null;
   phone: string | null;
   rawJid: string | null;
+  groupJid: string | null;
 }
 
-const EMPTY_CHAT: CurrentChat = { name: null, phone: null, rawJid: null };
+const EMPTY_CHAT: CurrentChat = { name: null, phone: null, rawJid: null, groupJid: null };
 
 const JID_RE = /(\d{7,})@(?:c\.us|s\.whatsapp\.net|lid)/;
+// 群聊 JID 两种格式：
+//   旧格式（2022 前）：<creator_phone>-<creation_timestamp>@g.us  例：8613552592187-1612345678@g.us
+//   新格式（2022 后）：纯长数字（18-19 位）@g.us                  例：120363025246012345@g.us
+const GROUP_JID_RE = /(\d{7,}(?:-\d+)?)@g\.us/;
 const PHONE_TEXT_RE = /^\+?\s*(\d[\d\s\-().]{6,}\d)$/;
 
-let nameToPhoneCache = new Map<string, { phone: string; jid: string }>();
+interface CacheEntry {
+  phone: string | null;
+  jid: string;
+  groupJid: string | null;
+}
+
+let nameToPhoneCache = new Map<string, CacheEntry>();
 
 export async function refreshChatNameCache(): Promise<void> {
   try {
     const wa = await readWhatsAppData();
-    const next = new Map<string, { phone: string; jid: string }>();
+    const next = new Map<string, CacheEntry>();
 
     const addEntry = (name: string | null | undefined, jid: string) => {
       if (!name) return;
       const key = name.trim();
       if (!key) return;
       if (next.has(key)) return;
+      // 群聊：jid 以 @g.us 结尾
+      if (jid.endsWith('@g.us')) {
+        next.set(key, { phone: null, jid, groupJid: jid });
+        return;
+      }
       const direct = jidToPhone(jid);
       if (direct) {
-        next.set(key, { phone: direct, jid });
+        next.set(key, { phone: direct, jid, groupJid: null });
         return;
       }
       const phoneJid = wa.jidToPhoneJid.get(jid);
       if (phoneJid) {
         const phone = jidToPhone(phoneJid);
-        if (phone) next.set(key, { phone, jid });
+        if (phone) next.set(key, { phone, jid, groupJid: null });
       }
     };
 
@@ -97,12 +114,35 @@ function readJidFromScope(scope: ParentNode): { phone: string; rawJid: string } 
   return null;
 }
 
+function readGroupJidFromScope(scope: ParentNode): string | null {
+  const elements = scope.querySelectorAll('[data-id]');
+  for (const el of elements) {
+    const dataId = el.getAttribute('data-id') ?? '';
+    const match = dataId.match(GROUP_JID_RE);
+    if (match) return match[0];
+  }
+  return null;
+}
+
 export function readCurrentChat(): CurrentChat {
   const main = findMainPane();
   if (!main) return EMPTY_CHAT;
 
   const name = readNameFromHeader(main) || readNameFromHeader(document);
   if (!name) return EMPTY_CHAT;
+
+  // 1. 先看 IDB 缓存（按 header 显示名查 JID）——
+  //    新版 WhatsApp 不再把 JID 放进消息 data-id，所以 DOM 抓不到，必须靠 IDB
+  const cached = nameToPhoneCache.get(name.trim());
+  if (cached?.groupJid) {
+    return { name, phone: null, rawJid: cached.jid, groupJid: cached.groupJid };
+  }
+
+  // 2. DOM 兜底：旧版 WA 的 data-id 仍带 JID（@g.us / @c.us），新版没有但保留兼容
+  const groupJid = readGroupJidFromScope(main);
+  if (groupJid) {
+    return { name, phone: null, rawJid: null, groupJid };
+  }
 
   let phone: string | null = null;
   let rawJid: string | null = null;
@@ -118,15 +158,18 @@ export function readCurrentChat(): CurrentChat {
     }
   }
 
-  if (!phone) {
-    const cached = nameToPhoneCache.get(name.trim());
-    if (cached) {
-      phone = cached.phone;
-      rawJid = cached.jid;
-    }
+  if (!phone && cached?.phone) {
+    phone = cached.phone;
+    rawJid = cached.jid;
   }
 
-  return { name, phone, rawJid };
+  // 持久缓存 jid→phone：业务号（@lid）IDB 没同步好映射时，下次 useCrmData
+  // 全量扫聊天用这个缓存兜底。fire-and-forget，失败也不影响当前调用
+  if (rawJid && phone) {
+    void rememberJidPhone(rawJid, phone);
+  }
+
+  return { name, phone, rawJid, groupJid: null };
 }
 
 /**

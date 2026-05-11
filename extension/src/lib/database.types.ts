@@ -68,7 +68,8 @@ export interface Database {
         Row: {
           id: string;
           org_id: string;
-          phone: string;
+          phone: string | null;
+          group_jid: string | null;
           wa_name: string | null;
           name: string | null;
           country: string | null;
@@ -89,7 +90,8 @@ export interface Database {
         Insert: {
           id?: string;
           org_id: string;
-          phone: string;
+          phone?: string | null;
+          group_jid?: string | null;
           wa_name?: string | null;
           name?: string | null;
           country?: string | null;
@@ -329,6 +331,23 @@ export interface Database {
           sent_at?: string | null;
           status?: QuoteStatus;
           notes?: string | null;
+        };
+        Relationships: [];
+      };
+      app_config: {
+        Row: {
+          key: string;
+          value: string;
+          updated_at: string;
+        };
+        Insert: {
+          key: string;
+          value: string;
+          updated_at?: string;
+        };
+        Update: {
+          value?: string;
+          updated_at?: string;
         };
         Relationships: [];
       };

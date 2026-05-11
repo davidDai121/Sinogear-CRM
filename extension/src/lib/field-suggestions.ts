@@ -131,19 +131,22 @@ ${current}
 # 输出格式（严格 JSON，不要 markdown，不要解释）
 {
   "suggestions": [
-    { "field": "country", "value": "Kenya", "confidence": 0.9, "evidence": "shipping to Mombasa" }
+    { "field": "<字段名>", "value": "<原文里能直接读到的值>", "confidence": 0.9, "evidence": "<聊天原文片段>" }
   ],
   "vehicles": [
-    { "model": "Toyota Hilux", "condition": "new", "target_price_usd": 25000, "evidence": "want hilux brand new around 25k" },
-    { "model": "Toyota Hilux", "condition": "used", "target_price_usd": null, "evidence": "also asking for used hilux" }
+    { "model": "<品牌+型号>", "condition": "new|used|null", "target_price_usd": null, "evidence": "<聊天原文片段>" }
   ]
 }
 
-# 规则
+# 规则（重要 — 严禁臆造）
 - suggestions 只返回 confidence ≥ 0.7 的
+- **聊天里没有出现的内容一律不要返回**，宁缺勿滥
+- 客户只是打招呼（"Hi"/"Hello"/"你好"等）、空消息、纯附件占位（如 "[媒体]"、"IMG-xxx (文件附件)"）—— 一律返回 "suggestions": [], "vehicles": []
+- 不要从"输出格式"示例里复制具体国家/车型/品牌作为答案
+- 不要根据手机号区号猜国家（country 字段由系统另行处理；这里只在客户文字明示国家/城市时才填）
+- evidence 必须是聊天里出现的**原文片段**，不能改写、不能翻译、不能编造
 - 找不到任何字段返回 "suggestions": []
 - 找不到任何车型返回 "vehicles": []
-- evidence 必须是聊天里出现的原文片段，不要编造
 
 # 聊天记录（最新在下）
 ${transcript}`;

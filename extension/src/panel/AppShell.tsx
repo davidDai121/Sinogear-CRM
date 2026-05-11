@@ -12,8 +12,17 @@ import { TagsPage } from './pages/TagsPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { MediaStagingTray } from './components/MediaStagingTray';
 import { ScopeProvider } from './contexts/ScopeContext';
+import { VersionGate } from './components/VersionGate';
 
 export function AppShell() {
+  return (
+    <VersionGate>
+      <AppShellInner />
+    </VersionGate>
+  );
+}
+
+function AppShellInner() {
   const { session, user, loading: authLoading } = useAuth();
   const org = useOrg(user?.id ?? null);
   const [tab, setTab] = useState<TabKey>('chat');
@@ -59,7 +68,7 @@ export function AppShell() {
     return (
       <div className="sgc-shell sgc-shell-overlay">
         <div className="sgc-overlay-card">
-          <OrgSetup onCreate={org.createOrg} />
+          <OrgSetup email={user?.email ?? null} onCreate={org.createOrg} />
         </div>
       </div>
     );

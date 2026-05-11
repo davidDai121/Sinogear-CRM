@@ -8,6 +8,7 @@ import type {
 } from '@/lib/database.types';
 import { VehicleModal } from '../components/VehicleModal';
 import { CloudinaryImg } from '../components/CloudinaryImg';
+import { CloudinaryUsageBadge } from '../components/CloudinaryUsageBadge';
 
 type VehicleRow = Database['public']['Tables']['vehicles']['Row'];
 type MediaRow = Database['public']['Tables']['vehicle_media']['Row'];
@@ -100,6 +101,7 @@ export function VehiclesPage({ orgId }: Props) {
         <h1>车源库</h1>
         <div className="sgc-page-actions">
           <span className="sgc-page-count">共 {filtered.length} 条</span>
+          <CloudinaryUsageBadge orgId={orgId} refreshKey={items.length} />
           <button
             className="sgc-btn-primary"
             onClick={() => setModalItem(null)}

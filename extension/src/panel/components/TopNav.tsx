@@ -3,6 +3,7 @@ import { manualRetranslate } from '@/content/auto-translate';
 import { GemTemplatesModal } from './GemTemplatesModal';
 import { TeamMembersModal } from './TeamMembersModal';
 import { ScopePicker } from './ScopePicker';
+import { DomHealthBadge } from './DomHealthBadge';
 import { useScope } from '../contexts/ScopeContext';
 import { supabase } from '@/lib/supabase';
 
@@ -155,6 +156,7 @@ export function TopNav({
         >
           👥 团队
         </button>
+        <DomHealthBadge />
         {userEmail && <span className="sgc-topnav-email">{userEmail}</span>}
         <button className="sgc-btn-link" onClick={onSignOut} type="button">
           登出

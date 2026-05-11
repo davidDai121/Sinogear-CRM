@@ -24,13 +24,14 @@ Supabase（托管 Postgres + Auth）
   └── Google 联系人同步（chrome.identity OAuth + People API）
 
 外部服务
-  ├── AI 字段抽取（OpenAI 兼容 API，可换）— 阿里云 Qwen
-  │   ├── 当前：通义千问 qwen-flash（百炼 1M tokens 免费/月）
+  ├── AI 字段抽取（OpenAI 兼容 API，可换）— 智谱 GLM
+  │   ├── 当前：glm-4-flash（智谱 BigModel 免费档，稳定不限频）
   │   ├── 端点 + 模型从 .env 配置（VITE_AI_BASE_URL / VITE_AI_MODEL）
-  │   └── 备选：DeepSeek / GLM / Kimi / 其他百炼模型，改 .env 即可
+  │   ├── 历史：2026-05 之前用阿里云 Qwen，跑光免费额度切到 GLM
+  │   └── 备选：DeepSeek / Kimi / 千问 / 其他 OpenAI 兼容端点，改 .env 即可
   ├── 翻译：Google Translate gtx（免费、无 key、无配额）
   │   ├── translate.googleapis.com — Chrome 自带翻译同 endpoint
-  │   └── 失败 fallback 到 Qwen
+  │   └── 失败 fallback 到 GLM
   ├── Gemini Gem AI 回复：网页端自动化（非 API，免费）
   │   ├── chrome.tabs 后台打开 gemini.google.com Gem URL
   │   ├── chrome.scripting 注入脚本切换 Pro 模型 + 填 prompt + 读响应
@@ -42,7 +43,7 @@ Supabase（托管 Postgres + Auth）
   └── Google People API — 联系人双向同步
 ```
 
-**关键决策：** 销售经理不想维护服务器；Supabase 免费额度够用；WhatsApp Web 直接做聊天界面；多销售可共享一个 org 的客户数据。AI 字段抽取用阿里云 Qwen（国内访问稳定 + 免费额度大）；翻译用 Google Translate gtx（免费 + 无配额 + 比 Qwen 快）；AI 回复用 Gemini Gem 网页端自动化（用户偏好 Gem，免费 + 上下文持久）。
+**关键决策：** 销售经理不想维护服务器；Supabase 免费额度够用；WhatsApp Web 直接做聊天界面；多销售可共享一个 org 的客户数据。AI 字段抽取用智谱 GLM（国内稳定 + 免费档不限频，2026-05 从 Qwen 切过来因为千问免费额度跑光）；翻译用 Google Translate gtx（免费 + 无配额 + 比 LLM 快）；AI 回复用 Gemini Gem 网页端自动化（用户偏好 Gem，免费 + 上下文持久）。
 
 ## 目录结构
 
@@ -53,14 +54,14 @@ Supabase（托管 Postgres + Auth）
 │   ├── vite.config.ts                  @crxjs + react + @ 别名
 │   ├── tsconfig.json
 │   ├── package.json
-│   ├── README.md                       Supabase + Google + Qwen 配置步骤
-│   ├── .env                            Supabase URL/key + Google + Qwen（不入 git）
+│   ├── README.md                       Supabase + Google + GLM 配置步骤
+│   ├── .env                            Supabase URL/key + Google + GLM（不入 git）
 │   ├── public/icons/                   占位绿色图标
 │   ├── src/
 │   │   ├── background/
 │   │   │   └── service-worker.ts       PING + GET/CLEAR_GOOGLE_TOKEN +
 │   │   │                               EXTRACT_FIELDS / EXTRACT_TAGS /
-│   │   │                               EXTRACT_TASKS / TRANSLATE_TEXT (Google → Qwen fallback) +
+│   │   │                               EXTRACT_TASKS / TRANSLATE_TEXT (Google → GLM fallback) +
 │   │   │                               GEM_RUN / GEM_BUSY (Gem 自动化) +
 │   │   │                               BULK_CAPTURE_ARM/DISARM (拦 chrome.downloads
 │   │   │                               转发回 content 给 chat-media-capture)
@@ -212,9 +213,15 @@ Supabase（托管 Postgres + Auth）
 │       │                                7 日无活动自动暂停，跟 SW 无关）
 │       ├── 0013_vehicle_media_and_pricing.sql
 │       │                                vehicle_media (img/video/spec) + 定价扩展
-│       └── 0014_handlers_and_per_user_gem.sql
-│                                        contact_handlers (per-user 主理人) +
-│                                        gem_templates RLS 改 created_by=auth.uid()
+│       ├── 0014_handlers_and_per_user_gem.sql
+│       │                                contact_handlers (per-user 主理人) +
+│       │                                gem_templates RLS 改 created_by=auth.uid()
+│       ├── 0015_cascade_handlers_on_member_removal.sql
+│       │                                org 成员被移除时，trigger 级联清掉他在该 org
+│       │                                所有 contact 上的 handler 行（防孤儿撞单）
+│       └── 0016_groups.sql              支持 WA 群聊作为 contact：加 group_jid 列 +
+│                                        partial unique 索引 + check 约束 +
+│                                        放宽 phone NOT NULL
 └── （仅此一个目录；旧 backend/ frontend/ docs/ 已删）
 ```
 
@@ -312,11 +319,12 @@ npm run package
 **.env 需要的变量：**
 - `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` — 必填
 - `VITE_GOOGLE_CLIENT_ID` — Google 联系人同步用
-- `VITE_DASHSCOPE_API_KEY` — AI key（阿里云百炼）
-- `VITE_AI_BASE_URL` — 默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`（国内）
-- `VITE_AI_MODEL` — 默认 `qwen-flash`（百炼免费档，1M tokens/月）
-  - 备选：`qwen-turbo-1101`（10M 额度但老）/ `deepseek-v3.2` / `glm-4.7` / `kimi-k2.6`
-  - 国际版：endpoint 改成 `dashscope-intl.aliyuncs.com/compatible-mode/v1`
+- `VITE_DASHSCOPE_API_KEY` — AI key（变量名仍叫 DASHSCOPE 是历史遗留；当前装的是智谱 GLM 的 key，去 https://bigmodel.cn/usercenter/proj-mgmt/apikeys 拿）
+- `VITE_AI_BASE_URL` — 当前 `https://open.bigmodel.cn/api/paas/v4`（智谱 BigModel）
+- `VITE_AI_MODEL` — 当前 `glm-4-flash`（智谱免费档，稳定不限频；不要用 `glm-4.7-flash`，新模型 429 严重）
+  - 备选：`deepseek-v3.2` / `kimi-k2.6` / `qwen-flash`（百炼，国内端点 `dashscope.aliyuncs.com/compatible-mode/v1`，免费额度跑光后会 401）
+  - 切提供商只需改这两个变量 + key，调用代码全是 OpenAI 兼容协议
+  - **⚠️ 安全：VITE_* 变量会被打包进 dist 包内**，扩展安装后 key 在用户机器上可读。打 zip 前确认要给销售装的是哪个 key（boss 的还是给销售单独申请的）。长期方案：放 Supabase Edge Function 做代理
 - `VITE_CLOUDINARY_CLOUD_NAME` / `VITE_CLOUDINARY_UPLOAD_PRESET` — 车源媒体上传
   - preset 必须在 Cloudinary 后台 Settings → Upload → Upload presets 设为 **Unsigned**
   - 一个免费账号 25 GB 流量 / 月，对几百车型够用
@@ -364,12 +372,12 @@ npm run package
 - [x] **国家区域映射**：手机号区号 → 国家 → 13 大区
 - [x] **预算分档**：新车 / 二手切换 + 5 档
 
-### AI（Qwen 全套，4 种 prompt）
+### AI（GLM 全套，4 种 prompt）
 - [x] **AI 字段提取**（`useAutoExtract` 单聊 + `bulk-extract.ts` 批量）：name / country / language / budget / port + vehicles[]
 - [x] **AI 标签建议**（TagsSection "🤖 AI 建议"）：销售特征标签（支付方式/紧急度/决策阶段/反对信号），跳过国家/语言/车型等已抽取字段
 - [x] **AI 任务建议**（ContactTasksSection "🤖 AI 建议"）：销售下一步动作（动词开头 12 字内 + due_in_days），跳过"等客户回复"
-- [x] **自动翻译**（顶栏 "🌐 翻译" 开关 + "🔁 重译" + 每条消息悬停 🌐 按钮）：observer + 顺序队列 + 200ms 间隔 + 缓存，CJK > 30% 自动跳过；**主 Google Translate gtx（免费、无 key、无配额）**，失败 fallback 到 Qwen
-- [x] **公共 callQwen helper**：3 次指数退避（3s/8s/15s）+ JSON mode + temperature 0.1
+- [x] **自动翻译**（顶栏 "🌐 翻译" 开关 + "🔁 重译" + 每条消息悬停 🌐 按钮）：observer + 顺序队列 + 200ms 间隔 + 缓存，CJK > 30% 自动跳过；**主 Google Translate gtx（免费、无 key、无配额）**，失败 fallback 到 GLM
+- [x] **公共 callQwen helper**：3 次指数退避（3s/8s/15s）+ JSON mode + temperature 0.1（函数名仍叫 callQwen 是历史遗留，实际打的是 .env 配的任何 OpenAI 兼容端点，当前是 GLM）
 
 ### 销售工作流
 - [x] **报价记录**（QuotesSection）：car/price/status(draft/sent/accepted/rejected)/sent_at/notes，车型 datalist 联动 vehicle_interests
@@ -456,12 +464,87 @@ npm run package
   - 之前 Gem 看到的最近 20 条里大半是图片占位，真实对话被挤出去；现在 224 客户聊天 prompt 总长 8.6k 字符，完整保留销售脉络
 - [x] **loadMessages 修 ASC bug**（`lib/message-sync.ts`）：之前 `order ASC + limit N` 拿的是最老 N 条，导大量历史后 Gem fallback 看到的是开头不是最近——改 DESC + reverse，调用方拿到正序但内容是最近 N 条；MessagesHistoryModal 也跟着对齐
 
+### 近期补完（2026-05-09）— 撞单清理 + OrgSetup 防呆
+
+- [x] **`contact_handlers` ghost user 清理**：一个孤立 auth user (`3190696498@qq.com`) 短暂加入过 Miles org，被移除后 contact_handlers 残留 512 行，导致 459 个客户长期显示"撞单"。手工 SQL DELETE 清掉 + 删 auth user
+- [x] **migration `0015_cascade_handlers_on_member_removal.sql`**：`AFTER DELETE on organization_members` trigger，自动清掉被移除成员在该 org 所有 contact 上的 handler 行（防 ghost user 复发）
+- [x] **dengrongc6 双 org 合并**：dengrongc6 自建过 "Sino gear" org（147 contacts，独立隔离），又被邀请进 Miles。10 个手机号冲突 contact 的子数据合并到 Miles，137 个无冲突的本应迁移但⚠️**踩 1000-行陷阱后误被 cascade 删除**——dengrongc6 重新 WhatsApp 同步可恢复通讯录主体，少量消息/事件/兴趣丢失（手动操作不要重复，已记录教训见"已知问题"）
+- [x] **OrgSetup 防呆**（`OrgSetup.tsx` 重写）：3 步式确认——guidance（默认显示，强烈警告员工别建团队 + 显示当前邮箱 + "换个账号登录"）→ confirm（再次确认隔离风险）→ form。员工误注册的常见路径全部加了护栏
+- [x] **真·空壳 contact 清理**：严格筛选（stage=new + 无 notes/country + 非 Google 同步 + 无 tags/interests/quotes/tasks/messages/gem_conversations），删 186 个；候选集 1066 里大部分（880）有消息历史只是没分类，保留
+- [x] **Cloudinary 用量监控**（`lib/cloudinary-usage.ts` + `panel/components/CloudinaryUsageBadge.tsx`）：车源 tab 顶部小徽章 sum(`vehicle_media.file_size_bytes`) / 25 GB；70%+ 黄、90%+ 红 + 接近上限提示。不调 Cloudinary Admin API（避开 secret 泄漏），SQL 即可估算
+- [x] **WA Web DOM 漂移自检**（`lib/dom-health.ts` + `panel/components/DomHealthBadge.tsx`）：每 60s 跑一组关键 selector 检查（侧边栏、主面板、聊天 title、消息 data-id、搜索框）；检出失效后顶栏冒红徽章 "🔴 DOM N"，点开 modal 列详情。skipped ≠ broken（避免没开聊天时误报）
+
+### 近期补完（2026-05-10）— 群聊支持 Phase 1
+
+- [x] **群聊作为 contact**（migration `0016_groups.sql` + `whatsapp-dom.ts` + `useContact` + `ContactCard` / `ContactDetailDrawer` / `ContactEditForm` + `useAutoExtract` + `bulk-extract` + `GoogleSyncDialog` + `useCrmData` + `ContactsPage` / `TaskModal` 等）：
+  - DB schema：contacts 加 `group_jid TEXT` 列 + partial unique `(org_id, group_jid) WHERE group_jid IS NOT NULL` + check constraint `phone IS NOT NULL OR group_jid IS NOT NULL` + 放宽 phone NOT NULL
+  - 群 JID 来源：WhatsApp 新版 data-id **不再含 JID**（只放 32-char 消息哈希），改走 IDB `chat.id` cache。`refreshChatNameCache` 启动 + 每 30s 把 IDB chats 按 "header name → {phone | groupJid, jid}" 建索引；readCurrentChat 用 header 显示名查缓存
+  - 群聊 contact 复用所有现有子表：tags / vehicle_interests / quotes / tasks / messages / contact_handlers / contact_events / gem_conversations 全部零改动可用
+  - 群聊关闭：自动 AI 字段抽取（多人发言 country/language/budget 语义崩坏）+ Google 联系人同步（无手机号）+ bulk-extract（同自动抽取）
+  - UI：群聊 ContactEditForm 隐藏 country/language/budget/destination_port 四栏，姓名字段标 "群名"；客户列表 / 任务选项里群聊带 👥 前缀
+  - `gem-prompt.ts` `normalizePhone` 兜底：null phone 显示 "(group chat)"
+  - 暂未做（Phase 2）：群成员名单展示 / 一次性批量同步所有群进 CRM / 筛选维度"个人 vs 群组" / 群聊专用 Gem prompt
+
+### 近期补完（2026-05-10）— 群聊支持 Phase 2
+
+- [x] **群成员名单展示**（`panel/components/GroupMembersSection.tsx`）：客户卡 + drawer 里挂一个 section，从 IDB `groupMetadata.participants` 拉成员 JID，按 `wa.contacts` 解析 name/phone，每人有"💬 跳转 1 对 1"按钮。展示前 6 个，可展开剩余
+- [x] **批量同步含群聊**（`bulk-sync.ts`）：原本只把个人 chat 同步进 contacts，现在 @g.us 的 chat 也建成 group contact（`group_jid` 走 unique 索引去重）。结果对象新加 `addedGroups` 字段，FilterMaintenancePanel 同步结果文案多显示 "+ N 个群聊"
+- [x] **客户列表"个人 / 群组"筛选**（`ContactsPage.tsx`）：toolbar 加一个 select，"全部类型 / 👤 个人 / 👥 群聊"
+- [x] **群聊专用 Gem prompt**（`gem-prompt.ts`）：检测 `contact.group_jid` 自动切到 `formatNewGroup` 路径，prompt 头部 `[WhatsApp Group Chat]` + 群名 + 成员名单 + 显式说明"这是多人群聊不是单一客户"+ "跳过 [Client Record]"。`formatMessage` 接收 `isGroup` 标志，群里非自己的消息标记成 `Member (Aca)` 而不是 `Customer`。`formatUpdate` 也带 `isGroup` 参数
+- [x] **ChatMessage 加 sender 字段**（`whatsapp-messages.ts`）：从 `data-pre-plain-text` 末尾的 "[time, date] SenderName: " 解析，"You" / 手机号格式不算。个人聊天恒为 null。collapseMediaRuns / GemReplySection 的 DB fallback 路径也都跟着加了 sender
+- [x] **WAChat 加 participants 字段**（`whatsapp-idb.ts`）：从 `chat.groupMetadata.participants` 解析成员 JID 列表，处理三种格式（string / object.id / object.id._serialized）。个人聊天为 []
+- [x] **强制版本闸门**（migration `0017_app_config.sql` + `lib/build-version.ts` + `lib/version-check.ts` + `panel/components/VersionGate.tsx` + `scripts/package.mjs` 重写）：
+  - DB schema：`app_config` 表（key/value），`required_version` 行公开可读（RLS `using (true)`），写入只服务端
+  - 客户端 `BUILD_VERSION` 在 `build-version.ts`（默认 'dev'，`npm run package` 时被自动覆写为 `0.1.0-YYYYMMDD`，构建完再还原回 'dev' 保持 git 干净）
+  - `VersionGate` 包在 AppShell 最外层（甚至先于 LoginForm）：每 5 分钟拉 required_version + 跟 BUILD_VERSION 严格 ===  比对，不一致 / 拉不到且无缓存 → 弹强制更新弹窗，没有 bypass。网络故障兜底用 chrome.storage 缓存（一周新鲜期）
+  - `npm run package` 现在是一条命令的流水线：写版本 → build → zip → 用 service_role upsert 到 `app_config.required_version` → 还原 build-version.ts。boss 这台机器是权威，每次打包 = 强制全员升级
+  - `BUILD_VERSION === 'dev'` 永远放行（boss `npm run dev` 不被自己拦住）
+
+### 近期补完（2026-05-11）
+
+- [x] **migration `0018_fix_group_jid_unique.sql`**：把 0016 加的 partial unique INDEX `contacts_org_group_jid_key` 换成普通 UNIQUE CONSTRAINT。原因：`supabase-js` 的 `.upsert({ onConflict: 'org_id,group_jid' })` 不支持指定 index predicate，partial index 让 bulk-sync 群聊报 42P10 ON CONFLICT 错。普通 UNIQUE 在 PG 里 NULL/NULL 不冲突，所以个人 contact 还能照样多个 group_jid=NULL 共存
+- [x] **"我该回"判定简化**（`chat-classifier.ts`）：移除 `reminder_disabled` / `reminder_ack_at` 拦截，**只看 chat.unreadCount > 0 + 未归档**——客户每次发新消息都进 bucket，不再被"已处理"标记隐藏
+- [x] **今日待办 bucket 时间标签 + 补全两个时间档**（`filters.ts` + `FilterTodoList.tsx`）：现在 8 个 bucket：📋 所有 / ⚠️ 我该回 / 🔥 谈判中 / ⭐ 重点 / 🆕 新客户(1天内) / 🔄 进行中(1-3天) / 💤 长期未联系(3-7天) / 🪦 已流失(>7天)
+- [x] **@lid 业务号 jid→phone 持久缓存**（`lib/jid-phone-cache.ts` + `whatsapp-dom.ts` 写入 + `useCrmData.ts` 读取）：新版 WA Web `data-id` 全是 hex 哈希、IDB `jidToPhoneJid` 也常缺 @lid 映射 → 业务号客户在左边列表消失。修法：用户每次打开聊天时 `readCurrentChat` 把 (rawJid, phone) 持久化到 chrome.storage.local；下次 `useCrmData` 全量扫聊天时优先查这个缓存。原始数据来源：DOM header 文字（"+591 69820483"）的 `extractPhoneFromText`
+- [x] **再修 1000 行陷阱**（`useCrmData.ts` + `ContactsPage.tsx`）：本来都用 `.from('xxx').select('*').eq('org_id', orgId)` 单次查，超过 1000 行被静默截断。改成 fetchAll-pattern 分页（跟 `fetchHandlersForOrg` 一样写法）。**这次踩坑导致 712/1733 个客户在客户管理 tab 消失，且 +591 业务号客户因为 contact 没在前 1000 里、被第二个 loop 当成 contact=null 的孤儿塞进 merged → scope=mine 过滤掉**
+- [x] **客户活性体检工具**（`lib/contact-vitality.ts` + `panel/components/ContactVitalityModal.tsx` + 维护工具入口 "🩺 客户活性体检"）：
+  - 秒级分析：根据 IDB chat.t + DB messages 给每个客户打标签（🟢 ≤30天 / 🟡 30-180天 / 🟠 >180天 / 🔴 完全无 WA 痕迹）
+  - "🔍 实测验证号码"按钮：按需对当前档位逐个跑 `jumpToChat`，区分"能开聊天"vs"死号"。约 3 秒/个，1700 个全跑要 80 分钟，建议先跑 🔴+🟠 这两档
+  - 批量操作：勾选后一键"标 spam"或"删除"
+  - 取消按钮用 `useRef` 而不是 `useState`——React state 在 for 循环闭包里被快照，setState 改不动循环里的判断变量，必须用 mutable ref
+
+### 近期补完（2026-05-12）— "WA Web 搜不到"全套修复 + 真相确认
+
+**起点**：客户活性体检里 1000+ 客户被标 "⚠ 搜不到"（实例 David Eze `+2347035834920`）。客户管理点 💬 跳不进去、Gem AI 抽不出建议、bulk-extract 跳过这些客户。
+
+**深夜实测** — 用 Chrome MCP 在独立 WA Web tab 跑了 4 个实验，确认：
+
+1. **`history.pushState` + `popstate` 路由 → 完全无效**：URL 变了，但 WA Web SPA 不响应 popstate，`div#main` 不出现。SPA 内部路由这条路不通。
+2. **`location.href = '/send?phone=X'` 触发 reload → 注册号能进 chat**：但需要 **≥14 秒**等待。8 秒/10 秒的检查都会误判为失败（David Eze 之前实测验证 fail 的根因）。
+3. **死号 → WA Web 弹 dialog "电话号码 X 没有注册 WhatsApp"**。可识别 + dismiss。
+4. **关键死结**：`/send?phone=` 只 in-memory 打开 chat，**不写 IDB chat 表**——25 秒后查 IDB 还是 519 条，测试号没进去。**任何"批量激活"想让 WA Web 缓存这些号的方案物理上不可行**。WA Web 只缓存"产生过消息级交互"的 chat，这是它的设计哲学。
+
+**做了**：
+
+- [x] **`jumpToChat` 加 `allowDeepLink` 选项**（`lib/jump-to-chat.ts`）：搜索失败 → fallback navigate 到 `/send?phone=`，让 WA Web reload 一次进 chat。**所有用户主动点击的入口**都传 `{ allowDeepLink: true }`：ContactsPage 行点击 / 💬 / TasksPage 💬 / GroupMembersSection 💬 / FilteredChatList 行点击 / TranslateReplyPanel fill / GemReplySection fillReply
+- [x] **AI 建议路径加 DB messages fallback**（`TagsSection` / `ContactTasksSection` / `GemReplySection.generate`）：jumpToChat 失败不再抛错，自动 `loadMessages(contactId, 50)` 走导入的历史。**不开 deep-link**——reload 会中断 AI 调用，DB fallback 比 reload 体验好。
+- [x] **bulk-extract 加 DB fallback**（`lib/bulk-extract.ts`）：之前 jumpToChat 失败就跳过（只用 phone-code 推 country），现在 fallback 到 messages 表 → 那 1000+ "搜不到但已导入"的客户也能批量 AI 抽取
+- [x] **活性体检拆 5 档**（`lib/contact-vitality.ts` + `ContactVitalityModal.tsx`）：4 档 → 5 档，新增 **🔵 已导入·WA Web 无缓存**（`inIdb=false + hasMsgsInDb=true`）。之前这种被并到 🟠 cold 误以为可疑，现在独立成档，文案明确告诉"是真客户，绝对不要删，点 💬 走 deep link"。**🔴 orphan 才是真清理候选**（既没缓存也没历史）
+- [x] **活性体检 "实测验证" 文案软化**：失败 "✗ 死号"（红）→ "⚠ 搜不到"（橙）+ hover tooltip 解释；删除时如果选中含 hasMessagesInDb=true 的多一道警告
+- [x] **每个 tab 加 hint 卡片 + tooltip**：体检 modal 里每档下方常驻一行说明（borderLeft 加颜色），鼠标 hover tab 也有 title 提示
+
+**拒绝了**：用户提出"给每个客户发'1'再删除让 WA Web 写 IDB"——拒绝。理由：
+- WA 反 spam 系统典型 spam 模式（1000 个 outbound 新会话 + 短间隔）→ 封号高风险
+- 客户手机会收到 push 通知，撤回也来不及→ 销售形象受损
+- CLAUDE.md "绝不能在真实客户聊天上操作" 红线
+- **任何"让 WA Web 自动学会更多客户"的需求都要走"导入聊天 .txt"路径**（合法+不打扰客户）
+
+**未做的可选项**（用户决定要不要）：
+- 写"批量验证"工具（4 小时跑 1000 次 reload 区分真活/真死号）—— 不解决搜索问题，只能给死号打标签便于清理。当前 🔴 orphan 那档已经是清理候选，**不值得再花 4 小时**。
+
 ### 还可以做的（不急）
 
-- [ ] WA Web DOM / IDB schema 漂移自动监测（目前靠用户报告失效）
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
-- [ ] Cloudinary 用量监控（25 GB/月免费），临近上限提醒
-- [ ] OrgSetup 加"是否被邀请的员工"二次确认，防止新员工误建独立 org（导致 CRM 数据隔离）
 - [ ] Chrome Web Store 私有发布（$5 + 1-3 天审核 → 全员自动更新，告别 zip 分发）
 
 ## Gem 配置流程（用户首次设置）
@@ -500,14 +583,29 @@ WhatsApp 绿色主题：
 - **chat-media-capture DOM 依赖**：lightbox 关闭按钮 `aria-label="关闭"`、下载按钮 `aria-label="下载"`、多选取消 `aria-label="取消选择"`、"已选 N 项" span 文案——WA 改 i18n 或 ARIA 时要修
 - **暂存盘不持久化**：刷新页面 / 切扩展 tab 即清空（File 对象不能 serialize），不是 bug 是设计
 - **`.in('id', myIds)` URL 长度炸弹**：scope=mine 视图下 myContactIds 可能含数百 UUID，PostgREST 把它们全塞进 query string（每个 37 字符），URL 超 ~12KB 被网络层直接拒，错误是 `TypeError: Failed to fetch`（不是 Supabase 返回的 PostgrestError）。**新加按主理人过滤的查询一律走服务端 join：`.select('..., contact_handlers!inner(user_id)').eq('contact_handlers.user_id', myUserId)`**（嵌套关系用 `'contacts.contact_handlers.user_id'`），URL 长度恒定。已修复点：DashboardPage / TasksPage
-- **Supabase 默认 1000 行返回上限**：`.select()` 不加 range 默认最多返回 1000 行，超了静默截断（不报错）。涉及 contact_handlers 全量 / contacts 全量 id 列表的查询要分页拉（`fetchHandlersForOrg` / ScopeContext 孤儿认领都已改）
-- **新员工误建独立 org**：被邀请的员工注册后看到 `OrgSetup` 界面会以为该建团队 → 建出来一个孤立 org，CRM 跟主 org 完全隔离（看不到客户、看不到 Gem、撞单不触发）。临时修复：手动 SQL 把员工 `organization_members` 行从空 org 删了再插到主 org，并删空 org（contacts cascade）。长期修复：OrgSetup 加二次确认 / 默认隐藏入口
+- **Supabase 默认 1000 行返回上限**：`.select()` 不加 range 默认最多返回 1000 行，超了静默截断（不报错）。**这个陷阱反复踩**：
+  - 2026-05-09：service_role 脚本读 Miles contacts 没分页（2172 行只拿到前 1000），漏掉的 phone 把"无冲突"集合算错 → 误删 137 contacts
+  - 2026-05-11：`useCrmData` 自己拉 contacts/vehicle_interests/contact_tags 都没分页，970+ contact 在客户端不存在，导致它们对应的 WA chat 被第二个 loop 当成"孤儿"塞进 merged 时 contact=null，scope=mine 全部过滤掉 → 大量客户在左边列表消失（修复：三张表都分页 fetch）
+  - **任何一次性脚本（含 service_role 工具脚本）操作 contacts/messages/handlers 时都要先分页拉全集再处理**
+  - **任何客户端代码 `.from('xxx').select('*').eq('org_id', orgId)` 形态的查询，如果该表行数可能 > 1000，必须改成 fetchAll-pattern 分页**
+- **新员工误建独立 org**（2026-05-09 已防呆）：被邀请的员工注册后看到 `OrgSetup` 会以为该建团队 → 建出独立 org，CRM 跟主 org 完全隔离。`OrgSetup.tsx` 现在改成 3 步式：guidance（默认显示警告 + 当前邮箱 + 换号登录入口）→ confirm → form。**踩坑救场流程**：手动 SQL 把员工 `organization_members` 行从空 org 删了再插到主 org，**注意删空 org 之前先把 contacts 迁走**——`contacts.org_id → organizations.id` 是 ON DELETE CASCADE，删 org 会连带 cascade 删所有 contacts（教训：2026-05-09 误删过 dengrongc6 的 137 个 SG contacts）
+- **删 org 前必须先迁/清 contacts**：`contacts.org_id` 的 FK 是 ON DELETE CASCADE，`DELETE FROM organizations WHERE id = X` 会连带删该 org 全部 contacts + 它们的 messages/tags/interests/quotes/tasks/handlers/events（多级 cascade）。安全顺序：(1) UPDATE contacts SET org_id = newOrg WHERE org_id = oldOrg → (2) 验证 contacts count = 0 in oldOrg → (3) DELETE org_member → (4) DELETE org。**漏第 1 步等于物理删除该 org 的全部数据。**
 - **手机端 .txt 导入靠正则识别附件占位**：`isMediaOnly()` 匹配 `IMG-/VID-/AUD-/DOC-/PTT-/STK-/PHOTO-...(文件附件)` 形如的文件名 + `[媒体]`（解析时把 `<省略影音内容>` 替换成的占位）。WhatsApp 改导出格式或换 i18n 文案（如英文环境是 `(file attached)`）时要扩 `isMediaOnly` 和 import-chat-parser 的清洗规则
 - **`loadMessages` 现在是 DESC + reverse 取最近 N 条**：改自之前的 ASC + limit N（最老 N 条）。所有现有调用方拿到的列表顺序不变（仍按 sent_at 正序），但内容变成"最近 N"。如果未来有"显示完整历史"需求，limit 要给足够大（500 已经够覆盖大多数客户，特别长的几千条聊天会被截断）
+- **WA Web 新版 data-id 不再含 JID**（2026-05 实测）：消息 wrapper 上的 `data-id` 现在是 32-char 不透明哈希（如 `A54FBBB582F9F749D466CF4000D3256F`），跟 chat 身份完全无关。**`readJidFromScope` / `readGroupJidFromScope` 单靠 DOM 抓 JID 已经失效**，必须走 IDB cache（`whatsapp-dom.ts:nameToPhoneCache` 在启动 + 每 30s 从 IDB chats 表按 "header 显示名 → JID" 建索引；readCurrentChat 用 header 显示名查缓存反查 JID）。旧版 WA 的 DOM 抓 JID 路径仍保留兜底，但新装的 WA Web 实例都是新格式
+- **群聊在 IDB 里，name 常在 `groupMetadata.subject` 不在 `chat.name`**：读 IDB chat 表时要兜底取 `groupMetadata.subject`，否则群聊缓存的 name 是 null，header 名查不到 → 群聊识别失败。`whatsapp-idb.ts` 已经做了三级 fallback：`chat.name || groupMetadata.subject || formattedTitle`
+- **群聊 contact 的 phone 是 NULL**：所有按 `contact.phone` 直读的代码都要做 null check（`contact.phone ?? undefined` 或 `if (!contact.phone) skip`）。已修过的点：bulk-extract / GoogleSyncDialog / useCrmData / gem-prompt（normalizePhone）/ ContactCard / ContactDetailDrawer / ContactsPage / TaskModal。未来加新功能要记得：**只读 phone 必崩，要么过滤 group_jid != null，要么走 phone ?? 兜底**
+- **WA Web 的 `/send?phone=` 协议只 in-memory 打开 chat，不写 IDB chat 表**（2026-05-12 实测确认）。意味着：
+  - **批量激活 1000 个号到 WA Web 缓存 / 搜索框是不可能的**——WA Web 只持久化"产生过消息级交互"的 chat，cold boot 后 IDB 里就那 ~500 个最常用的
+  - `jumpToChat` 的 deep-link fallback（`location.href = '/send?phone='`）能让单个客户瞬间可用（reload 一次进 chat），但 reload 后 IDB 不变
+  - 任何"让 WA Web 学会更多客户"的需求都要走"导入聊天 .txt"路径（合法 + 不打扰客户）。**绝不要批量发消息再撤回**（典型 spam pattern，封号高风险 + 客户能看到 push 通知）
+  - send 协议处理服务端解析 + chat 加载需要 **≥14 秒**，少于这个时间检查 chat header 会误判为"号未注册"（之前 David Eze 实测验证 fail 的根因——8 秒等待不够）
+- **WA Web 多 tab 共享 session 不需要重新扫码**（2026-05-12 验证）：之前以为 WA Web 强制单 tab，实际上同一个 Chrome profile 里第二个 tab 打开 web.whatsapp.com 直接进——session 通过 IndexedDB 共享。这让"用独立 tab 跑后台任务而不打扰主 tab"成为可能。但 IDB 是共享的，两个 tab 写冲突还是要小心
+- **活性体检 5 档分类**（`Vitality` 联合类型）：`active` / `stale` / `cold` / **`imported`**（新增，不在 WA Web 缓存但 messages 表有数据）/ `orphan`。**🔵 imported 绝对不要删**——是真客户，只是 WA Web 缓存装不下。任何处理"WA Web 搜不到"的代码都要先看是不是 imported 档
 
 ## 用户偏好
 
-- 偏好免费方案（不愿付费用 Gemini API，用阿里云 Qwen 代替；Gem 自动化用网页端而非 API）
+- 偏好免费方案（不愿付费用 Gemini API，用智谱 GLM 代替；Gem 自动化用网页端而非 API）
 - 销售工作台 UX 参考 WAPlus（顶部 tab + 右侧 CRM 面板）
 - 中文交流，UI 文案中文 + 客户对话原文（多语言）
 - 修改后让我用 Chrome MCP 自动验证，不要每次都让用户手动验

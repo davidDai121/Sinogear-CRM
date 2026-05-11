@@ -4,6 +4,7 @@ import { useContact } from '../hooks/useContact';
 import { useAutoExtract } from '../hooks/useAutoExtract';
 import type { SuggestedField } from '@/lib/field-suggestions';
 import { ContactEditForm } from './ContactEditForm';
+import { GroupMembersSection } from './GroupMembersSection';
 import { TagsSection } from './TagsSection';
 import { VehicleInterestsSection } from './VehicleInterestsSection';
 import { QuotesSection } from './QuotesSection';
@@ -31,7 +32,8 @@ interface Props {
 }
 
 export function ContactCard({ chat, orgId }: Props) {
-  const { contact, loading, error, save } = useContact(orgId, chat.phone, chat.name);
+  const { contact, loading, error, save } = useContact(orgId, chat.phone, chat.name, chat.groupJid);
+  const isGroup = !!contact?.group_jid;
   const [tab, setTab] = useState<CardTab>('profile');
 
   // 持久化 tab 选择
@@ -50,10 +52,12 @@ export function ContactCard({ chat, orgId }: Props) {
   const extract = useAutoExtract({
     contact,
     save,
-    enabled: HAS_QWEN_KEY,
+    // 群聊里 AI 字段提取语义会乱（多人发言、country/language/budget 不归属任何人），
+    // 暂关；Phase 2 可加群专用 prompt
+    enabled: HAS_QWEN_KEY && !isGroup,
   });
 
-  if (!chat.phone) {
+  if (!chat.phone && !chat.groupJid) {
     return (
       <div className="sgc-empty">
         <p>请在 WhatsApp 选择一个聊天</p>
@@ -109,17 +113,19 @@ export function ContactCard({ chat, orgId }: Props) {
             <ContactEditForm contact={contact} onSave={save} compact />
           </section>
 
-          <TagsSection contactId={contact.id} contactPhone={contact.phone} />
+          {contact.group_jid && <GroupMembersSection groupJid={contact.group_jid} />}
+
+          <TagsSection contactId={contact.id} contactPhone={contact.phone ?? undefined} />
           <VehicleInterestsSection contactId={contact.id} />
           <QuotesSection contactId={contact.id} />
           <ContactTasksSection
             contactId={contact.id}
             orgId={orgId}
-            contactPhone={contact.phone}
+            contactPhone={contact.phone ?? undefined}
           />
           <MessagesHistorySection
             contactId={contact.id}
-            contactName={contact.name || contact.wa_name || contact.phone}
+            contactName={contact.name || contact.wa_name || contact.phone || '群聊'}
           />
           <TimelineSection contactId={contact.id} />
         </>

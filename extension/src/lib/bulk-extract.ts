@@ -1,8 +1,9 @@
 import { supabase } from './supabase';
-import { readChatMessages } from '@/content/whatsapp-messages';
+import { readChatMessages, type ChatMessage } from '@/content/whatsapp-messages';
 import { waitForActiveChatPhone } from '@/content/whatsapp-dom';
 import { phoneToCountry } from './phone-countries';
 import { jumpToChat } from './jump-to-chat';
+import { loadMessages } from './message-sync';
 import { stringifyError } from './errors';
 import { canonicalizeModel } from './vehicle-aliases';
 import type {
@@ -148,34 +149,54 @@ async function extractOne(
   );
   const existingModels = (existingVehicles ?? []).map((v) => v.model);
 
+  // 群聊跳过 AI 字段抽取（多人发言场景，country/language/budget 语义崩坏）
+  if (!contact.phone) return null;
+
+  // 1. 先尝试 WA Web DOM（jumpToChat + 验证 + 读 DOM）
+  let messages: ChatMessage[] = [];
   const queryDigits = contact.phone.replace(/^\+/, '');
   const jumped = await jumpToChat(queryDigits);
-  if (!jumped) return null;
+  if (jumped) {
+    // Verify the right chat actually loaded — if WhatsApp didn't switch
+    // (slow load / search miss / business account), reading DOM messages
+    // would pull from the PREVIOUS chat and cross-contaminate this contact.
+    const matched = await waitForActiveChatPhone(contact.phone, 3500);
+    if (matched) {
+      await sleep(300);
+      messages = readChatMessages(30);
+    }
+  }
 
-  // Verify the right chat actually loaded — if WhatsApp didn't switch
-  // (slow load / search miss / business account), reading DOM messages
-  // would pull from the PREVIOUS chat and cross-contaminate this contact.
-  const matched = await waitForActiveChatPhone(contact.phone, 3500);
-  if (!matched) return null;
+  // 2. DOM 没消息 → fallback 到 messages 表（导入的 .txt 历史 / 之前同步过的）
+  //    这让 1000+ "WA Web 搜不到但已导入" 的客户也能被批量抽取。
+  if (!messages.length) {
+    const rows = await loadMessages(contact.id, 50);
+    if (rows.length > 0) {
+      messages = rows.map((r) => ({
+        id: r.wa_message_id,
+        fromMe: r.direction === 'outbound',
+        text: r.text,
+        timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
+        sender: null,
+      }));
+    }
+  }
 
-  await sleep(300);
-
-  const messages = readChatMessages(30);
+  // 3. 还是没消息 → 返回 null，外层走 phone-code country fallback
+  if (!messages.length) return null;
 
   let suggestions: FieldSuggestion[] = [];
   let vehicles: VehicleSuggestion[] = [];
-  if (messages.length) {
-    const response = (await chrome.runtime.sendMessage({
-      type: 'EXTRACT_FIELDS',
-      messages,
-      contact: snapshot(contact, existingModels),
-    })) as ExtractFieldsResponse;
-    if (!response?.ok) {
-      throw new Error(response?.error ?? '抽取失败');
-    }
-    suggestions = response.suggestions ?? [];
-    vehicles = response.vehicles ?? [];
+  const response = (await chrome.runtime.sendMessage({
+    type: 'EXTRACT_FIELDS',
+    messages,
+    contact: snapshot(contact, existingModels),
+  })) as ExtractFieldsResponse;
+  if (!response?.ok) {
+    throw new Error(response?.error ?? '抽取失败');
   }
+  suggestions = response.suggestions ?? [];
+  vehicles = response.vehicles ?? [];
 
   const patch: ContactPatch = {};
   const applied: SuggestedField[] = [];

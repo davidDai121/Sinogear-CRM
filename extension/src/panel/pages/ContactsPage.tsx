@@ -35,6 +35,7 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [stageFilter, setStageFilter] = useState<CustomerStage | ''>('');
+  const [kindFilter, setKindFilter] = useState<'all' | 'individual' | 'group'>('all');
   const [openId, setOpenId] = useState<string | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -43,14 +44,32 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const { data, error } = await supabase
-      .from('contacts')
-      .select('*')
-      .eq('org_id', orgId)
-      .order('updated_at', { ascending: false });
-    if (error) setError(error.message);
-    else setContacts(data ?? []);
-    setLoading(false);
+    // 突破 Supabase 1000 行默认上限：分页拉
+    try {
+      const PAGE = 1000;
+      const all: ContactRow[] = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from('contacts')
+          .select('*')
+          .eq('org_id', orgId)
+          .order('updated_at', { ascending: false })
+          .range(from, from + PAGE - 1);
+        if (error) {
+          setError(error.message);
+          setLoading(false);
+          return;
+        }
+        const rows = (data ?? []) as ContactRow[];
+        all.push(...rows);
+        if (rows.length < PAGE) break;
+      }
+      setContacts(all);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
   }, [orgId]);
 
   useEffect(() => {
@@ -66,13 +85,15 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
 
   const filtered = contacts.filter((c) => {
     if (stageFilter && c.customer_stage !== stageFilter) return false;
+    if (kindFilter === 'individual' && c.group_jid) return false;
+    if (kindFilter === 'group' && !c.group_jid) return false;
     // 视图过滤：搜索时永远查全部（方便查同事客户），否则按 scope 限制
     if (!search && scope === 'mine' && !myContactIds.has(c.id)) return false;
     if (search) {
       const q = search.toLowerCase();
       return (
         c.name?.toLowerCase().includes(q) ||
-        c.phone.toLowerCase().includes(q) ||
+        c.phone?.toLowerCase().includes(q) ||
         c.country?.toLowerCase().includes(q) ||
         c.wa_name?.toLowerCase().includes(q)
       );
@@ -130,6 +151,15 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
             </option>
           ))}
         </select>
+        <select
+          value={kindFilter}
+          onChange={(e) => setKindFilter(e.target.value as 'all' | 'individual' | 'group')}
+          title="按客户类型筛选"
+        >
+          <option value="all">全部类型</option>
+          <option value="individual">👤 个人</option>
+          <option value="group">👥 群聊</option>
+        </select>
       </div>
 
       {error && <div className="sgc-error">{error}</div>}
@@ -159,8 +189,10 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
             {filtered.map((c) => {
               const handleJump = (e: React.MouseEvent) => {
                 e.stopPropagation();
-                const digits = c.phone.replace(/^\+/, '');
-                void jumpToChat(digits);
+                // 群聊用群名搜，个人用手机号
+                const query = c.phone ? c.phone.replace(/^\+/, '') : (c.name ?? c.wa_name ?? '');
+                if (!query) return;
+                void jumpToChat(query, { allowDeepLink: true });
                 onJumpToChat?.();
               };
               return (
@@ -168,11 +200,12 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
                   key={c.id}
                   onClick={() => {
                     setOpenId(c.id);
-                    const digits = c.phone.replace(/^\+/, '');
-                    void jumpToChat(digits);
+                    const query = c.phone ? c.phone.replace(/^\+/, '') : (c.name ?? c.wa_name ?? '');
+                    if (query) void jumpToChat(query, { allowDeepLink: true });
                   }}
                 >
                   <td>
+                    {c.group_jid && <span title="群聊">👥 </span>}
                     {c.name || c.wa_name || '—'}
                     {(() => {
                       const others = (handlersByContact.get(c.id) ?? []).filter(
@@ -192,14 +225,16 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
                       );
                     })()}
                   </td>
-                  <td>{c.phone}</td>
+                  <td>{c.phone ?? (c.group_jid ? '群聊' : '—')}</td>
                   <td>
                     {c.country || '—'}
-                    <LocalTimeBadge
-                      phone={c.phone}
-                      compact
-                      className="sgc-local-time-inline"
-                    />
+                    {c.phone && (
+                      <LocalTimeBadge
+                        phone={c.phone}
+                        compact
+                        className="sgc-local-time-inline"
+                      />
+                    )}
                   </td>
                   <td>
                     {c.budget_usd ? `USD ${c.budget_usd.toLocaleString()}` : '—'}

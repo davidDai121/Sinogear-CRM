@@ -16,6 +16,7 @@ import {
   type RepairResult,
 } from '@/lib/repair-extraction';
 import { stringifyError } from '@/lib/errors';
+import { ContactVitalityModal } from './ContactVitalityModal';
 
 const HAS_QWEN_KEY = Boolean(import.meta.env.VITE_DASHSCOPE_API_KEY);
 
@@ -28,6 +29,7 @@ const MAINT_OPEN_KEY = 'sgc:maint-open';
 
 export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
   const [open, setOpen] = useState(false);
+  const [vitalityOpen, setVitalityOpen] = useState(false);
 
   // 持久化展开状态（默认折叠）
   useEffect(() => {
@@ -208,8 +210,8 @@ export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
       </button>
       {syncResult && (
         <div className="sgc-filter-sync-result">
-          {syncResult.added > 0
-            ? `✓ 新增 ${syncResult.added} 个客户`
+          {syncResult.added > 0 || syncResult.addedGroups > 0
+            ? `✓ 新增 ${syncResult.added} 个客户${syncResult.addedGroups > 0 ? ` + ${syncResult.addedGroups} 个群聊` : ''}`
             : '✓ 全部已同步'}
           {syncResult.skippedNoPhone > 0 &&
             ` · 跳过 ${syncResult.skippedNoPhone} 个无号码`}
@@ -319,7 +321,22 @@ export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
       {repairError && (
         <div className="sgc-filter-sync-error">{repairError}</div>
       )}
+
+      <button
+        className="sgc-btn-secondary sgc-filter-sync-btn"
+        onClick={() => setVitalityOpen(true)}
+      >
+        🩺 客户活性体检
+      </button>
       </>}
+
+      {vitalityOpen && (
+        <ContactVitalityModal
+          orgId={orgId}
+          onClose={() => setVitalityOpen(false)}
+          onChanged={onRefresh}
+        />
+      )}
     </div>
   );
 }

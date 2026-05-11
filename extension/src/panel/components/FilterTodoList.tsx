@@ -7,8 +7,10 @@ const BUCKETS: { id: TodoBucket; icon: string; label: string }[] = [
   { id: 'needs_reply', icon: '⚠️', label: '我该回' },
   { id: 'negotiating', icon: '🔥', label: '谈判中' },
   { id: 'priority', icon: '⭐', label: '重点客户' },
-  { id: 'stalled', icon: '💤', label: '长期未联系' },
-  { id: 'new', icon: '🆕', label: '新客户' },
+  { id: 'new', icon: '🆕', label: '新客户（1 天内）' },
+  { id: 'active', icon: '🔄', label: '进行中（1-3 天）' },
+  { id: 'stalled', icon: '💤', label: '长期未联系（3-7 天）' },
+  { id: 'lost', icon: '🪦', label: '已流失（> 7 天）' },
 ];
 
 interface Props {

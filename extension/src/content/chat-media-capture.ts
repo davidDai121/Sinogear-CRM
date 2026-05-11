@@ -35,12 +35,6 @@ function getMainPane(): Element | null {
 /**
  * 把 blob URL 或 http URL 转成 File。
  */
-async function urlToFile(url: string, filename: string, type?: string): Promise<File> {
-  const res = await fetch(url);
-  const blob = await res.blob();
-  return new File([blob], filename, { type: type || blob.type });
-}
-
 /**
  * 从一个 <img> 元素生成缩略图 dataURL。
  */
@@ -79,11 +73,18 @@ async function captureImg(
   // 先生成缩略图（用 DOM 里已经渲染好的）
   const thumb = imgToThumbDataUrl(img);
   try {
+    // 直接 fetch blob，不强制 mime — WA 既可能是 jpeg 也可能是 webp/png；
+    // 强制 image/jpeg 但内容是 webp 时 Cloudinary 拒收 "Image file format jpg not allowed"。
+    const res = await fetch(img.src);
+    const blob = await res.blob();
+    const sniffed = await sniffMime(blob);
+    const mime = blob.type || sniffed || 'image/jpeg';
+    const ext = extFromMime(mime);
     const tag = kind === 'spec' ? 'spec' : '';
     const filename = `whatsapp_${tag ? tag + '_' : ''}${ts()}_${Math.random()
       .toString(36)
-      .slice(2, 6)}.jpg`;
-    const file = await urlToFile(img.src, filename, 'image/jpeg');
+      .slice(2, 6)}.${ext}`;
+    const file = new File([blob], filename, { type: mime });
     const phone = readCurrentChat().phone;
     addCaptured({
       file,
@@ -122,6 +123,41 @@ function kindFromMime(mime: string, filename: string): CapturedKindLocal {
   return 'spec';
 }
 
+/**
+ * 嗅探未知 mime 的 blob：读前 200 字节做 magic-bytes / 文本特征判断。
+ * 命中返回标准 mime，否则 null。覆盖 WA 抓取最常见的几种文档。
+ */
+async function sniffMime(blob: Blob): Promise<string | null> {
+  try {
+    const head = blob.slice(0, 200);
+    const bytes = new Uint8Array(await head.arrayBuffer());
+    if (bytes.length === 0) return null;
+
+    // 二进制 magic
+    if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) return 'application/pdf'; // %PDF
+    if (bytes[0] === 0x50 && bytes[1] === 0x4b && (bytes[2] === 0x03 || bytes[2] === 0x05)) return 'application/zip'; // PK\x03\x04 (zip / docx / xlsx 都是 zip 容器)
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return 'image/gif';
+    if (bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0) return 'application/msword'; // 老 Office .doc/.xls/.ppt OLE 容器
+    // RIFF....WEBP
+    if (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+    ) return 'image/webp';
+
+    // 文本类
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes).trim();
+    if (/^(<!doctype\s+html|<html|<head|<body|<\?xml[^>]*>\s*<(?:!doctype\s+html|html))/i.test(text)) return 'text/html';
+    if (/^<svg[\s>]/i.test(text)) return 'image/svg+xml';
+    if (/^<\?xml\b/i.test(text)) return 'application/xml';
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
 function extFromMime(mime: string): string {
   if (!mime) return 'bin';
   const m = mime.toLowerCase();
@@ -133,6 +169,10 @@ function extFromMime(mime: string): string {
   if (m === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') return 'pptx';
   if (m === 'application/vnd.ms-powerpoint') return 'ppt';
   if (m === 'application/zip') return 'zip';
+  if (m === 'text/html') return 'html';
+  if (m === 'image/svg+xml') return 'svg';
+  if (m === 'text/plain') return 'txt';
+  if (m === 'text/csv') return 'csv';
   if (m.startsWith('image/')) return m.split('/')[1].replace('jpeg', 'jpg');
   if (m.startsWith('video/')) return m.split('/')[1];
   if (m.startsWith('audio/')) return m.split('/')[1];
@@ -208,9 +248,21 @@ function startBulkCapture(specForceKind?: CapturedKindLocal): {
         failed++;
         return;
       }
-      const mime = m.mime || blob.type || 'application/octet-stream';
-      // 文件名优先 SW 转发的；否则用 mime 推后缀
-      const filename = m.filename || `wa_${ts()}.${extFromMime(mime)}`;
+      let mime = m.mime || blob.type || '';
+      let filename = m.filename || '';
+      // SW 拦下载时若没拿到 Content-Disposition / mime（HTML 附件常见），
+      // 嗅探前 200 字节识别真实类型，避免落到 .bin 显示成 BIN。
+      if (!mime || mime === 'application/octet-stream' || /\.bin$/i.test(filename)) {
+        const sniffed = await sniffMime(blob);
+        if (sniffed) {
+          mime = sniffed;
+          if (!filename || /\.bin$/i.test(filename)) {
+            filename = `wa_${ts()}.${extFromMime(mime)}`;
+          }
+        }
+      }
+      if (!mime) mime = 'application/octet-stream';
+      if (!filename) filename = `wa_${ts()}.${extFromMime(mime)}`;
       const kind = specForceKind ?? kindFromMime(mime, filename);
       const thumb = kind === 'image' ? await blobToImageThumb(blob) : null;
       const file = new File([blob], filename, { type: mime });

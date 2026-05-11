@@ -52,8 +52,11 @@ export function GoogleSyncDialog({ orgId, onClose, onDone }: Props) {
       if (crmErr) throw crmErr;
       const crmContacts = crmAll ?? [];
 
+      // Google 同步只针对个人 contact（有 phone）；群聊不同步
       const crmByPhone = new Map<string, ContactRow>();
-      for (const c of crmContacts) crmByPhone.set(c.phone, c);
+      for (const c of crmContacts) {
+        if (c.phone) crmByPhone.set(c.phone, c);
+      }
 
       if (direction === 'pull' || direction === 'both') {
         let i = 0;
@@ -123,6 +126,11 @@ export function GoogleSyncDialog({ orgId, onClose, onDone }: Props) {
           i++;
           if (i % 20 === 0) {
             setProgress(`CRM → Google: ${i} / ${crmContacts.length}`);
+          }
+          // 群聊跳过（没手机号）
+          if (!c.phone) {
+            result.skipped++;
+            continue;
           }
           const norm = normalizePhone(c.phone);
           if (!norm) continue;

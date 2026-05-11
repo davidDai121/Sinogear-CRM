@@ -3,6 +3,8 @@ export interface ChatMessage {
   fromMe: boolean;
   text: string;
   timestamp: number | null;
+  /** 群聊消息的发送者显示名（个人聊天恒为 null） */
+  sender: string | null;
 }
 
 function findMainPane(): Element | null {
@@ -108,6 +110,28 @@ function getMessageTimestamp(scope: Element): number | null {
   return null;
 }
 
+/**
+ * 从 data-pre-plain-text 解析发送者名（仅群聊有意义）。
+ * 格式："[2:46 PM, 5/9/2026] Aca: " 或 "[14:46, 9/5/2026] Aca: "
+ * 个人聊天里这部分会是空（或 "You: " / 收件人手机号），返回 null。
+ */
+function getMessageSender(scope: Element): string | null {
+  const copyable = scope.querySelector('.copyable-text[data-pre-plain-text]') as HTMLElement | null;
+  const pre = copyable?.getAttribute('data-pre-plain-text');
+  if (!pre) return null;
+  // 取最后一个 ']' 之后到 ':' 之前的部分作为发送者
+  const idx = pre.lastIndexOf(']');
+  if (idx < 0) return null;
+  const after = pre.slice(idx + 1).trim();
+  const colonIdx = after.indexOf(':');
+  if (colonIdx < 0) return null;
+  const name = after.slice(0, colonIdx).trim();
+  if (!name) return null;
+  // "You" / 手机号 / "~" 开头的 push name 都不当作群成员名
+  if (/^you$/i.test(name) || /^\+?\d[\d\s\-()]{4,}$/.test(name)) return null;
+  return name;
+}
+
 export function readChatMessages(limit = 30): ChatMessage[] {
   const main = findMainPane();
   if (!main) return [];
@@ -125,11 +149,13 @@ export function readChatMessages(limit = 30): ChatMessage[] {
     if (!text) continue;
 
     seen.add(id);
+    const fromMe = bubble.classList.contains('message-out');
     messages.push({
       id,
-      fromMe: bubble.classList.contains('message-out'),
+      fromMe,
       text,
       timestamp: getMessageTimestamp(bubble),
+      sender: fromMe ? null : getMessageSender(bubble),
     });
   }
 

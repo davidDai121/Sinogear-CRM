@@ -119,7 +119,9 @@ export function TaskModal({ orgId, task, onClose, onSaved }: Props) {
               <option value="">选择客户…</option>
               {contacts.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name || c.wa_name || c.phone} ({c.phone})
+                  {c.group_jid ? '👥 ' : ''}
+                  {c.name || c.wa_name || c.phone || '群聊'}
+                  {c.phone ? ` (${c.phone})` : ''}
                 </option>
               ))}
             </select>

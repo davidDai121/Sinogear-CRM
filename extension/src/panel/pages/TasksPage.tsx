@@ -413,7 +413,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
                 e.stopPropagation();
                 if (!contact?.phone) return;
                 const digits = contact.phone.replace(/^\+/, '');
-                void jumpToChat(digits);
+                void jumpToChat(digits, { allowDeepLink: true });
                 onJumpToChat?.();
               };
               return (
