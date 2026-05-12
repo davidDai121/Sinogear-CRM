@@ -13,14 +13,19 @@ export interface ChatClassification {
   stalledDays: number;
 }
 
-export interface ReminderState {
-  reminderAckAt: number | null;
-  reminderDisabled: boolean;
+export interface PendingReplyState {
+  /**
+   * 上次扫描到 unreadCount > 0 时 chat.t 的快照（unix 秒）。
+   * 用来识别"用户点开了但还没回"——unreadCount 被 WA Web 清零，但
+   * chat.t 仍等于这个快照（如果用户真的发了 reply，chat.t 会前进）。
+   * null = 从未观察到 unread（或被清理了）。
+   */
+  capturedAt: number | null;
 }
 
 export function classifyChat(
   chat: WAChat,
-  reminder: ReminderState = { reminderAckAt: null, reminderDisabled: false },
+  pending: PendingReplyState = { capturedAt: null },
   now = Date.now() / 1000,
 ): ChatClassification {
   const ageSec = chat.t > 0 ? now - chat.t : Number.MAX_SAFE_INTEGER;
@@ -39,12 +44,17 @@ export function classifyChat(
     autoStage = 'active';
   }
 
-  // "只要有新消息来 = 我该回" —— 不再考虑 reminder_disabled / reminder_ack_at，
-  // 客户每次发消息都触发重新进 bucket（reminder 仅用于个别业务场景，UI 别用它过滤）
-  const needsReply = !chat.archive && chat.unreadCount > 0;
-
-  // reminder 字段保留接口（返回结构没变）以免外面调用方报错；不再影响 needsReply
-  void reminder;
+  // needsReply 双信号（任一即"我该回"）：
+  //   1. 实时未读 unreadCount > 0
+  //   2. "点开了没回"：之前扫到未读时记下 chat.t，现在 chat.t 仍等于这个
+  //      值——说明用户点开把未读清了但没敲发送（真发了 chat.t 会前进）。
+  //
+  // 没有 #2 的话，用户一点开聊天 WA 立刻把 unread 清零，chat 立刻从
+  // "我该回" 掉出去——这是 2026-05-12 的痛点（客户 +233 55 678 1531 案例）
+  const hasLiveUnread = chat.unreadCount > 0;
+  const hasUnsentReply =
+    pending.capturedAt != null && chat.t === pending.capturedAt;
+  const needsReply = !chat.archive && (hasLiveUnread || hasUnsentReply);
 
   return { autoStage, needsReply, stalledDays };
 }

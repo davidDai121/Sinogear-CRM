@@ -10,6 +10,7 @@ import {
 } from '@/lib/whatsapp-idb';
 import { ensureJidPhoneCacheLoaded } from '@/lib/jid-phone-cache';
 import { classifyChat, type ChatClassification } from '@/lib/chat-classifier';
+import { updatePendingReplyMap } from '@/lib/pending-reply-store';
 import { countryToRegion } from '@/lib/regions';
 import { stringifyError } from '@/lib/errors';
 import { syncAutoStages } from '@/lib/stage-sync';
@@ -199,6 +200,10 @@ export function useCrmData(orgId: string | null): CrmData {
 
         const now = Date.now() / 1000;
 
+        // "点开了没回"追踪：根据本次扫到的 unreadCount / chat.t 更新持久化
+        // 状态，传给 classifyChat 做 needsReply 判定。详见 pending-reply-store.ts
+        const pendingMap = await updatePendingReplyMap(wa.chats, now);
+
         // 群聊（phone=null, group_jid=...）不参与 WA chat 列表合并；
         // 群聊通过 useCurrentChat 即时识别，不走这个 lens
         const merged: CrmContact[] = contacts
@@ -208,12 +213,7 @@ export function useCrmData(orgId: string | null): CrmData {
             const jid = chat.id;
             const classification = classifyChat(
               chat,
-              {
-                reminderAckAt: c.reminder_ack_at
-                  ? new Date(c.reminder_ack_at).getTime() / 1000
-                  : null,
-                reminderDisabled: c.reminder_disabled,
-              },
+              { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
               now,
             );
             return {
@@ -249,7 +249,7 @@ export function useCrmData(orgId: string | null): CrmData {
             region: 'other',
             classification: classifyChat(
               chat,
-              { reminderAckAt: null, reminderDisabled: false },
+              { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
               now,
             ),
           });
