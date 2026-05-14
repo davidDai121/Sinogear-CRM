@@ -23,9 +23,23 @@ export interface PendingReplyState {
   capturedAt: number | null;
 }
 
+/**
+ * 来自 Supabase messages 表的方向信号（migration 0019 的 RPC 提供）。
+ * 用来回填"老聊天点开过但没回"——pending 追踪只能 forward-fill 新发生的；
+ * 老 case 靠 useMessageSync 已经同步好的消息表反推：
+ *   lastInbound > lastOutbound = 客户最后发的没回 = 我该回。
+ */
+export interface MessageDirectionState {
+  /** unix 秒；该 contact 最后一条 inbound 消息的时间。null = 无 inbound 记录 */
+  lastInboundT: number | null;
+  /** unix 秒；该 contact 最后一条 outbound 消息的时间。null = 无 outbound 记录 */
+  lastOutboundT: number | null;
+}
+
 export function classifyChat(
   chat: WAChat,
   pending: PendingReplyState = { capturedAt: null },
+  msgDir: MessageDirectionState = { lastInboundT: null, lastOutboundT: null },
   now = Date.now() / 1000,
 ): ChatClassification {
   const ageSec = chat.t > 0 ? now - chat.t : Number.MAX_SAFE_INTEGER;
@@ -44,17 +58,25 @@ export function classifyChat(
     autoStage = 'active';
   }
 
-  // needsReply 双信号（任一即"我该回"）：
+  // needsReply 三信号（任一即"我该回"）：
   //   1. 实时未读 unreadCount > 0
-  //   2. "点开了没回"：之前扫到未读时记下 chat.t，现在 chat.t 仍等于这个
-  //      值——说明用户点开把未读清了但没敲发送（真发了 chat.t 会前进）。
+  //   2. "点开了没回"（forward-fill）：之前扫到未读时记下 chat.t，现在
+  //      chat.t 仍等于这个值——说明用户点开把未读清了但没敲发送
+  //   3. "DB 里客户最后发的没回"（backfill）：messages 表里
+  //      lastInbound > lastOutbound——回填 2026-05-13 之前漏的老 case
   //
-  // 没有 #2 的话，用户一点开聊天 WA 立刻把 unread 清零，chat 立刻从
-  // "我该回" 掉出去——这是 2026-05-12 的痛点（客户 +233 55 678 1531 案例）
+  // 没有 #2/#3 的话，用户一点开聊天 WA 立刻把 unread 清零，chat 立刻从
+  // "我该回" 掉出去——这是 Kwabena +233 55 678 1531 + Antoine
+  // +224 628 19 03 90 案例的根因
   const hasLiveUnread = chat.unreadCount > 0;
   const hasUnsentReply =
     pending.capturedAt != null && chat.t === pending.capturedAt;
-  const needsReply = !chat.archive && (hasLiveUnread || hasUnsentReply);
+  const hasUnansweredInDB =
+    msgDir.lastInboundT != null &&
+    (msgDir.lastOutboundT == null ||
+      msgDir.lastInboundT > msgDir.lastOutboundT);
+  const needsReply =
+    !chat.archive && (hasLiveUnread || hasUnsentReply || hasUnansweredInDB);
 
   return { autoStage, needsReply, stalledDays };
 }

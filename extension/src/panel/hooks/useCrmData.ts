@@ -149,21 +149,69 @@ export function useCrmData(orgId: string | null): CrmData {
       return out;
     }
 
+    /**
+     * 从 messages 表回填"客户最后发的没回"信号。需要 migration 0019 提供
+     * 的 RPC；如果 RPC 不在（migration 还没上）就返回空 map，"我该回"判定
+     * 退回 unreadCount + pending 两路兜底。
+     */
+    async function fetchMessageDirections(): Promise<
+      Map<string, { lastInboundT: number | null; lastOutboundT: number | null }>
+    > {
+      const out = new Map<
+        string,
+        { lastInboundT: number | null; lastOutboundT: number | null }
+      >();
+      try {
+        // RPC 是 migration 0019 加的；TS 类型还没回填 database.types.ts，
+        // 用 unknown 中转避免硬编码 RPC 名进类型联合。运行时如果 RPC 不存在
+        // 会返回 PostgrestError，catch 走静默降级路径。
+        const { data, error } = await (
+          supabase.rpc as unknown as (
+            fn: string,
+            args: Record<string, unknown>,
+          ) => Promise<{ data: unknown; error: unknown }>
+        )('last_message_direction_per_contact', { p_org_id: org });
+        if (error || !data) return out;
+        const rows = data as Array<{
+          contact_id: string;
+          last_inbound_t: string | null;
+          last_outbound_t: string | null;
+        }>;
+        for (const r of rows) {
+          out.set(r.contact_id, {
+            lastInboundT: r.last_inbound_t
+              ? new Date(r.last_inbound_t).getTime() / 1000
+              : null,
+            lastOutboundT: r.last_outbound_t
+              ? new Date(r.last_outbound_t).getTime() / 1000
+              : null,
+          });
+        }
+      } catch {
+        // RPC 不存在 / 网络挂——静默回退到 pending-only 路径
+      }
+      return out;
+    }
+
     void (async () => {
       try {
-        const [contacts, vehicles, tags, wa, jidPhoneCache] = await Promise.all([
-          fetchAllContacts(),
-          fetchAllVehicleInterests(),
-          fetchAllContactTags(),
-          readWhatsAppData().catch(() => ({
-            labels: [] as WALabel[],
-            associations: [] as WALabelAssociation[],
-            chats: [] as WAChat[],
-            contacts: [],
-            jidToPhoneJid: new Map<string, string>(),
-          })),
-          ensureJidPhoneCacheLoaded().catch(() => ({}) as Record<string, string>),
-        ]);
+        const [contacts, vehicles, tags, wa, jidPhoneCache, msgDirections] =
+          await Promise.all([
+            fetchAllContacts(),
+            fetchAllVehicleInterests(),
+            fetchAllContactTags(),
+            readWhatsAppData().catch(() => ({
+              labels: [] as WALabel[],
+              associations: [] as WALabelAssociation[],
+              chats: [] as WAChat[],
+              contacts: [],
+              jidToPhoneJid: new Map<string, string>(),
+            })),
+            ensureJidPhoneCacheLoaded().catch(
+              () => ({}) as Record<string, string>,
+            ),
+            fetchMessageDirections(),
+          ]);
 
         const vehicleByContact = new Map<string, VehicleInterestRow[]>();
         for (const v of vehicles) {
@@ -211,9 +259,14 @@ export function useCrmData(orgId: string | null): CrmData {
           .map((c) => {
             const chat = chatByPhone.get(c.phone!)!;
             const jid = chat.id;
+            const dir = msgDirections.get(c.id);
             const classification = classifyChat(
               chat,
               { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
+              {
+                lastInboundT: dir?.lastInboundT ?? null,
+                lastOutboundT: dir?.lastOutboundT ?? null,
+              },
               now,
             );
             return {
@@ -250,6 +303,7 @@ export function useCrmData(orgId: string | null): CrmData {
             classification: classifyChat(
               chat,
               { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
+              { lastInboundT: null, lastOutboundT: null },
               now,
             ),
           });
