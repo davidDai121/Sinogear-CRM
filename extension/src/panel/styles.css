@@ -56,6 +56,14 @@ body.sgc-page-overlay-active #app {
   visibility: hidden !important;
 }
 
+/* 屏蔽 WA Web 输入框选中文字时弹出的富文本格式化工具栏（B/I/S/<>/list/list/引用）
+   销售用不到，且工具栏会盖住聊天气泡和输入文字。
+   选中条件：translate 定位的 popover 包了 role=menu，里面第一个按钮 aria-label=粗体/Bold。 */
+div[style*="translate"]:has(> [role="menu"] button[aria-label="粗体"]),
+div[style*="translate"]:has(> [role="menu"] button[aria-label="Bold"]) {
+  display: none !important;
+}
+
 #sgc-extension-host {
   position: fixed;
   top: 0;
@@ -624,6 +632,15 @@ body.sgc-page-overlay-active #app {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-bottom: 12px;
+  /* 防止外层 flex 把网格压扁——modal-body 是 flex 子元素，max-height
+     生效时 flexbox 会按 shrink 因子缩 child；网格内的 input 高度可能被
+     一并压成 0。显式给 min-height: auto 让网格保持自然内容高度 */
+  min-height: auto;
+}
+
+.sgc-form-grid > .sgc-field {
+  /* 同上：每个 grid item 不允许被外层 flex 缩到 0 */
+  min-height: auto;
 }
 
 .sgc-field-full {
@@ -859,6 +876,21 @@ body.sgc-page-overlay-active #app {
   flex-direction: column;
   max-height: calc(100vh - 80px);
   animation: sgc-fade-in 0.15s ease-out;
+  /* 让整个 modal 自己滚——之前只有 .sgc-modal-body 有 overflow:auto，
+     但作为 flex 子元素 + 兄弟 .sgc-modal-section 同时存在时，flexbox
+     会按比例 shrink，导致 form 高度被压 0 → input 跟着不见
+     （Vehicle 编辑弹窗的"品牌/车型 输入框消失"案例） */
+  overflow-y: auto;
+}
+
+/* sticky header：modal 滚动时表头保持可见 + 关闭按钮总在右上角 */
+.sgc-modal .sgc-modal-header {
+  position: sticky;
+  top: 0;
+  background: #fff;
+  z-index: 2;
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
 }
 
 .sgc-modal-header {
@@ -875,7 +907,8 @@ body.sgc-page-overlay-active #app {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  overflow-y: auto;
+  /* 不再单独 overflow-y:auto——交给 .sgc-modal 整体滚，避免 flex shrink
+     把 form 内容压扁的 bug */
 }
 
 .sgc-modal-actions {
@@ -1201,6 +1234,20 @@ body.sgc-page-overlay-active #app {
   color: #111b21;
   outline: none;
   box-sizing: border-box;
+  /* defensive：WA Web 偶尔会注 CSS 影响全局 input 渲染，我们的 modal 出现过
+     "品牌/车型 input 高度被压成 0" 的 bug。显式给宽度 + 最小高度 + display 兜底 */
+  width: 100%;
+  min-height: 36px;
+  display: block;
+}
+
+.sgc-field select {
+  /* select 在某些 Chrome 版本里 display:block 后会丢自带的下拉箭头，恢复 inline-block */
+  display: inline-block;
+}
+
+.sgc-field textarea {
+  display: block;
 }
 
 .sgc-field input:focus,
