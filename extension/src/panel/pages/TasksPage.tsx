@@ -5,6 +5,7 @@ import { TaskModal } from '../components/TaskModal';
 import { jumpToChat } from '@/lib/jump-to-chat';
 import { useScope } from '../contexts/ScopeContext';
 import { shortNameOf } from '../hooks/useOrgMembers';
+import { fetchAllPaged } from '@/lib/supabase-paged';
 
 type TaskRow = Database['public']['Tables']['tasks']['Row'];
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
@@ -84,46 +85,55 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
       return;
     }
 
-    let tasksQuery = supabase
-      .from('tasks')
-      .select(
-        filterMine
-          ? '*, contacts!inner(contact_handlers!inner(user_id))'
-          : '*',
-      )
-      .eq('org_id', orgId)
-      .eq('status', statusFilter)
-      .order('due_at', { ascending: true, nullsFirst: false });
-
-    if (filterMine) {
-      tasksQuery = tasksQuery.eq(
-        'contacts.contact_handlers.user_id',
-        myUserId,
-      );
-    }
-
-    const tasksRes = await tasksQuery;
-
-    if (tasksRes.error) {
-      setError(tasksRes.error.message);
+    // 分页拉全集——任务多的 org 可能 1000+ 待处理
+    let taskList: TaskRow[];
+    try {
+      taskList = await fetchAllPaged<TaskRow>((from, to) => {
+        let q = supabase
+          .from('tasks')
+          .select(
+            filterMine
+              ? '*, contacts!inner(contact_handlers!inner(user_id))'
+              : '*',
+          )
+          .eq('org_id', orgId)
+          .eq('status', statusFilter)
+          .order('due_at', { ascending: true, nullsFirst: false })
+          .range(from, to);
+        if (filterMine) {
+          q = q.eq('contacts.contact_handlers.user_id', myUserId);
+        }
+        return q as unknown as PromiseLike<{
+          data: TaskRow[] | null;
+          error: unknown;
+        }>;
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
       setLoading(false);
       return;
     }
 
-    const taskList = (tasksRes.data ?? []) as unknown as TaskRow[];
     setTasks(taskList);
 
     const contactIds = Array.from(new Set(taskList.map((t) => t.contact_id)));
     if (contactIds.length) {
-      const contactsRes = await supabase
-        .from('contacts')
-        .select('*')
-        .in('id', contactIds);
-      if (contactsRes.data) {
-        const map: Record<string, ContactRow> = {};
-        for (const c of contactsRes.data) map[c.id] = c;
-        setContactMap(map);
+      // .in() 拆分 chunk 防 URL 超长（300+ UUID 会触发 Failed to fetch）
+      // 同时分页防 1000 行
+      const CHUNK = 200;
+      const map: Record<string, ContactRow> = {};
+      for (let i = 0; i < contactIds.length; i += CHUNK) {
+        const idsChunk = contactIds.slice(i, i + CHUNK);
+        const rows = await fetchAllPaged<ContactRow>((from, to) =>
+          supabase
+            .from('contacts')
+            .select('*')
+            .in('id', idsChunk)
+            .range(from, to),
+        );
+        for (const c of rows) map[c.id] = c;
       }
+      setContactMap(map);
     } else {
       setContactMap({});
     }

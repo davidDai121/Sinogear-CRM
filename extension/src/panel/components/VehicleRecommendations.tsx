@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import { thumbnailUrl } from '@/lib/cloudinary';
 import { CloudinaryImg } from './CloudinaryImg';
 import { canonicalizeModel } from '@/lib/vehicle-aliases';
+import { fetchAllPaged } from '@/lib/supabase-paged';
 import { readChatMessages } from '@/content/whatsapp-messages';
 import { pasteFilesToWhatsApp } from '@/content/whatsapp-compose';
 import type {
@@ -51,35 +52,43 @@ export function VehicleRecommendations({ orgId, contactId }: Props) {
       });
   }, []);
 
-  // 加载车源 + 媒体
+  // 加载车源 + 媒体——都分页规避 1000 行（车多的 org / 媒体多的车型都能撞上）
   const refresh = useCallback(async () => {
-    const [vRes, iRes] = await Promise.all([
-      supabase
-        .from('vehicles')
-        .select('*')
-        .eq('org_id', orgId)
-        .eq('sale_status', 'available')
-        .order('updated_at', { ascending: false }),
-      supabase
-        .from('vehicle_interests')
-        .select('model')
-        .eq('contact_id', contactId),
+    const [vehicleRows, interestRows] = await Promise.all([
+      fetchAllPaged<VehicleRow>((from, to) =>
+        supabase
+          .from('vehicles')
+          .select('*')
+          .eq('org_id', orgId)
+          .eq('sale_status', 'available')
+          .order('updated_at', { ascending: false })
+          .range(from, to),
+      ),
+      fetchAllPaged<{ model: string }>((from, to) =>
+        supabase
+          .from('vehicle_interests')
+          .select('model')
+          .eq('contact_id', contactId)
+          .range(from, to),
+      ),
     ]);
-    const rows = vRes.data ?? [];
-    setVehicles(rows);
-    setInterestModels((iRes.data ?? []).map((r) => r.model));
+    setVehicles(vehicleRows);
+    setInterestModels(interestRows.map((r) => r.model));
 
-    if (rows.length > 0) {
-      const ids = rows.map((v) => v.id);
-      const { data: mediaRows } = await supabase
-        .from('vehicle_media')
-        .select('*')
-        .in('vehicle_id', ids)
-        .order('media_type')
-        .order('sort_order')
-        .order('created_at');
+    if (vehicleRows.length > 0) {
+      const ids = vehicleRows.map((v) => v.id);
+      const mediaRows = await fetchAllPaged<MediaRow>((from, to) =>
+        supabase
+          .from('vehicle_media')
+          .select('*')
+          .in('vehicle_id', ids)
+          .order('media_type')
+          .order('sort_order')
+          .order('created_at')
+          .range(from, to),
+      );
       const map: Record<string, MediaRow[]> = {};
-      for (const m of mediaRows ?? []) {
+      for (const m of mediaRows) {
         (map[m.vehicle_id] ||= []).push(m);
       }
       setMedia(map);

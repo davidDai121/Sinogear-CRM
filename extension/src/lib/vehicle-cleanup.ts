@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { canonicalizeModel, isNoiseModel } from './vehicle-aliases';
 import { stringifyError } from './errors';
+import { fetchAllPaged } from './supabase-paged';
 
 export interface VehicleCleanupResult {
   scanned: number;
@@ -9,22 +10,33 @@ export interface VehicleCleanupResult {
   noiseDeleted: number;
 }
 
+interface InterestRow {
+  id: string;
+  contact_id: string;
+  model: string;
+  condition: string | null;
+  target_price_usd: number | null;
+}
+
 export async function cleanupVehicleInterests(
   orgId: string,
 ): Promise<VehicleCleanupResult> {
-  const { data, error } = await supabase
-    .from('vehicle_interests')
-    .select('id, contact_id, model, condition, target_price_usd, contacts!inner(org_id)')
-    .eq('contacts.org_id', orgId);
-  if (error) throw new Error(stringifyError(error));
-
-  const rows = (data ?? []) as Array<{
-    id: string;
-    contact_id: string;
-    model: string;
-    condition: string | null;
-    target_price_usd: number | null;
-  }>;
+  // 分页拉全集，规避 Supabase 默认 1000 行上限（用户 2026-05-15 反馈"扫描 1000"
+  // 然后停了，就是这里漏分页）
+  let rows: InterestRow[];
+  try {
+    rows = await fetchAllPaged<InterestRow>((from, to) =>
+      supabase
+        .from('vehicle_interests')
+        .select(
+          'id, contact_id, model, condition, target_price_usd, contacts!inner(org_id)',
+        )
+        .eq('contacts.org_id', orgId)
+        .range(from, to),
+    );
+  } catch (err) {
+    throw new Error(stringifyError(err));
+  }
 
   let renamed = 0;
   let deleted = 0;

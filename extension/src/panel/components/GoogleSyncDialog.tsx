@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { fetchAllPaged } from '@/lib/supabase-paged';
 import {
   createGoogleContact,
   listGoogleContacts,
@@ -45,12 +46,15 @@ export function GoogleSyncDialog({ orgId, onClose, onDone }: Props) {
       const googleList = await listGoogleContacts();
 
       setProgress('正在加载 CRM 客户…');
-      const { data: crmAll, error: crmErr } = await supabase
-        .from('contacts')
-        .select('*')
-        .eq('org_id', orgId);
-      if (crmErr) throw crmErr;
-      const crmContacts = crmAll ?? [];
+      // 分页拉全集——大 org 超 1000 contact，之前漏的 2000+ 会被
+      // Google sync 当成"不存在"误判（虽然 upsert 兜得住，但 stats 不准）
+      const crmContacts = await fetchAllPaged<ContactRow>((from, to) =>
+        supabase
+          .from('contacts')
+          .select('*')
+          .eq('org_id', orgId)
+          .range(from, to),
+      );
 
       // Google 同步只针对个人 contact（有 phone）；群聊不同步
       const crmByPhone = new Map<string, ContactRow>();

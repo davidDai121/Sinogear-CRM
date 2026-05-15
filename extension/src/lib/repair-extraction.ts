@@ -14,6 +14,7 @@
 import { supabase } from './supabase';
 import { phoneToCountry } from './phone-countries';
 import { stringifyError } from './errors';
+import { fetchAllPaged } from './supabase-paged';
 import type { Database } from './database.types';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
@@ -37,13 +38,19 @@ function normalize(s: string): string {
 }
 
 export async function scanForMismatches(orgId: string): Promise<RepairScan> {
-  const { data, error } = await supabase
-    .from('contacts')
-    .select('*')
-    .eq('org_id', orgId);
-  if (error) throw new Error(stringifyError(error));
-
-  const contacts = (data ?? []) as ContactRow[];
+  // 分页拉全集，规避 1000 行上限——大 org 的 contacts 经常超 1000
+  let contacts: ContactRow[];
+  try {
+    contacts = await fetchAllPaged<ContactRow>((from, to) =>
+      supabase
+        .from('contacts')
+        .select('*')
+        .eq('org_id', orgId)
+        .range(from, to),
+    );
+  } catch (err) {
+    throw new Error(stringifyError(err));
+  }
   const mismatched = contacts.filter((c) => {
     if (!c.country || !c.phone) return false;
     const expected = phoneToCountry(c.phone);

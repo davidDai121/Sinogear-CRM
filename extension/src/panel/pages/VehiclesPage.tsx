@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { thumbnailUrl } from '@/lib/cloudinary';
+import { fetchAllPaged } from '@/lib/supabase-paged';
 import type {
   Database,
   PricingTier,
@@ -35,35 +36,49 @@ export function VehiclesPage({ orgId }: Props) {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const { data, error } = await supabase
-      .from('vehicles')
-      .select('*')
-      .eq('org_id', orgId)
-      .order('updated_at', { ascending: false });
-    if (error) {
-      setError(error.message);
+    // 分页拉全集
+    let rows: VehicleRow[];
+    try {
+      rows = await fetchAllPaged<VehicleRow>((from, to) =>
+        supabase
+          .from('vehicles')
+          .select('*')
+          .eq('org_id', orgId)
+          .order('updated_at', { ascending: false })
+          .range(from, to),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
       setLoading(false);
       return;
     }
-    const rows = data ?? [];
     setItems(rows);
     setLoading(false);
 
     // 取每个车型的第一张图片作为封面（最便宜：拉所有 image 然后客户端按 vehicle_id 取 sort_order 最小）
+    // 也分页：100 车型 × 10 图 = 1000，正好可能踩上限
     if (rows.length > 0) {
       const ids = rows.map((v) => v.id);
-      const { data: media } = await supabase
-        .from('vehicle_media')
-        .select('*')
-        .in('vehicle_id', ids)
-        .eq('media_type', 'image')
-        .order('sort_order')
-        .order('created_at');
-      const map: Record<string, MediaRow> = {};
-      for (const m of media ?? []) {
-        if (!map[m.vehicle_id]) map[m.vehicle_id] = m;
+      try {
+        const media = await fetchAllPaged<MediaRow>((from, to) =>
+          supabase
+            .from('vehicle_media')
+            .select('*')
+            .in('vehicle_id', ids)
+            .eq('media_type', 'image')
+            .order('sort_order')
+            .order('created_at')
+            .range(from, to),
+        );
+        const map: Record<string, MediaRow> = {};
+        for (const m of media) {
+          if (!map[m.vehicle_id]) map[m.vehicle_id] = m;
+        }
+        setCovers(map);
+      } catch {
+        // 封面拉不到不致命，留 setCovers({})
+        setCovers({});
       }
-      setCovers(map);
     } else {
       setCovers({});
     }

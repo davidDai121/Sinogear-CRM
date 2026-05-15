@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { stringifyError } from '@/lib/errors';
+import { fetchAllPaged } from '@/lib/supabase-paged';
 
 interface Props {
   orgId: string;
@@ -27,17 +28,23 @@ export function TagsPage({ orgId }: Props) {
 
   const refresh = async () => {
     setError(null);
-    const { data, error } = await supabase
-      .from('contact_tags')
-      .select('tag, contacts!inner(org_id)')
-      .eq('contacts.org_id', orgId);
-    if (error) {
-      setError(error.message);
+    // 分页拉全集，规避 1000 行上限——大 org 的 contact_tags 经常 3000+
+    let rows: Array<{ tag: string }>;
+    try {
+      rows = await fetchAllPaged<{ tag: string }>((from, to) =>
+        supabase
+          .from('contact_tags')
+          .select('tag, contacts!inner(org_id)')
+          .eq('contacts.org_id', orgId)
+          .range(from, to),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
       setLoading(false);
       return;
     }
     const counts = new Map<string, number>();
-    for (const row of (data ?? []) as Array<{ tag: string }>) {
+    for (const row of rows) {
       counts.set(row.tag, (counts.get(row.tag) ?? 0) + 1);
     }
     const arr: TagStat[] = Array.from(counts.entries())

@@ -4,6 +4,7 @@ import type { CustomerStage } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
 import { canonicalizeModel } from '@/lib/vehicle-aliases';
 import { brandOf } from '@/lib/filters';
+import { fetchAllPaged } from '@/lib/supabase-paged';
 import { useScope } from '../contexts/ScopeContext';
 
 interface Props {
@@ -125,10 +126,6 @@ export function DashboardPage({ orgId }: Props) {
           .select(contactsSel, { count: 'exact', head: true })
           .eq('org_id', orgId)
           .gte('created_at', startIso);
-        let stagesQ = supabase
-          .from('contacts')
-          .select(stagesSel)
-          .eq('org_id', orgId);
         let newQuotesQ = supabase
           .from('quotes')
           .select(`id, ${childSel}`, { count: 'exact', head: true })
@@ -148,14 +145,9 @@ export function DashboardPage({ orgId }: Props) {
           .eq('contacts.org_id', orgId)
           .eq('event_type', 'ai_extracted')
           .gte('created_at', startIso);
-        let vehiclesQ = supabase
-          .from('vehicle_interests')
-          .select(vehiclesSel)
-          .eq('contacts.org_id', orgId);
 
         if (filterMine) {
           newContactsQ = newContactsQ.eq('contact_handlers.user_id', myUserId);
-          stagesQ = stagesQ.eq('contact_handlers.user_id', myUserId);
           newQuotesQ = newQuotesQ.eq(
             'contacts.contact_handlers.user_id',
             myUserId,
@@ -168,35 +160,60 @@ export function DashboardPage({ orgId }: Props) {
             'contacts.contact_handlers.user_id',
             myUserId,
           );
-          vehiclesQ = vehiclesQ.eq(
-            'contacts.contact_handlers.user_id',
-            myUserId,
-          );
         }
+
+        // stages / vehicles 是行级查询（非 count-only），必须分页规避 1000 行
+        // 上限——之前 3000+ contact 的 org 漏算阶段分布 + 热门车型 Top 5
+        const stagesPaged = fetchAllPaged<{
+          customer_stage: CustomerStage;
+        }>((from, to) => {
+          let q = supabase
+            .from('contacts')
+            .select(stagesSel)
+            .eq('org_id', orgId)
+            .range(from, to);
+          if (filterMine) q = q.eq('contact_handlers.user_id', myUserId);
+          return q as unknown as PromiseLike<{
+            data: Array<{ customer_stage: CustomerStage }> | null;
+            error: unknown;
+          }>;
+        });
+        const vehiclesPaged = fetchAllPaged<{ model: string }>((from, to) => {
+          let q = supabase
+            .from('vehicle_interests')
+            .select(vehiclesSel)
+            .eq('contacts.org_id', orgId)
+            .range(from, to);
+          if (filterMine)
+            q = q.eq('contacts.contact_handlers.user_id', myUserId);
+          return q as unknown as PromiseLike<{
+            data: Array<{ model: string }> | null;
+            error: unknown;
+          }>;
+        });
 
         const [
           newContactsRes,
-          stagesRes,
+          stagesRows,
           newQuotesRes,
           newTasksRes,
           aiExtractsRes,
-          vehiclesRes,
+          vehiclesRows,
         ] = await Promise.all([
           newContactsQ,
-          stagesQ,
+          stagesPaged,
           newQuotesQ,
           newTasksQ,
           aiExtractsQ,
-          vehiclesQ,
+          vehiclesPaged,
         ]);
 
         if (cancelled) return;
         if (newContactsRes.error) throw newContactsRes.error;
-        if (stagesRes.error) throw stagesRes.error;
         if (newQuotesRes.error) throw newQuotesRes.error;
         if (newTasksRes.error) throw newTasksRes.error;
         if (aiExtractsRes.error) throw aiExtractsRes.error;
-        if (vehiclesRes.error) throw vehiclesRes.error;
+        // stagesRows / vehiclesRows 来自 fetchAllPaged，内部已 throw on error
 
         const stageDist: Record<CustomerStage, number> = {
           new: 0,
@@ -207,14 +224,12 @@ export function DashboardPage({ orgId }: Props) {
           won: 0,
           lost: 0,
         };
-        for (const row of (stagesRes.data ?? []) as unknown as Array<{
-          customer_stage: CustomerStage;
-        }>) {
+        for (const row of stagesRows) {
           stageDist[row.customer_stage] = (stageDist[row.customer_stage] ?? 0) + 1;
         }
 
         const modelCounts = new Map<string, number>();
-        for (const row of (vehiclesRes.data ?? []) as Array<{ model: string }>) {
+        for (const row of vehiclesRows) {
           const canon = canonicalizeModel(row.model);
           if (!canon) continue;
           modelCounts.set(canon, (modelCounts.get(canon) ?? 0) + 1);

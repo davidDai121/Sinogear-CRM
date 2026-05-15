@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { readWhatsAppData, resolvePhone } from './whatsapp-idb';
 import { stringifyError } from './errors';
+import { fetchAllPaged } from './supabase-paged';
 
 export interface BulkSyncResult {
   scanned: number;
@@ -29,15 +30,24 @@ interface GroupInsert {
 export async function bulkSyncWhatsAppChats(orgId: string): Promise<BulkSyncResult> {
   const wa = await readWhatsAppData();
 
-  const { data: existing, error: readErr } = await supabase
-    .from('contacts')
-    .select('phone, group_jid')
-    .eq('org_id', orgId);
-  if (readErr) throw new Error(stringifyError(readErr));
+  // 分页拉全集——bulk-sync 之前只拿前 1000，> 1000 contact 的 org 会把
+  // 后面的当成"不存在"重新 insert 一遍，触发 UNIQUE 冲突 + 误报新增数
+  let existing: Array<{ phone: string | null; group_jid: string | null }>;
+  try {
+    existing = await fetchAllPaged((from, to) =>
+      supabase
+        .from('contacts')
+        .select('phone, group_jid')
+        .eq('org_id', orgId)
+        .range(from, to),
+    );
+  } catch (err) {
+    throw new Error(stringifyError(err));
+  }
 
   const existingPhones = new Set<string>();
   const existingGroupJids = new Set<string>();
-  for (const r of existing ?? []) {
+  for (const r of existing) {
     if (r.phone) existingPhones.add(r.phone);
     if (r.group_jid) existingGroupJids.add(r.group_jid);
   }

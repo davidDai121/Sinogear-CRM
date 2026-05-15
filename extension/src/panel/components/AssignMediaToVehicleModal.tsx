@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import { uploadToCloudinary, isCloudinaryConfigured } from '@/lib/cloudinary';
 import { clearCaptured, removeCaptured, type CapturedMedia } from '@/lib/media-tray-store';
 import { canonicalizeModel, isNoiseModel } from '@/lib/vehicle-aliases';
+import { fetchAllPaged } from '@/lib/supabase-paged';
 import type { Database, VehicleMediaType } from '@/lib/database.types';
 
 type VehicleRow = Database['public']['Tables']['vehicles']['Row'];
@@ -39,12 +40,15 @@ export function AssignMediaToVehicleModal({ orgId, items, onClose }: Props) {
   const cloudinaryReady = isCloudinaryConfigured();
 
   useEffect(() => {
-    void supabase
-      .from('vehicles')
-      .select('*')
-      .eq('org_id', orgId)
-      .order('updated_at', { ascending: false })
-      .then(({ data }) => setVehicles(data ?? []));
+    // 分页拉全集——之前没分页，>1000 车源的 org 选择不到后面的
+    void fetchAllPaged<VehicleRow>((from, to) =>
+      supabase
+        .from('vehicles')
+        .select('*')
+        .eq('org_id', orgId)
+        .order('updated_at', { ascending: false })
+        .range(from, to),
+    ).then((rows) => setVehicles(rows));
   }, [orgId]);
 
   // 取所有 vehicle_interests.model（客户咨询过的车型）+ 已有 vehicles
@@ -54,19 +58,32 @@ export function AssignMediaToVehicleModal({ orgId, items, onClose }: Props) {
   useEffect(() => {
     void (async () => {
       // vehicle_interests.model 没 org_id 列；通过客户找。但 RLS 会自动过滤当前 org 的 contacts。
-      const [{ data: interests }, { data: vehiclesAll }] = await Promise.all([
-        supabase.from('vehicle_interests').select('model'),
-        supabase.from('vehicles').select('brand,model').eq('org_id', orgId),
+      // 两个查询都分页：vehicle_interests 大 org 几千行很常见；vehicles 也可能 1000+
+      const [interests, vehiclesAll] = await Promise.all([
+        fetchAllPaged<{ model: string | null }>((from, to) =>
+          supabase
+            .from('vehicle_interests')
+            .select('model')
+            .range(from, to),
+        ),
+        fetchAllPaged<{ brand: string | null; model: string | null }>(
+          (from, to) =>
+            supabase
+              .from('vehicles')
+              .select('brand,model')
+              .eq('org_id', orgId)
+              .range(from, to),
+        ),
       ]);
       const modelSet = new Set<string>();
       const brandSet = new Set<string>();
-      for (const r of interests ?? []) {
+      for (const r of interests) {
         if (!r.model) continue;
         if (isNoiseModel(r.model)) continue;
         const canon = canonicalizeModel(r.model);
         if (canon) modelSet.add(canon);
       }
-      for (const v of vehiclesAll ?? []) {
+      for (const v of vehiclesAll) {
         if (v.brand) brandSet.add(v.brand);
         if (v.model) modelSet.add(v.model);
       }

@@ -3,6 +3,7 @@ import { readWhatsAppData, resolvePhone } from './whatsapp-idb';
 import { stringifyError } from './errors';
 import { REGIONS } from './regions';
 import { canonicalizeModel } from './vehicle-aliases';
+import { fetchAllPaged } from './supabase-paged';
 import type { CustomerQuality, CustomerStage } from './database.types';
 
 interface CategoryResult {
@@ -134,30 +135,50 @@ export async function syncWhatsAppLabels(orgId: string): Promise<LabelSyncResult
 
   const labelById = new Map(wa.labels.map((l) => [l.id, l]));
 
-  const { data: contactRows, error: cErr } = await supabase
-    .from('contacts')
-    .select('id, phone, quality, customer_stage, country')
-    .eq('org_id', orgId);
-  if (cErr) throw new Error(stringifyError(cErr));
+  // 三张表都分页拉全集，规避 1000 行上限
+  let contactRows: Array<{
+    id: string;
+    phone: string | null;
+    quality: CustomerQuality;
+    customer_stage: CustomerStage;
+    country: string | null;
+  }>;
+  let existingTags: Array<{ contact_id: string; tag: string }>;
+  let existingVehicles: Array<{ contact_id: string; model: string }>;
+  try {
+    [contactRows, existingTags, existingVehicles] = await Promise.all([
+      fetchAllPaged((from, to) =>
+        supabase
+          .from('contacts')
+          .select('id, phone, quality, customer_stage, country')
+          .eq('org_id', orgId)
+          .range(from, to),
+      ),
+      fetchAllPaged((from, to) =>
+        supabase
+          .from('contact_tags')
+          .select('contact_id, tag, contacts!inner(org_id)')
+          .eq('contacts.org_id', orgId)
+          .range(from, to),
+      ),
+      fetchAllPaged((from, to) =>
+        supabase
+          .from('vehicle_interests')
+          .select('contact_id, model, contacts!inner(org_id)')
+          .eq('contacts.org_id', orgId)
+          .range(from, to),
+      ),
+    ]);
+  } catch (err) {
+    throw new Error(stringifyError(err));
+  }
 
-  const contactByPhone = new Map((contactRows ?? []).map((c) => [c.phone, c]));
-
-  const { data: existingTags, error: tErr } = await supabase
-    .from('contact_tags')
-    .select('contact_id, tag, contacts!inner(org_id)')
-    .eq('contacts.org_id', orgId);
-  if (tErr) throw new Error(stringifyError(tErr));
+  const contactByPhone = new Map(contactRows.map((c) => [c.phone, c]));
   const existingTagSet = new Set(
-    (existingTags ?? []).map((t) => `${t.contact_id}:${t.tag}`),
+    existingTags.map((t) => `${t.contact_id}:${t.tag}`),
   );
-
-  const { data: existingVehicles, error: vErr } = await supabase
-    .from('vehicle_interests')
-    .select('contact_id, model, contacts!inner(org_id)')
-    .eq('contacts.org_id', orgId);
-  if (vErr) throw new Error(stringifyError(vErr));
   const existingVehicleSet = new Set(
-    (existingVehicles ?? []).map((v) => `${v.contact_id}:${v.model}`),
+    existingVehicles.map((v) => `${v.contact_id}:${v.model}`),
   );
 
   const qualityUpdates = new Map<string, CustomerQuality>();
