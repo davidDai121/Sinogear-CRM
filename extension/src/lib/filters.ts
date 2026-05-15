@@ -312,11 +312,15 @@ export function brandOf(model: string): string {
   if (/\b(nissan|sunny|sentra|x-trail|patrol|navara|sylphy|altima)\b/.test(m))
     return '日产 Nissan';
   if (/\b(tesla|model\s*[y3sx])\b/.test(m)) return 'Tesla';
-  if (/\b(chery|奇瑞|tiggo|rely|r0?8|icar|cs55|jaecoo)\b/.test(m)) return '奇瑞 Chery';
+  // 注：从 Chery 关键词里移掉了 cs55——CS55 其实是 Changan 的常见车型，
+  // Chery CS55 Plus 这种带 "chery" 前缀的名字会被 chery 关键词命中，不需要 cs55
+  if (/\b(chery|奇瑞|tiggo|rely|r0?8|icar|jaecoo)\b/.test(m)) return '奇瑞 Chery';
   if (/\b(deepal|深蓝|g318|nevo|s0?7|s0?5)\b/.test(m)) return '深蓝 Deepal';
   if (/\b(avatr|阿维塔)\b/.test(m)) return '阿维塔 Avatr';
   if (/\b(nammi)\b/.test(m)) return 'Nammi';
-  if (/\b(changan|长安|cs\d+|qiyuan)\b/.test(m)) return '长安 Changan';
+  // UNI-K / UNI-T / UNI-V / UNI-S 是 Changan 独有，单写也算 Changan
+  if (/\b(changan|长安|cs\d+|qiyuan|uni[- ]?[ktvs])\b/.test(m))
+    return '长安 Changan';
   if (/\b(hongqi|红旗|hs\d|h\d )\b/.test(m)) return '红旗 Hongqi';
   if (/\b(mg|roewe|荣威)\b/.test(m)) return 'MG/荣威';
   if (/\b(mazda|马自达|cx-\d|axela|atenza)\b/.test(m)) return '马自达 Mazda';

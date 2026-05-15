@@ -144,8 +144,28 @@ const RULES: AliasRule[] = [
   { match: /\bgeely.*monjaro\b/i, canonical: 'Geely Monjaro' },
 
   // ─────── Changan 长安 ───────
+  // UNI 系列是 Changan 独有品牌，市面上没有同名其他车，可省 "changan/长安" 前缀
+  // —— 实际客户写法多样："长安unik" / "长安 UNI-K" / "UNIK" / "Changan UNI K" 各种
+  { match: /(?:changan|长安)?\s*uni[-_ ]?k\b/i, canonical: 'Changan UNI-K' },
+  { match: /(?:changan|长安)?\s*uni[-_ ]?t\b/i, canonical: 'Changan UNI-T' },
+  { match: /(?:changan|长安)?\s*uni[-_ ]?v\b/i, canonical: 'Changan UNI-V' },
+  { match: /(?:changan|长安)?\s*uni[-_ ]?s\b/i, canonical: 'Changan UNI-S' },
+  // CS 系列 / 其他车型：因为 Chery 也有 CS55 Plus / Hunter（见上方 Chery 段），
+  // 这些必须带 changan/长安 前缀来锚定品牌，避免误归 Chery
+  { match: /(?:changan|长安).*cs75\s*plus\b/i, canonical: 'Changan CS75 Plus' },
+  { match: /(?:changan|长安).*cs75\b/i, canonical: 'Changan CS75' },
+  { match: /(?:changan|长安).*cs55\s*plus\b/i, canonical: 'Changan CS55 Plus' },
+  { match: /(?:changan|长安).*cs55\b/i, canonical: 'Changan CS55' },
   { match: /\bchangan.*cs35\s*plus\b/i, canonical: 'Changan CS35 Plus' },
+  { match: /(?:changan|长安).*cs35\b/i, canonical: 'Changan CS35' },
+  { match: /(?:changan|长安).*hunter\b/i, canonical: 'Changan Hunter' },
+  { match: /(?:changan|长安).*eado\b/i, canonical: 'Changan Eado' },
+  { match: /(?:changan|长安).*alsvin\b/i, canonical: 'Changan Alsvin' },
+  { match: /(?:changan|长安).*lumin\b/i, canonical: 'Changan Lumin' },
+  { match: /(?:changan|长安).*raeton\b/i, canonical: 'Changan Raeton' },
   { match: /\bchangan.*qiyuan\s*a05\b/i, canonical: 'Changan Qiyuan A05' },
+  { match: /(?:changan|长安).*qiyuan\s*a07\b/i, canonical: 'Changan Qiyuan A07' },
+  { match: /(?:changan|长安).*qiyuan\s*q05\b/i, canonical: 'Changan Qiyuan Q05' },
 
   // ─────── BAIC / Isuzu / Deepal / Avatr / Zeekr / Ford / Suzuki / Nammi / Mitsubishi ───────
   { match: /\bbaic.*bj40\b|\bbj40\b/i, canonical: 'BAIC BJ40' },
