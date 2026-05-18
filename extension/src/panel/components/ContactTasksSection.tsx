@@ -3,7 +3,6 @@ import { supabase } from '@/lib/supabase';
 import type { Database, TaskStatus } from '@/lib/database.types';
 import { jumpToChat } from '@/lib/jump-to-chat';
 import {
-  readChatMessages,
   waitForChatMessages,
   type ChatMessage,
 } from '@/content/whatsapp-messages';
@@ -136,7 +135,8 @@ export function ContactTasksSection({ contactId, orgId, contactPhone }: Props) {
         const ok = await jumpToChat(queryDigits);
         if (ok) messages = await waitForChatMessages(5000, 30, 1);
       } else {
-        messages = readChatMessages(30);
+        // 群聊：用轮询版，WA Web 冷启动单发会空
+        messages = await waitForChatMessages(5000, 30, 1);
       }
       // 2. DOM 空 → fallback 到数据库（导入的历史 + 之前 useMessageSync 同步过的）
       if (!messages.length) {

@@ -4,7 +4,6 @@ import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
 import { jumpToChat } from '@/lib/jump-to-chat';
 import {
-  readChatMessages,
   waitForChatMessages,
   type ChatMessage,
 } from '@/content/whatsapp-messages';
@@ -18,6 +17,9 @@ import {
 import { fillWhatsAppCompose } from '@/content/whatsapp-compose';
 import { logContactEvent } from '@/lib/events-log';
 import type { CustomerStage } from '@/lib/database.types';
+import { logAiReply, markAiReplyFilled } from '@/lib/ai-reply-log';
+import { sanitizeReplyForCustomer, wasReplyDirty } from '@/lib/reply-sanitize';
+import { ReplyCard } from './ReplyCard';
 import { GemTemplatesModal } from './GemTemplatesModal';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
@@ -46,6 +48,8 @@ type Status =
       model: string | null;
       source: 'dom' | 'db';
       count: number;
+      /** ai_reply_logs row id — fillReply 用它把 was_filled 翻成 true */
+      logId: string | null;
     }
   | { kind: 'error'; message: string };
 
@@ -139,6 +143,12 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
     const isGroup = !!contact.group_jid;
 
     setStatus({ kind: 'reading' });
+    const startedAt = Date.now();
+    let promptForLog = '';
+    let messageSourceForLog: 'dom' | 'db' = 'dom';
+    let messageCountForLog = 0;
+    const guidanceForLog = followup.trim();
+    const modeForLog = existingConv ? 'gem_followup' : 'gem_first';
     try {
       // 1. Read chat messages — DOM 优先；DOM 空时 fallback 到 messages 表（导入的历史）
       // 注意：这里的 jumpToChat 不开启 deep-link fallback——若开启会触发 reload，
@@ -158,10 +168,12 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
           }
           // 跳不到：messages 留空，下面的"DOM 没消息时读 DB"分支接管
         } else {
-          messages = readChatMessages(30);
+          messages = await waitForChatMessages(5000, 30, 1);
         }
       } else {
-        messages = readChatMessages(30);
+        // 即使不需要 jump 也走轮询版——WA Web 冷启动 ≈ 10s 后 bubble 才
+        // 渲染好，单发 readChatMessages 会一发就空，错误地误判"没消息"
+        messages = await waitForChatMessages(5000, 30, 1);
       }
       if (messages.length === 0) {
         // DOM 没消息（手机端聊天 / WA Web 还没加载），用导入的历史
@@ -235,6 +247,9 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
       const prompt = guidance
         ? `[Sales Guidance — TOP PRIORITY]\n${guidance}\n\nThe guidance above OVERRIDES default style. Apply it strictly to the [WhatsApp Reply].\n\n${basePrompt}`
         : basePrompt;
+      promptForLog = prompt;
+      messageSourceForLog = messageSource;
+      messageCountForLog = messages.length;
 
       // 4. Run Gem
       setStatus({
@@ -274,6 +289,20 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
       }
       await refreshConversations();
 
+      const logId = await logAiReply({
+        orgId,
+        contactId: contact.id,
+        source: 'gem',
+        mode: modeForLog,
+        prompt,
+        response: response.responseText,
+        guidance: guidanceForLog || null,
+        messageSource,
+        messageCount: messages.length,
+        chatUrl: newChatUrl,
+        durationMs: Date.now() - startedAt,
+      });
+
       setStatus({
         kind: 'done',
         text: response.responseText,
@@ -281,10 +310,23 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         model: response.modelSelected ?? null,
         source: messageSource,
         count: messages.length,
+        logId,
       });
       setFollowup('');
     } catch (err) {
       const msg = stringifyError(err);
+      void logAiReply({
+        orgId,
+        contactId: contact.id,
+        source: 'gem',
+        mode: modeForLog,
+        prompt: promptForLog || '(prompt 未构造完成就出错了)',
+        guidance: guidanceForLog || null,
+        messageSource: messageSourceForLog,
+        messageCount: messageCountForLog,
+        durationMs: Date.now() - startedAt,
+        error: msg,
+      });
       if (msg.includes('GEMINI_AUTH_REQUIRED')) {
         setStatus({
           kind: 'error',
@@ -337,9 +379,26 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
           await new Promise((r) => setTimeout(r, 800));
         }
       }
-      const ok = fillWhatsAppCompose(text);
+      // P0 安全：剥掉 LLM 可能夹进 reply 的内部段落（[Translation] / Note: 等）
+      const wasDirty = wasReplyDirty(text);
+      const cleanText = sanitizeReplyForCustomer(text);
+      if (!cleanText) {
+        alert('回复为空（Gem 没生成有效的 [WhatsApp Reply] 段）');
+        return;
+      }
+      if (wasDirty) {
+        const okConfirm = confirm(
+          'Gem 的回复里夹了内部段落（[Translation] / 备注 之类），已自动剥掉。确认要把净化后的版本发给客户？',
+        );
+        if (!okConfirm) return;
+      }
+      const ok = fillWhatsAppCompose(cleanText);
       if (!ok) {
         alert('找不到 WhatsApp 输入框，请确认聊天已打开');
+        return;
+      }
+      if (status.kind === 'done' && status.logId) {
+        void markAiReplyFilled(status.logId);
       }
     } catch (err) {
       alert(stringifyError(err));
@@ -488,29 +547,13 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
               )}
 
               {parsed.reply && (
-                <div className="sgc-gem-card sgc-gem-card-reply">
-                  <div className="sgc-gem-card-label">
-                    💬 给客户的回复
-                  </div>
-                  <div className="sgc-gem-card-body">{parsed.reply}</div>
-                  <div className="sgc-gem-result-actions">
-                    <button
-                      type="button"
-                      className="sgc-btn-primary"
-                      onClick={() => fillReply(parsed.reply!)}
-                      title="把这段回复填入下方 WhatsApp 输入框（不自动发送）"
-                    >
-                      💬 填入聊天框
-                    </button>
-                    <button
-                      type="button"
-                      className="sgc-btn-secondary"
-                      onClick={() => copyToClipboard(parsed.reply!)}
-                    >
-                      📋 复制
-                    </button>
-                  </div>
-                </div>
+                <ReplyCard
+                  label="💬 给客户的回复"
+                  reply={parsed.reply}
+                  existingTranslation={parsed.translation}
+                  onFillReply={fillReply}
+                  onCopy={copyToClipboard}
+                />
               )}
 
               {parsed.translation && (
