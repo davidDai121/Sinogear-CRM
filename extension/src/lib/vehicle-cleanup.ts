@@ -32,6 +32,7 @@ export async function cleanupVehicleInterests(
           'id, contact_id, model, condition, target_price_usd, contacts!inner(org_id)',
         )
         .eq('contacts.org_id', orgId)
+        .order('id', { ascending: true })
         .range(from, to),
     );
   } catch (err) {

@@ -17,6 +17,7 @@ export async function fetchCloudinaryUsage(orgId: string): Promise<CloudinaryUsa
       .from('vehicle_media')
       .select('file_size_bytes, media_type, vehicles!inner(org_id)')
       .eq('vehicles.org_id', orgId)
+      .order('id', { ascending: true })
       .range(from, from + step - 1);
     if (error) throw error;
     if (!data || data.length === 0) break;

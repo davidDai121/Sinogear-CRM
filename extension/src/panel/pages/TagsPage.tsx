@@ -36,6 +36,8 @@ export function TagsPage({ orgId }: Props) {
           .from('contact_tags')
           .select('tag, contacts!inner(org_id)')
           .eq('contacts.org_id', orgId)
+          .order('contact_id', { ascending: true })
+          .order('tag', { ascending: true })
           .range(from, to),
       );
     } catch (e) {

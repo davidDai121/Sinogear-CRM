@@ -286,7 +286,7 @@ Miles often types brief Sales Guidance: "推推二手卡罗拉" / "跟进一下"
 (b) Customer Signals block — their English level (basic/fluent), temperature (warm/neutral/cool), days since their last message
 (c) Vehicle Knowledge — typical FOB / freight / mileage / year for the SKU Miles named. Defaults to use when Miles doesn't specify:
     - "二手 Corolla" → 2018-2019 model, 30,000-60,000 km, $3,500-4,500 FOB (mid-sedan freight $1,300/car for 4 in 40HQ)
-    - "二手 Qin Plus DM-i" → 2024 used, ~20,000 km, $7,900-8,500 FOB
+    - "二手 Qin Plus DM-i" → 2024 used, 20,000-30,000 km, $7,900 FOB (单价, 不是范围)
     - "二手 RAV4" → 2022 used, $13,000-15,000 FOB (mid-SUV freight $1,300/car)
     Adjust if Vehicle Knowledge or chat history gives a specific spec.
 (d) Market playbook — duty band, landed math, typical sales angles for that SKU in that market.

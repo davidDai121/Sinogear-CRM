@@ -171,6 +171,7 @@ export function DashboardPage({ orgId }: Props) {
             .from('contacts')
             .select(stagesSel)
             .eq('org_id', orgId)
+            .order('id', { ascending: true })
             .range(from, to);
           if (filterMine) q = q.eq('contact_handlers.user_id', myUserId);
           return q as unknown as PromiseLike<{
@@ -183,6 +184,7 @@ export function DashboardPage({ orgId }: Props) {
             .from('vehicle_interests')
             .select(vehiclesSel)
             .eq('contacts.org_id', orgId)
+            .order('id', { ascending: true })
             .range(from, to);
           if (filterMine)
             q = q.eq('contacts.contact_handlers.user_id', myUserId);

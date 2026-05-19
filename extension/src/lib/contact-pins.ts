@@ -24,6 +24,7 @@ export async function fetchMyPinnedIdsForOrg(
       .select('contact_id, user_id, contacts!inner(org_id)')
       .eq('contacts.org_id', orgId)
       .eq('user_id', userId)
+      .order('contact_id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     const rows = data ?? [];

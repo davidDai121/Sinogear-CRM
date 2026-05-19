@@ -46,6 +46,7 @@ export async function scanForMismatches(orgId: string): Promise<RepairScan> {
         .from('contacts')
         .select('*')
         .eq('org_id', orgId)
+        .order('id', { ascending: true })
         .range(from, to),
     );
   } catch (err) {

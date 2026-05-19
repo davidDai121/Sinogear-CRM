@@ -152,6 +152,7 @@ export async function syncWhatsAppLabels(orgId: string): Promise<LabelSyncResult
           .from('contacts')
           .select('id, phone, quality, customer_stage, country')
           .eq('org_id', orgId)
+          .order('id', { ascending: true })
           .range(from, to),
       ),
       fetchAllPaged((from, to) =>
@@ -159,6 +160,8 @@ export async function syncWhatsAppLabels(orgId: string): Promise<LabelSyncResult
           .from('contact_tags')
           .select('contact_id, tag, contacts!inner(org_id)')
           .eq('contacts.org_id', orgId)
+          .order('contact_id', { ascending: true })
+          .order('tag', { ascending: true })
           .range(from, to),
       ),
       fetchAllPaged((from, to) =>
@@ -166,6 +169,7 @@ export async function syncWhatsAppLabels(orgId: string): Promise<LabelSyncResult
           .from('vehicle_interests')
           .select('contact_id, model, contacts!inner(org_id)')
           .eq('contacts.org_id', orgId)
+          .order('id', { ascending: true })
           .range(from, to),
       ),
     ]);

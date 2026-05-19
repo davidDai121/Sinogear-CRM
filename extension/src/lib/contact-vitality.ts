@@ -46,6 +46,7 @@ async function fetchAllContacts(orgId: string): Promise<ContactRow[]> {
       .from('contacts')
       .select('*')
       .eq('org_id', orgId)
+      .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     const rows = (data ?? []) as ContactRow[];
@@ -64,6 +65,7 @@ async function fetchContactsWithMessages(orgId: string): Promise<Set<string>> {
       .from('messages')
       .select('contact_id, contacts!inner(org_id)')
       .eq('contacts.org_id', orgId)
+      .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     const rows = (data ?? []) as unknown as { contact_id: string }[];

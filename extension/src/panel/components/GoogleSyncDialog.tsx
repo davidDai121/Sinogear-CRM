@@ -53,6 +53,7 @@ export function GoogleSyncDialog({ orgId, onClose, onDone }: Props) {
           .from('contacts')
           .select('*')
           .eq('org_id', orgId)
+          .order('id', { ascending: true })
           .range(from, to),
       );
 

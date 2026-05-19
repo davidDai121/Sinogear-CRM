@@ -39,6 +39,7 @@ export async function bulkSyncWhatsAppChats(orgId: string): Promise<BulkSyncResu
         .from('contacts')
         .select('phone, group_jid')
         .eq('org_id', orgId)
+        .order('id', { ascending: true })
         .range(from, to),
     );
   } catch (err) {
