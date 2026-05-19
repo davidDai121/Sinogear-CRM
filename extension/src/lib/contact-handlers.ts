@@ -21,10 +21,13 @@ export async function fetchHandlersForOrg(
   const PAGE = 1000;
   const out: ContactHandlerRow[] = [];
   for (let from = 0; ; from += PAGE) {
+    // contact_handlers PK 是 (contact_id, user_id) 复合主键；用复合 order 稳定分页
     const { data, error } = await supabase
       .from('contact_handlers')
       .select('contact_id, user_id, last_seen_at, contacts!inner(org_id)')
       .eq('contacts.org_id', orgId)
+      .order('contact_id', { ascending: true })
+      .order('user_id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     const rows = data ?? [];

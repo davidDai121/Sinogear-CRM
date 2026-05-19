@@ -23,7 +23,10 @@ export function ChatPage({ orgId }: Props) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
   const [clearSignal, setClearSignal] = useState(0);
+  const [selectAllSignal, setSelectAllSignal] = useState(0);
   const autoAttributedRef = useRef(false);
+  // 记住"上次为哪个 chat 自动 fallback 过"，避免对同 chat 反复触发
+  const lastFallbackKeyRef = useRef<string | null>(null);
 
   // 自动归属：扩展加载时，把当前用户 WA 聊天里的所有联系人一次性登记到我名下
   // 这样老客户（created_by=null 没被 migration 回填的）也能被识别为"我的"
@@ -116,6 +119,25 @@ export function ChatPage({ orgId }: Props) {
 
   // 不自动关闭筛选 — 用户点 × 才关
 
+  // 自动 fallback：当 WA 切到一个不在当前筛选结果里的客户时，
+  // 自动清空筛选 + 选中"📋 所有客户"，确保左边列表能看到这个人。
+  // 用 ref 锁定：每个 chat 只触发一次 fallback，避免无限循环 + 不覆盖用户后续手动选择。
+  useEffect(() => {
+    if (filtered === null) return; // 当前没有筛选，啥都不用做
+    const key = chat.phone ?? chat.groupJid ?? null;
+    if (!key) return;
+    if (lastFallbackKeyRef.current === key) return;
+    const inFiltered = filtered.some(
+      (c) =>
+        (chat.phone != null && c.phone === chat.phone) ||
+        (chat.groupJid != null && c.contact?.group_jid === chat.groupJid),
+    );
+    if (!inFiltered) {
+      lastFallbackKeyRef.current = key;
+      setSelectAllSignal((n) => n + 1);
+    }
+  }, [chat.phone, chat.groupJid, filtered]);
+
   // 当前聊天对应的 CRM 客户（用于头部显示姓名）
   const currentCrmContact = chat.phone
     ? crm.contacts.find((c) => c.phone === chat.phone)
@@ -166,6 +188,7 @@ export function ChatPage({ orgId }: Props) {
           onRefresh={crm.refresh}
           onCollapse={() => toggleSidebar(true)}
           clearSignal={clearSignal}
+          selectAllSignal={selectAllSignal}
         />
       )}
       {sidebarCollapsed && (
@@ -186,6 +209,7 @@ export function ChatPage({ orgId }: Props) {
           activePhone={chat.phone}
           onClose={() => setClearSignal((n) => n + 1)}
           onAction={crm.refresh}
+          onSetPinned={crm.setPinned}
         />
       )}
 

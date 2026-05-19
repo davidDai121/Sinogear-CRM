@@ -12,6 +12,8 @@ import { TimelineSection } from './TimelineSection';
 import { MessagesHistorySection } from './MessagesHistorySection';
 import { AIReplyTab } from './AIReplyTab';
 import { LocalTimeBadge } from './LocalTimeBadge';
+import { AutoReplyStatus } from './AutoReplyStatus';
+import { AutoReplyToggle } from './AutoReplyToggle';
 
 type CardTab = 'profile' | 'ai';
 const TAB_KEY = 'contactCardTab';
@@ -130,6 +132,9 @@ export function ContactDetailDrawer({ contactId, orgId, onClose, onChanged }: Pr
             <div className="sgc-error">{error}</div>
           ) : contact ? (
             <>
+              <AutoReplyToggle contactId={contact.id} />
+              <AutoReplyStatus contactId={contact.id} />
+
               <div className="sgc-card-tabs">
                 <button
                   type="button"

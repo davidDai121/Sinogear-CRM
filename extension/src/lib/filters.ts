@@ -3,6 +3,7 @@ import type { CrmContact } from '@/panel/hooks/useCrmData';
 import { getBrandOverride } from './brand-overrides';
 
 export type TodoBucket =
+  | 'pinned'   // 用户手动置顶
   | 'all'
   | 'needs_reply'
   | 'negotiating'
@@ -165,6 +166,7 @@ export function isFilterEmpty(f: FilterState): boolean {
 }
 
 function matchTodoBucket(c: CrmContact, bucket: TodoBucket): boolean {
+  if (bucket === 'pinned') return c.pinned;
   if (bucket === 'all') return true;
   const cls = c.classification;
   if (!cls) return false;
@@ -267,6 +269,7 @@ export function applyFilter(
 
 export function todoCounts(contacts: CrmContact[]): Record<TodoBucket, number> {
   const counts: Record<TodoBucket, number> = {
+    pinned: 0,
     all: 0,
     needs_reply: 0,
     negotiating: 0,
@@ -279,6 +282,7 @@ export function todoCounts(contacts: CrmContact[]): Record<TodoBucket, number> {
   for (const c of contacts) {
     if (c.chat?.archive) continue;
     if (c.contact?.quality === 'spam') continue;
+    if (c.pinned) counts.pinned++;
     counts.all++;
     if (!c.classification) continue;
     if (c.classification.needsReply) counts.needs_reply++;

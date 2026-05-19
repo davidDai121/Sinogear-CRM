@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import {
@@ -14,6 +14,11 @@ import { updatePendingReplyMap } from '@/lib/pending-reply-store';
 import { countryToRegion } from '@/lib/regions';
 import { stringifyError } from '@/lib/errors';
 import { syncAutoStages } from '@/lib/stage-sync';
+import {
+  fetchMyPinnedIdsForOrg,
+  pinContact,
+  unpinContact,
+} from '@/lib/contact-pins';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type VehicleInterestRow = Database['public']['Tables']['vehicle_interests']['Row'];
@@ -45,6 +50,8 @@ export interface CrmContact {
   tags: string[];
   region: string;
   classification: ChatClassification | null;
+  /** 当前 user 是否置顶了这个客户（contact_pins 表） */
+  pinned: boolean;
 }
 
 export interface CrmData {
@@ -53,6 +60,11 @@ export interface CrmData {
   loading: boolean;
   error: string | null;
   refresh: () => void;
+  /**
+   * 乐观更新置顶：本地 state 立刻翻转 → DB 后台写。失败回滚 + 抛错。
+   * 这样右键置顶后 UI 不用等几秒重拉所有 contacts。
+   */
+  setPinned: (contactId: string, pinned: boolean) => Promise<void>;
 }
 
 function buildLabelAssocMap(
@@ -74,8 +86,10 @@ function buildLabelAssocMap(
 
 const POLL_INTERVAL_MS = 20000;
 
+type CrmState = Pick<CrmData, 'contacts' | 'labels' | 'loading' | 'error'>;
+
 export function useCrmData(orgId: string | null): CrmData {
-  const [state, setState] = useState<Omit<CrmData, 'refresh'>>({
+  const [state, setState] = useState<CrmState>({
     contacts: [],
     labels: [],
     loading: false,
@@ -97,7 +111,10 @@ export function useCrmData(orgId: string | null): CrmData {
       setState((s) => ({ ...s, loading: true, error: null }));
     }
 
-    // 突破 Supabase 1000 行默认上限：分页拉
+    // 突破 Supabase 1000 行默认上限：分页拉。
+    // 必须加 .order(...) — 否则 PostgREST 不保证 range 跨页稳定，并发写入
+    // 时同一行可能在 page N 和 page N+1 都返回，导致 contacts 数组重复
+    // （React duplicate key warning + UI 列表重复）。
     async function fetchAllContacts(): Promise<ContactRow[]> {
       const PAGE = 1000;
       const out: ContactRow[] = [];
@@ -106,6 +123,7 @@ export function useCrmData(orgId: string | null): CrmData {
           .from('contacts')
           .select('*')
           .eq('org_id', org)
+          .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw error;
         const rows = (data ?? []) as ContactRow[];
@@ -123,6 +141,7 @@ export function useCrmData(orgId: string | null): CrmData {
           .from('vehicle_interests')
           .select('*, contacts!inner(org_id)')
           .eq('contacts.org_id', org)
+          .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw error;
         const rows = (data ?? []) as unknown as VehicleInterestRow[];
@@ -136,10 +155,14 @@ export function useCrmData(orgId: string | null): CrmData {
       const PAGE = 1000;
       const out: ContactTagRow[] = [];
       for (let from = 0; ; from += PAGE) {
+        // contact_tags PK 是 (contact_id, tag) 复合主键，没单列 id；
+        // 用复合 order 保证完全稳定
         const { data, error } = await supabase
           .from('contact_tags')
           .select('*, contacts!inner(org_id)')
           .eq('contacts.org_id', org)
+          .order('contact_id', { ascending: true })
+          .order('tag', { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw error;
         const rows = (data ?? []) as unknown as ContactTagRow[];
@@ -155,16 +178,31 @@ export function useCrmData(orgId: string | null): CrmData {
      * 退回 unreadCount + pending 两路兜底。
      */
     async function fetchMessageDirections(): Promise<
-      Map<string, { lastInboundT: number | null; lastOutboundT: number | null }>
+      Map<
+        string,
+        {
+          lastInboundT: number | null;
+          lastOutboundT: number | null;
+          inboundCount: number;
+          outboundCount: number;
+        }
+      >
     > {
       const out = new Map<
         string,
-        { lastInboundT: number | null; lastOutboundT: number | null }
+        {
+          lastInboundT: number | null;
+          lastOutboundT: number | null;
+          inboundCount: number;
+          outboundCount: number;
+        }
       >();
       try {
-        // RPC 是 migration 0019 加的；TS 类型还没回填 database.types.ts，
-        // 用 unknown 中转避免硬编码 RPC 名进类型联合。运行时如果 RPC 不存在
-        // 会返回 PostgrestError，catch 走静默降级路径。
+        // RPC 是 migration 0019 加的，0022 扩展了返回 inbound_count/outbound_count；
+        // TS 类型还没回填 database.types.ts，用 unknown 中转避免硬编码 RPC 名进类型
+        // 联合。运行时如果 RPC 不存在（0019 没上）返回 PostgrestError，catch
+        // 走静默降级；旧版 RPC（有 0019 没 0022）count 字段 undefined，按 0 处理
+        //——不影响"我该回"判定，"有历史保护"暂不生效。
         const { data, error } = await (
           supabase.rpc as unknown as (
             fn: string,
@@ -176,6 +214,8 @@ export function useCrmData(orgId: string | null): CrmData {
           contact_id: string;
           last_inbound_t: string | null;
           last_outbound_t: string | null;
+          inbound_count?: number | null;
+          outbound_count?: number | null;
         }>;
         for (const r of rows) {
           out.set(r.contact_id, {
@@ -185,6 +225,8 @@ export function useCrmData(orgId: string | null): CrmData {
             lastOutboundT: r.last_outbound_t
               ? new Date(r.last_outbound_t).getTime() / 1000
               : null,
+            inboundCount: r.inbound_count ?? 0,
+            outboundCount: r.outbound_count ?? 0,
           });
         }
       } catch {
@@ -195,7 +237,7 @@ export function useCrmData(orgId: string | null): CrmData {
 
     void (async () => {
       try {
-        const [contacts, vehicles, tags, wa, jidPhoneCache, msgDirections] =
+        const [contacts, vehicles, tags, wa, jidPhoneCache, msgDirections, pinnedIds] =
           await Promise.all([
             fetchAllContacts(),
             fetchAllVehicleInterests(),
@@ -211,6 +253,14 @@ export function useCrmData(orgId: string | null): CrmData {
               () => ({}) as Record<string, string>,
             ),
             fetchMessageDirections(),
+            (async () => {
+              const { data: auth } = await supabase.auth.getUser();
+              const userId = auth.user?.id;
+              if (!userId) return new Set<string>();
+              return fetchMyPinnedIdsForOrg(org, userId).catch(
+                () => new Set<string>(),
+              );
+            })(),
           ]);
 
         const vehicleByContact = new Map<string, VehicleInterestRow[]>();
@@ -266,6 +316,8 @@ export function useCrmData(orgId: string | null): CrmData {
               {
                 lastInboundT: dir?.lastInboundT ?? null,
                 lastOutboundT: dir?.lastOutboundT ?? null,
+                inboundCount: dir?.inboundCount ?? 0,
+                outboundCount: dir?.outboundCount ?? 0,
               },
               now,
             );
@@ -280,6 +332,7 @@ export function useCrmData(orgId: string | null): CrmData {
               tags: tagsByContact.get(c.id) ?? [],
               region: countryToRegion(c.country),
               classification,
+              pinned: pinnedIds.has(c.id),
             };
           });
 
@@ -300,6 +353,7 @@ export function useCrmData(orgId: string | null): CrmData {
             vehicleInterests: [],
             tags: [],
             region: 'other',
+            pinned: false,
             classification: classifyChat(
               chat,
               { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
@@ -331,5 +385,39 @@ export function useCrmData(orgId: string | null): CrmData {
     };
   }, [orgId, nonce]);
 
-  return { ...state, refresh: () => setNonce((n) => n + 1) };
+  const setPinned = useCallback(
+    async (contactId: string, pinned: boolean): Promise<void> => {
+      // 1. 乐观更新：本地 state 立刻翻转
+      setState((s) => ({
+        ...s,
+        contacts: s.contacts.map((c) =>
+          c.contact?.id === contactId ? { ...c, pinned } : c,
+        ),
+      }));
+      // 2. 后台写 DB
+      try {
+        if (pinned) {
+          await pinContact(contactId);
+        } else {
+          await unpinContact(contactId);
+        }
+      } catch (err) {
+        // 3. 失败回滚
+        setState((s) => ({
+          ...s,
+          contacts: s.contacts.map((c) =>
+            c.contact?.id === contactId ? { ...c, pinned: !pinned } : c,
+          ),
+        }));
+        throw err;
+      }
+    },
+    [],
+  );
+
+  return {
+    ...state,
+    refresh: () => setNonce((n) => n + 1),
+    setPinned,
+  };
 }

@@ -3,6 +3,7 @@ import type { CrmContact } from '../hooks/useCrmData';
 import { todoCounts, type TodoBucket } from '@/lib/filters';
 
 const BUCKETS: { id: TodoBucket; icon: string; label: string }[] = [
+  { id: 'pinned', icon: '📌', label: '已置顶' },
   { id: 'all', icon: '📋', label: '所有客户' },
   { id: 'needs_reply', icon: '⚠️', label: '我该回' },
   { id: 'negotiating', icon: '🔥', label: '谈判中' },

@@ -112,3 +112,253 @@ export function pasteFilesToWhatsApp(files: File[]): boolean {
 
   return true;
 }
+
+/**
+ * 在 WA 图片预览模态里找 caption 输入框。pasteFilesToWhatsApp 之后约 500ms～几秒
+ * WA 才弹出预览，所以调用方要轮询调本函数等结果。
+ *
+ * 它**不是** footer 那个 compose 输入框（会被 findCompose 跳过）。
+ */
+function findPreviewCaption(): HTMLElement | null {
+  // 已知的 selector 路径（不同 WA 版本差异较大，多重 fallback）
+  const candidates = [
+    '[data-testid="media-caption-input-container"] [contenteditable="true"]',
+    'div[aria-label*="caption" i][contenteditable="true"]',
+    'div[aria-label*="标题" i][contenteditable="true"]',
+    'div[aria-label*="说明" i][contenteditable="true"]',
+    '[role="dialog"] [contenteditable="true"][role="textbox"]',
+    '[role="application"] [contenteditable="true"][role="textbox"]',
+  ];
+  for (const sel of candidates) {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (el?.isContentEditable && !el.closest('footer')) {
+      return el;
+    }
+  }
+  // 通用兜底：所有 contenteditable[role=textbox] 中排除 footer compose 后取第一个
+  const all = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      '[contenteditable="true"][role="textbox"]',
+    ),
+  );
+  for (const el of all) {
+    if (!el.isContentEditable) continue;
+    if (el.closest('footer')) continue; // skip compose
+    return el;
+  }
+  return null;
+}
+
+/**
+ * 在 WA 图片预览模态里找"发送"按钮（不是 footer compose 的）。
+ */
+function findPreviewSendButton(): HTMLElement | null {
+  const candidates = [
+    '[role="dialog"] button[aria-label*="发送" i]',
+    '[role="dialog"] button[aria-label*="Send" i]',
+    'div[role="application"] button[aria-label*="发送" i]',
+    'div[role="application"] button[aria-label*="Send" i]',
+  ];
+  for (const sel of candidates) {
+    const el = document.querySelector(sel) as HTMLButtonElement | null;
+    if (el && !el.disabled) return el;
+  }
+  // 通过 data-icon=send 反查包裹的 button，但排除 footer
+  const sendIcons = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      'span[data-icon="send"], [data-icon="send"], [data-icon="wds-ic-send-filled"]',
+    ),
+  );
+  for (const icon of sendIcons) {
+    if (icon.closest('footer')) continue;
+    const btn = icon.closest('button');
+    if (btn instanceof HTMLButtonElement && !btn.disabled) return btn;
+  }
+  return null;
+}
+
+/**
+ * 不填 caption，直接等 WA 图片预览框弹出来 + 点击预览的发送键。
+ *
+ * 比 fillPreviewCaptionAndSend 稳定得多——它只依赖一个 selector（预览发送键），
+ * 不依赖最容易漂的 caption 输入框 selector。
+ *
+ * @returns true = 图片预览的发送键已点击；false = 超时找不到发送键
+ */
+export async function sendPastedImagesNoCaption(
+  timeoutMs = 10000,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const btn = findPreviewSendButton();
+    if (btn) {
+      btn.click();
+      return true;
+    }
+    await sleep(400);
+  }
+  return false;
+}
+
+/**
+ * 按 Esc 关掉 WA 当前打开的模态（图片预览 / lightbox 等）。
+ * 在 paste 图但 preview 卡死时用来回到 compose 输入框。
+ */
+export function pressEscapeToClosePreview(): void {
+  document.body.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
+/**
+ * 等 WA 图片预览模态出现（用预览发送键的存在与否判定）。
+ */
+export async function waitForPreviewReady(
+  timeoutMs = 6000,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (findPreviewSendButton()) return true;
+    await sleep(300);
+  }
+  return false;
+}
+
+/**
+ * 等 WA 图片预览模态关闭（footer compose 重新出现 + 预览发送键消失）。
+ */
+export async function waitForPreviewClosed(timeoutMs = 8000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const previewBtn = findPreviewSendButton();
+    const compose = findCompose();
+    if (!previewBtn && compose) return true;
+    await sleep(300);
+  }
+  return false;
+}
+
+/**
+ * 等 WA 图片预览框弹出来，把 caption 文字填进去，再点预览的发送按钮。
+ *
+ * ⚠️ 不再推荐用：caption 输入框 selector 在不同 WA 版本里不稳。
+ * 现在 orchestrator 默认走 sendPastedImagesNoCaption + 单独发文字消息两步路径。
+ *
+ * @returns true = caption 已填且发送已点击；false = 找不到预览或发送键
+ */
+export async function fillPreviewCaptionAndSend(
+  caption: string,
+  timeoutMs = 8000,
+): Promise<boolean> {
+  // 1. 等 caption 输入框出现
+  const start = Date.now();
+  let captionInput: HTMLElement | null = null;
+  while (Date.now() - start < timeoutMs) {
+    captionInput = findPreviewCaption();
+    if (captionInput) break;
+    await sleep(300);
+  }
+  if (!captionInput) return false;
+
+  // 2. 填 caption（paste 优先 + execCommand 兜底，跟 fillWhatsAppCompose 同思路）
+  captionInput.focus();
+  let pasteOk = false;
+  try {
+    const before = captionInput.textContent?.length ?? 0;
+    const dt = new DataTransfer();
+    dt.setData('text/plain', caption);
+    const pasteEvent = new ClipboardEvent('paste', {
+      clipboardData: dt,
+      bubbles: true,
+      cancelable: true,
+    });
+    captionInput.dispatchEvent(pasteEvent);
+    const after = captionInput.textContent?.length ?? 0;
+    pasteOk = pasteEvent.defaultPrevented || after > before;
+  } catch {
+    pasteOk = false;
+  }
+  if (!pasteOk) {
+    try {
+      const lines = caption.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) document.execCommand('insertLineBreak');
+        if (lines[i]) document.execCommand('insertText', false, lines[i]);
+      }
+    } catch {
+      try {
+        document.execCommand('insertText', false, caption);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  captionInput.dispatchEvent(
+    new InputEvent('input', { bubbles: true, cancelable: true }),
+  );
+
+  // 3. 给 WA 一拍把发送按钮 enable
+  await sleep(600);
+
+  // 4. 找发送键 + 点击（重试几次，因为 WA 可能稍后才 enable）
+  for (let i = 0; i < 10; i++) {
+    const sendBtn = findPreviewSendButton();
+    if (sendBtn) {
+      sendBtn.click();
+      return true;
+    }
+    await sleep(400);
+  }
+  return false;
+}
+
+/**
+ * 在 footer compose 区域找发送按钮 + 点击。
+ * 调用方应该先 fillWhatsAppCompose 让 React 把发送按钮 enable 起来。
+ *
+ * @returns true = 点了发送键；false = 找不到
+ */
+export async function sendCurrentCompose(): Promise<boolean> {
+  // 等 React state 同步 + 发送键 enable
+  for (let i = 0; i < 10; i++) {
+    const btn = findComposeSendButton();
+    if (btn) {
+      btn.click();
+      return true;
+    }
+    await sleep(400);
+  }
+  return false;
+}
+
+function findComposeSendButton(): HTMLButtonElement | null {
+  const direct = [
+    'footer button[aria-label*="发送" i]',
+    'footer button[aria-label*="Send" i]',
+    'footer [data-testid="compose-btn-send"]',
+  ];
+  for (const sel of direct) {
+    const el = document.querySelector(sel) as HTMLButtonElement | null;
+    if (el && !el.disabled) return el;
+  }
+  // 通过 send icon 反查
+  const icons = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      'footer [data-icon="send"], footer [data-icon="send-light"], footer [data-icon="wds-ic-send-filled"]',
+    ),
+  );
+  for (const icon of icons) {
+    const btn = icon.closest('button');
+    if (btn instanceof HTMLButtonElement && !btn.disabled) return btn;
+  }
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}

@@ -12,6 +12,8 @@ interface Props {
   activePhone?: string | null;
   onClose: () => void;
   onAction: () => void;
+  /** 乐观置顶/取消置顶（useCrmData.setPinned） */
+  onSetPinned: (contactId: string, pinned: boolean) => Promise<void>;
 }
 
 function relativeTime(ts: number): string {
@@ -37,17 +39,55 @@ export function FilteredChatList({
   activePhone,
   onClose,
   onAction,
+  onSetPinned,
 }: Props) {
   const { handlersByContact, membersById, myUserId } = useScope();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [menu, setMenu] = useState<
+    | { x: number; y: number; contact: CrmContact }
+    | null
+  >(null);
   const activeRowRef = useRef<HTMLDivElement | null>(null);
 
+  // 置顶的永远排最前；置顶之间按最近活跃排；其他按最近活跃排
   const sorted = [...contacts].sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
     const ta = a.chat?.t ?? 0;
     const tb = b.chat?.t ?? 0;
     return tb - ta;
   });
+
+  // 关闭 context menu：点击别处 / Escape
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenu(null);
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('contextmenu', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('contextmenu', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [menu]);
+
+  const togglePin = (c: CrmContact) => {
+    if (!c.contact) {
+      setError('该客户还没有创建数据库记录，先打开聊天一次再置顶');
+      setMenu(null);
+      return;
+    }
+    // 乐观更新：菜单立刻收起 + 本地 state 立刻翻转；DB 写在后台
+    setMenu(null);
+    setError(null);
+    onSetPinned(c.contact.id, !c.pinned).catch((err) => {
+      setError(stringifyError(err));
+    });
+  };
 
   // 切到新聊天时如果选中行不在视野内，平滑滚到可见
   useEffect(() => {
@@ -135,7 +175,12 @@ export function FilteredChatList({
             <div
               key={id}
               ref={isActive ? activeRowRef : undefined}
-              className={`sgc-filtered-row ${isActive ? 'sgc-filtered-row-active' : ''}`}
+              className={`sgc-filtered-row ${isActive ? 'sgc-filtered-row-active' : ''} ${c.pinned ? 'sgc-filtered-row-pinned' : ''}`}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setMenu({ x: e.clientX, y: e.clientY, contact: c });
+              }}
             >
               <button
                 className="sgc-filtered-row-clickable"
@@ -144,6 +189,14 @@ export function FilteredChatList({
               >
                 <div className="sgc-filtered-row-main">
                   <div className="sgc-filtered-row-top">
+                    {c.pinned && (
+                      <span
+                        className="sgc-filtered-row-pin"
+                        title="已置顶（右键取消）"
+                      >
+                        📌
+                      </span>
+                    )}
                     <span className="sgc-filtered-row-name">
                       {c.displayName}
                     </span>
@@ -221,6 +274,21 @@ export function FilteredChatList({
           );
         })}
       </div>
+      {menu && (
+        <div
+          className="sgc-context-menu"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="sgc-context-menu-item"
+            onClick={() => void togglePin(menu.contact)}
+            disabled={busyId === menu.contact.contact?.id}
+          >
+            {menu.contact.pinned ? '📌 取消置顶' : '📌 置顶客户'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

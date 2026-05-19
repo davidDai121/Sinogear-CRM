@@ -12,6 +12,8 @@ import { ContactTasksSection } from './ContactTasksSection';
 import { TimelineSection } from './TimelineSection';
 import { MessagesHistorySection } from './MessagesHistorySection';
 import { AIReplyTab } from './AIReplyTab';
+import { AutoReplyStatus } from './AutoReplyStatus';
+import { AutoReplyToggle } from './AutoReplyToggle';
 
 const HAS_QWEN_KEY = Boolean(import.meta.env.VITE_DASHSCOPE_API_KEY);
 
@@ -71,6 +73,9 @@ export function ContactCard({ chat, orgId }: Props) {
 
   return (
     <div className="sgc-card sgc-card-full">
+      <AutoReplyToggle contactId={contact.id} />
+      <AutoReplyStatus contactId={contact.id} />
+
       <div className="sgc-card-tabs">
         <button
           type="button"

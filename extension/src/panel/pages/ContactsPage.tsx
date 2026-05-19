@@ -200,8 +200,11 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
                   key={c.id}
                   onClick={() => {
                     setOpenId(c.id);
+                    // 行点击的主要意图是"看资料"——打开 drawer。**不开 deep-link**：
+                    // 否则不在 WA Web 缓存的客户每点一次就触发整个页面 reload，
+                    // 用户浏览列表的体验完全垮掉。要明确进 chat 用 💬 按钮。
                     const query = c.phone ? c.phone.replace(/^\+/, '') : (c.name ?? c.wa_name ?? '');
-                    if (query) void jumpToChat(query, { allowDeepLink: true });
+                    if (query) void jumpToChat(query);
                   }}
                 >
                   <td>

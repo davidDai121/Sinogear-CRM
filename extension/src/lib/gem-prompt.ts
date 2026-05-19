@@ -200,8 +200,12 @@ function isMediaOnly(text: string): boolean {
 }
 
 /**
- * 合并连续的媒体消息：同一发送方连续 N 条纯附件 → 1 行 `<sent N media items>`，
- * 给 Gem 让出空间给真正的对话内容。单条媒体也会缩成 `<sent 1 media item>` 简化。
+ * 合并连续的媒体消息：同一发送方连续 N 条纯附件 → 1 行 `[图片]` / `[图片 × N]`，
+ * 给 Gem 让出空间给真正的对话内容。
+ *
+ * 历史上用过 `<sent N media items>`，但 Gem 偶尔不当回事（"我要不要发图？" 这类
+ * 输出）。改成更明确的 `[图片]` Gem 识别率明显高。"图片"是泛指的占位语义，
+ * 涵盖图/视频/PDF/配置表（DOM 上区分不开附件 mime）。
  */
 function collapseMediaRuns(messages: ChatMessage[]): ChatMessage[] {
   const result: ChatMessage[] = [];
@@ -215,10 +219,7 @@ function collapseMediaRuns(messages: ChatMessage[]): ChatMessage[] {
     result.push({
       id: first.id + (n > 1 ? `:+${n - 1}` : ''),
       fromMe: first.fromMe,
-      text:
-        n === 1
-          ? '<sent 1 media item>'
-          : `<sent ${n} media items in a row>`,
+      text: n === 1 ? '[图片]' : `[图片 × ${n}]`,
       timestamp: last.timestamp ?? first.timestamp,
       sender: first.sender,
     });

@@ -89,8 +89,24 @@ function readNameFromHeader(scope: ParentNode): string | null {
   const title = titled?.getAttribute('title')?.trim();
   if (title) return title;
 
-  const span = header.querySelector('span[dir="auto"]') as HTMLElement | null;
-  return span?.textContent?.trim() || null;
+  // 2026-05+ 新版 WA Web：header 内既无 testid 也无 span[title]，
+  // 名字直接放在被 Facebook 混淆 class 包裹的 <span> 里。
+  // 取第一个非 SVG 内的、有直接 textNode 子节点的 span（长度上限防误抓状态行）。
+  const spans = header.querySelectorAll('span');
+  for (const span of spans) {
+    if (span.closest('svg')) continue;
+    let direct = '';
+    for (const node of span.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        direct += (node as Text).nodeValue ?? '';
+      }
+    }
+    direct = direct.trim();
+    if (direct && direct.length <= 80) return direct;
+  }
+
+  const dirAuto = header.querySelector('span[dir="auto"]') as HTMLElement | null;
+  return dirAuto?.textContent?.trim() || null;
 }
 
 function extractPhoneFromText(text: string): string | null {

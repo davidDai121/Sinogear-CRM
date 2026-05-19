@@ -7,6 +7,7 @@ import {
 } from './whatsapp-dom';
 import { initAutoTranslate } from './auto-translate';
 import { initChatMediaCapture } from './chat-media-capture';
+import { initAutoReply } from './auto-reply';
 import '@/panel/styles.css';
 
 const HOST_ID = 'sgc-extension-host';
@@ -37,6 +38,7 @@ function mount() {
 
   initAutoTranslate();
   initChatMediaCapture();
+  initAutoReply();
 }
 
 if (document.readyState === 'loading') {

@@ -13,6 +13,8 @@ import type {
   ExtractTasksRequest,
 } from '@/lib/field-suggestions';
 import { runGem, isBusy as isGemBusy } from '@/lib/gem-automation';
+import { runClaude, isBusy as isClaudeBusy } from '@/lib/claude-automation';
+import { alarmKey, parseAlarmKey } from '@/lib/auto-reply-state';
 
 const AI_BASE_URL =
   import.meta.env.VITE_AI_BASE_URL ??
@@ -97,6 +99,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return false;
   }
 
+  if (msg?.type === 'CLAUDE_RUN') {
+    handleClaudeRun(msg as ClaudeRunRequest)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
+    return true;
+  }
+
+  if (msg?.type === 'CLAUDE_BUSY') {
+    sendResponse({ ok: true, busy: isClaudeBusy() });
+    return false;
+  }
+
   if (msg?.type === 'BULK_CAPTURE_ARM') {
     const tabId = _sender.tab?.id;
     if (typeof tabId === 'number') {
@@ -121,8 +135,109 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return false;
   }
 
+  if (msg?.type === 'SCHEDULE_AUTO_REPLY') {
+    handleScheduleAutoReply(msg as ScheduleAutoReplyRequest)
+      .then((res) => sendResponse(res))
+      .catch((err) =>
+        sendResponse({ ok: false, error: String(err?.message ?? err) }),
+      );
+    return true;
+  }
+
+  if (msg?.type === 'CANCEL_AUTO_REPLY') {
+    handleCancelAutoReply(msg as CancelAutoReplyRequest)
+      .then((res) => sendResponse(res))
+      .catch((err) =>
+        sendResponse({ ok: false, error: String(err?.message ?? err) }),
+      );
+    return true;
+  }
+
+  if (msg?.type === 'CLEAR_ALL_AUTO_REPLY') {
+    handleClearAllAutoReply()
+      .then((res) => sendResponse(res))
+      .catch((err) =>
+        sendResponse({ ok: false, error: String(err?.message ?? err) }),
+      );
+    return true;
+  }
+
   return false;
 });
+
+// ── 自动回复闹钟 ──
+// React 排队时调 SCHEDULE_AUTO_REPLY；SW 注册 chrome.alarm（SW 休眠也能唤醒），
+// 到点找 web.whatsapp.com 标签页发 AUTO_REPLY_FIRE。content/auto-reply.ts 接管。
+
+interface ScheduleAutoReplyRequest {
+  type: 'SCHEDULE_AUTO_REPLY';
+  contactId: string;
+  /** ms epoch — 到点时刻；过去时间立即触发 */
+  fireAt: number;
+}
+
+interface CancelAutoReplyRequest {
+  type: 'CANCEL_AUTO_REPLY';
+  contactId: string;
+}
+
+async function handleScheduleAutoReply(req: ScheduleAutoReplyRequest) {
+  if (!req.contactId) return { ok: false, error: '缺少 contactId' };
+  if (!req.fireAt) return { ok: false, error: '缺少 fireAt' };
+  const name = alarmKey(req.contactId);
+  // chrome.alarms.create when 必须 ≥ now+1s；过期就给 now+1s 立即触发
+  const when = Math.max(req.fireAt, Date.now() + 1000);
+  await chrome.alarms.create(name, { when });
+  return { ok: true, scheduledAt: when };
+}
+
+async function handleCancelAutoReply(req: CancelAutoReplyRequest) {
+  if (!req.contactId) return { ok: false, error: '缺少 contactId' };
+  await chrome.alarms.clear(alarmKey(req.contactId));
+  return { ok: true };
+}
+
+async function handleClearAllAutoReply() {
+  const all = await chrome.alarms.getAll();
+  let cleared = 0;
+  for (const a of all) {
+    if (parseAlarmKey(a.name)) {
+      await chrome.alarms.clear(a.name);
+      cleared++;
+    }
+  }
+  return { ok: true, cleared };
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  const contactId = parseAlarmKey(alarm.name);
+  if (!contactId) return;
+  void fireAutoReply(contactId);
+});
+
+async function fireAutoReply(contactId: string): Promise<void> {
+  // 找当前打开的 WA Web 标签页，把执行权交给 content script
+  const tabs = await chrome.tabs.query({
+    url: ['https://web.whatsapp.com/*', 'https://*.whatsapp.com/*'],
+  });
+  // 优先选 active 的；都不 active 取第一个
+  const activeFirst = tabs.find((t) => t.active) ?? tabs[0];
+  if (!activeFirst?.id) {
+    console.warn(
+      '[sgc/sw] auto-reply 触发但没找到 WhatsApp Web 标签页 — 用户可能关了',
+      contactId,
+    );
+    return;
+  }
+  try {
+    await chrome.tabs.sendMessage(activeFirst.id, {
+      type: 'AUTO_REPLY_FIRE',
+      contactId,
+    });
+  } catch (err) {
+    console.warn('[sgc/sw] AUTO_REPLY_FIRE 投递失败', contactId, err);
+  }
+}
 
 // ---- 媒体批量抓取：拦截 WA 触发的 chrome.downloads ----
 // 用户点扩展的"📥 加入车源"工具栏按钮 →
@@ -198,6 +313,34 @@ async function handleGemRun(req: GemRunRequest) {
       responseText: result.responseText,
       chatUrl: result.chatUrl,
       modelSelected: result.modelSelected,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err as Error)?.message ?? err) };
+  }
+}
+
+interface ClaudeRunRequest {
+  type: 'CLAUDE_RUN';
+  url: string;
+  prompt: string;
+  active?: boolean;
+  responseTimeoutMs?: number;
+}
+
+async function handleClaudeRun(req: ClaudeRunRequest) {
+  if (!req.url) return { ok: false, error: '缺少 Claude URL' };
+  if (!req.prompt) return { ok: false, error: '缺少 prompt' };
+  try {
+    const result = await runClaude({
+      url: req.url,
+      prompt: req.prompt,
+      active: req.active,
+      responseTimeoutMs: req.responseTimeoutMs,
+    });
+    return {
+      ok: true,
+      responseText: result.responseText,
+      chatUrl: result.chatUrl,
     };
   } catch (err) {
     return { ok: false, error: String((err as Error)?.message ?? err) };

@@ -32,6 +32,11 @@ interface Props {
   onRefresh: () => void;
   onCollapse?: () => void;
   clearSignal?: number;
+  /**
+   * 触发自动 fallback：清空所有筛选 + 选中"📋 所有客户" bucket。
+   * 给 ChatPage 用——当 WA 切到一个不在当前 bucket 里的客户时让他可见。
+   */
+  selectAllSignal?: number;
 }
 
 const QUALITIES: { id: CustomerQuality; label: string; icon: string }[] = [
@@ -62,6 +67,7 @@ export function FilterSidebar({
   onRefresh,
   onCollapse,
   clearSignal,
+  selectAllSignal,
 }: Props) {
   const [filter, setFilter] = useState<FilterState>(emptyFilter);
   const [filterLoaded, setFilterLoaded] = useState(false);
@@ -94,6 +100,13 @@ export function FilterSidebar({
       setFilter(emptyFilter());
     }
   }, [clearSignal]);
+
+  // 外部触发"跳转到所有客户"——清掉其他维度的筛选 + 选中"📋 所有客户" bucket
+  useEffect(() => {
+    if (selectAllSignal && selectAllSignal > 0) {
+      setFilter({ ...emptyFilter(), todoBucket: 'all' });
+    }
+  }, [selectAllSignal]);
 
   useEffect(() => {
     void loadBrandOverrides().then(() => setOverrideNonce((n) => n + 1));

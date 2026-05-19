@@ -24,17 +24,31 @@ export interface PendingReplyState {
 }
 
 /**
- * 来自 Supabase messages 表的方向信号（migration 0019 的 RPC 提供）。
- * 用来回填"老聊天点开过但没回"——pending 追踪只能 forward-fill 新发生的；
- * 老 case 靠 useMessageSync 已经同步好的消息表反推：
- *   lastInbound > lastOutbound = 客户最后发的没回 = 我该回。
+ * 来自 Supabase messages 表的方向信号（migration 0019 的 RPC 提供，0022 加了 count）。
+ * 用途：
+ *   1. 回填"老聊天点开过但没回"——pending 追踪只能 forward-fill 新发生的；
+ *      老 case 靠 useMessageSync 已经同步好的消息表反推：
+ *      lastInbound > lastOutbound = 客户最后发的没回 = 我该回。
+ *   2. "有历史保护"：当客户在 messages 表里有实质双向历史（双方各 ≥ 5 条）
+ *      时，即使 WA chat.t 跨过 7 天的 lost 阈值，autoStage 也不允许是 lost，
+ *      最多降到 stalled。防止"以前聊得火热、最近沉默"的客户被 stage-sync
+ *      反复改回 lost 覆盖手工 negotiating 标记。
  */
 export interface MessageDirectionState {
   /** unix 秒；该 contact 最后一条 inbound 消息的时间。null = 无 inbound 记录 */
   lastInboundT: number | null;
   /** unix 秒；该 contact 最后一条 outbound 消息的时间。null = 无 outbound 记录 */
   lastOutboundT: number | null;
+  /** 该 contact 在 messages 表里的 inbound 总条数。0/undefined = 没有 RPC 数据 */
+  inboundCount?: number;
+  /** 该 contact 在 messages 表里的 outbound 总条数 */
+  outboundCount?: number;
 }
+
+/** "有历史保护"门槛：双方各至少多少条消息才算"有实质历史"，禁止自动降 lost */
+const HISTORY_PROTECT_MIN = 5;
+/** 60 天内有任一方向消息 → 算"还活着"，保护生效；超过这个就让它自然 lost */
+const HISTORY_PROTECT_RECENT_SEC = 60 * DAY_SEC;
 
 export function classifyChat(
   chat: WAChat,
@@ -56,6 +70,28 @@ export function classifyChat(
     autoStage = 'new';
   } else {
     autoStage = 'active';
+  }
+
+  // "有历史保护"：客户在 messages 表里有实质双向历史时，不允许自动降到
+  // lost——chat-classifier 仅看 WA chat.t（最近一条消息时间），但
+  // chat.t 一过 7 天就标 lost，会把"以前聊得很好但最近 sleep"的客户
+  // 持续覆盖手工标的 negotiating（2026-05-19 Aca/DON/Grant Wang 案例：
+  // 销售刚把它们改成 negotiating，5 秒后 stage-sync 又改回 lost）。
+  // 规则：双方各 ≥ 5 条历史 + 最近一条 messages 在 60 天内 → 降级到
+  // stalled 而非 lost。彻底没动静（> 60 天）让它自然 lost。
+  if (autoStage === 'lost') {
+    const inCount = msgDir.inboundCount ?? 0;
+    const outCount = msgDir.outboundCount ?? 0;
+    if (inCount >= HISTORY_PROTECT_MIN && outCount >= HISTORY_PROTECT_MIN) {
+      const lastAnyT = Math.max(
+        msgDir.lastInboundT ?? 0,
+        msgDir.lastOutboundT ?? 0,
+      );
+      const ageSinceAnyMsg = lastAnyT > 0 ? now - lastAnyT : Number.MAX_SAFE_INTEGER;
+      if (ageSinceAnyMsg <= HISTORY_PROTECT_RECENT_SEC) {
+        autoStage = 'stalled';
+      }
+    }
   }
 
   // needsReply 三信号（任一即"我该回"）：

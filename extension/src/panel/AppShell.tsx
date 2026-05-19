@@ -13,6 +13,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { MediaStagingTray } from './components/MediaStagingTray';
 import { ScopeProvider } from './contexts/ScopeContext';
 import { VersionGate } from './components/VersionGate';
+import { useLeadDetector } from './hooks/useLeadDetector';
 
 export function AppShell() {
   return (
@@ -26,6 +27,10 @@ function AppShellInner() {
   const { session, user, loading: authLoading } = useAuth();
   const org = useOrg(user?.id ?? null);
   const [tab, setTab] = useState<TabKey>('chat');
+
+  // 全局监听 WA 当前聊天，发现 lead 表单消息自动排 3 分钟队
+  // （hook 内部会判断 orgId 存在 + 客户已写入 DB + 没排过队）
+  useLeadDetector(org.orgId);
 
   useEffect(() => {
     // sgc-side-panel-visible 由 ChatPage 自己管（含折叠状态），AppShell 只管覆盖层

@@ -115,6 +115,7 @@ export function ScopeProvider({
             .from('contacts')
             .select('id')
             .eq('org_id', orgId)
+            .order('id', { ascending: true })
             .range(from, from + PAGE - 1);
           if (error || cancelled) return;
           const rows = data ?? [];

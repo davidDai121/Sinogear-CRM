@@ -25,10 +25,11 @@
       "run_at": "document_idle"
     }
   ],
-  "permissions": ["storage", "tabs", "identity", "scripting", "downloads"],
+  "permissions": ["storage", "tabs", "identity", "scripting", "downloads", "alarms"],
   "host_permissions": [
     "https://web.whatsapp.com/*",
     "https://gemini.google.com/*",
+    "https://claude.ai/*",
     "https://*.supabase.co/*",
     "https://dashscope.aliyuncs.com/*",
     "https://translate.googleapis.com/*",

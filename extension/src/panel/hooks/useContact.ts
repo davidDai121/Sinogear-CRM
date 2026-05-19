@@ -25,8 +25,8 @@ export function useContact(
   });
 
   useEffect(() => {
-    // 必须至少有 phone（个人）或 groupJid（群聊）之一
-    if (!orgId || (!phone && !groupJid)) {
+    // 必须至少有 phone（个人）/ groupJid（群聊）/ waName（fallback）之一
+    if (!orgId || (!phone && !groupJid && !waName)) {
       setState({ contact: null, loading: false, error: null });
       return;
     }
@@ -34,23 +34,57 @@ export function useContact(
     let cancelled = false;
     setState((s) => ({ ...s, loading: true, error: null }));
 
-    const lookupCol: 'phone' | 'group_jid' = groupJid ? 'group_jid' : 'phone';
-    const lookupVal = groupJid ?? phone!;
-
     (async () => {
       try {
-        const existing = await supabase
-          .from('contacts')
-          .select('*')
-          .eq('org_id', orgId)
-          .eq(lookupCol, lookupVal)
-          .maybeSingle();
+        // 优先级 1: groupJid（群聊）
+        // 优先级 2: phone（标准路径）
+        // 优先级 3: waName（fallback — WA Web 新版有时 IDB 没缓存 phone 但 header 有名字）
+        let existingData: ContactRow | null = null;
 
-        if (existing.error) throw existing.error;
+        if (groupJid) {
+          const res = await supabase
+            .from('contacts')
+            .select('*')
+            .eq('org_id', orgId)
+            .eq('group_jid', groupJid)
+            .maybeSingle();
+          if (res.error) throw res.error;
+          existingData = res.data ?? null;
+        } else if (phone) {
+          const res = await supabase
+            .from('contacts')
+            .select('*')
+            .eq('org_id', orgId)
+            .eq('phone', phone)
+            .maybeSingle();
+          if (res.error) throw res.error;
+          existingData = res.data ?? null;
+        } else if (waName) {
+          // WA IDB 缓存里没有这个聊天的 phone 映射，按显示名查 Supabase。
+          // 重名场景下取 ≥2 行就放弃（避免错配到同名的别人）。
+          const res = await supabase
+            .from('contacts')
+            .select('*')
+            .eq('org_id', orgId)
+            .eq('wa_name', waName)
+            .limit(2);
+          if (res.error) throw res.error;
+          if (res.data && res.data.length === 1) {
+            existingData = res.data[0];
+          }
+        }
 
-        if (existing.data) {
+        if (existingData) {
           if (!cancelled) {
-            setState({ contact: existing.data, loading: false, error: null });
+            setState({ contact: existingData, loading: false, error: null });
+          }
+          return;
+        }
+
+        // 没找到 → 只在有 phone 或 groupJid 时新建（DB constraint 不允许两者都 null）
+        if (!phone && !groupJid) {
+          if (!cancelled) {
+            setState({ contact: null, loading: false, error: null });
           }
           return;
         }
@@ -74,12 +108,14 @@ export function useContact(
           // creating the same (org_id, phone) or (org_id, group_jid). Re-fetch.
           const code = (inserted.error as { code?: string }).code;
           if (code === '23505') {
-            const refetched = await supabase
+            const refetchQuery = supabase
               .from('contacts')
               .select('*')
-              .eq('org_id', orgId)
-              .eq(lookupCol, lookupVal)
-              .single();
+              .eq('org_id', orgId);
+            const refetched = await (groupJid
+              ? refetchQuery.eq('group_jid', groupJid)
+              : refetchQuery.eq('phone', phone!)
+            ).single();
             if (refetched.error) throw refetched.error;
             if (!cancelled) {
               setState({

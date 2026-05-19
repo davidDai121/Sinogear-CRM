@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { manualRetranslate } from '@/content/auto-translate';
 import { GemTemplatesModal } from './GemTemplatesModal';
+import { AIReplyLogModal } from './AIReplyLogModal';
 import { TeamMembersModal } from './TeamMembersModal';
 import { ScopePicker } from './ScopePicker';
 import { DomHealthBadge } from './DomHealthBadge';
@@ -72,6 +73,7 @@ export function TopNav({
   const translate = useAutoTranslateToggle();
   const scope = useScope();
   const [showGemTemplates, setShowGemTemplates] = useState(false);
+  const [showAiLog, setShowAiLog] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
   const [allCount, setAllCount] = useState<number | undefined>();
 
@@ -151,6 +153,14 @@ export function TopNav({
         <button
           type="button"
           className="sgc-topnav-toggle"
+          onClick={() => setShowAiLog(true)}
+          title="查看每次 AI 调用的完整 prompt + 响应（Claude / Gem / 自动回复）。可一键复制为 markdown 给 Claude review 质量。"
+        >
+          📊 AI 日志
+        </button>
+        <button
+          type="button"
+          className="sgc-topnav-toggle"
           onClick={() => setShowTeam(true)}
           title="管理团队成员（邀请同事 / 改角色 / 移除）"
         >
@@ -168,6 +178,10 @@ export function TopNav({
           orgId={orgId}
           onClose={() => setShowGemTemplates(false)}
         />
+      )}
+
+      {showAiLog && (
+        <AIReplyLogModal orgId={orgId} onClose={() => setShowAiLog(false)} />
       )}
 
       {showTeam && (

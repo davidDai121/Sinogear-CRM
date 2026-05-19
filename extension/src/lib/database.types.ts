@@ -402,6 +402,24 @@ export interface Database {
         };
         Relationships: [];
       };
+      claude_conversations: {
+        Row: {
+          contact_id: string;
+          chat_url: string;
+          last_used_at: string;
+          created_at: string;
+        };
+        Insert: {
+          contact_id: string;
+          chat_url: string;
+          last_used_at?: string;
+        };
+        Update: {
+          chat_url?: string;
+          last_used_at?: string;
+        };
+        Relationships: [];
+      };
       messages: {
         Row: {
           id: string;
@@ -440,6 +458,25 @@ export interface Database {
         };
         Update: {
           last_seen_at?: string;
+        };
+        Relationships: [];
+      };
+      contact_pins: {
+        Row: {
+          contact_id: string;
+          user_id: string;
+          pinned_at: string;
+          note: string | null;
+        };
+        Insert: {
+          contact_id: string;
+          user_id: string;
+          pinned_at?: string;
+          note?: string | null;
+        };
+        Update: {
+          pinned_at?: string;
+          note?: string | null;
         };
         Relationships: [];
       };

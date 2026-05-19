@@ -16,6 +16,7 @@ import {
   type RepairResult,
 } from '@/lib/repair-extraction';
 import { stringifyError } from '@/lib/errors';
+import { clearAllStates as clearAllAutoReplyStates } from '@/lib/auto-reply-state';
 import { ContactVitalityModal } from './ContactVitalityModal';
 
 const HAS_QWEN_KEY = Boolean(import.meta.env.VITE_DASHSCOPE_API_KEY);
@@ -64,6 +65,8 @@ export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
   const [repairRunning, setRepairRunning] = useState(false);
   const [repairResult, setRepairResult] = useState<RepairResult | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
+
+  const [autoReplyResetMsg, setAutoReplyResetMsg] = useState<string | null>(null);
 
   const stopRef = useRef(false);
 
@@ -328,6 +331,34 @@ export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
       >
         🩺 客户活性体检
       </button>
+
+      <button
+        className="sgc-btn-secondary sgc-filter-sync-btn"
+        onClick={async () => {
+          if (
+            !window.confirm(
+              '清掉所有自动回复 state（含倒计时 / 进行中 / 已完成 / 错误）。\n\n下次客户进 lead 或回新消息时会重新排队。\n\n继续吗？',
+            )
+          )
+            return;
+          setAutoReplyResetMsg(null);
+          try {
+            const { cleared } = await clearAllAutoReplyStates();
+            setAutoReplyResetMsg(
+              cleared === 0
+                ? '✓ 没有 state 需要清理'
+                : `✓ 已清除 ${cleared} 个自动回复 state`,
+            );
+          } catch (err) {
+            setAutoReplyResetMsg(`❌ ${stringifyError(err)}`);
+          }
+        }}
+      >
+        🔁 重置自动回复 state
+      </button>
+      {autoReplyResetMsg && (
+        <div className="sgc-filter-sync-result">{autoReplyResetMsg}</div>
+      )}
       </>}
 
       {vitalityOpen && (

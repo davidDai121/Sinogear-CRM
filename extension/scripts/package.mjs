@@ -13,7 +13,7 @@
 // 没有就跳过（只打 zip + 提示手动跑 SQL）。
 
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
@@ -36,7 +36,15 @@ const datestamp =
   now.getFullYear().toString() +
   String(now.getMonth() + 1).padStart(2, '0') +
   String(now.getDate()).padStart(2, '0');
-const fullVersion = `${semver}-${datestamp}`;
+// 检查 dist-zips 里今天是否已有 build：是的话加 -HHMM 后缀，避免版本号撞车
+// 让 VersionGate 能正确拦下"已装了今天早些版本但里面有 bug"的客户端
+const todayZips = existsSync(outDir)
+  ? readdirSync(outDir).filter((f) => f.startsWith(`sino-gear-crm-v${semver}-${datestamp}`) && f.endsWith('.zip'))
+  : [];
+const suffix = todayZips.length === 0
+  ? ''
+  : `-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+const fullVersion = `${semver}-${datestamp}${suffix}`;
 const zipName = `sino-gear-crm-v${fullVersion}.zip`;
 const zipPath = join(outDir, zipName);
 

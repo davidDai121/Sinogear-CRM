@@ -47,12 +47,26 @@ function pressEnter(el: HTMLElement) {
   el.dispatchEvent(new KeyboardEvent('keyup', opts));
 }
 
+function getMainHeaderText(): string {
+  const main = document.querySelector('div#main');
+  const header = main?.querySelector('header');
+  return header?.textContent?.trim() ?? '';
+}
+
 function chatOpenForQuery(query: string): boolean {
   const main = document.querySelector('div#main');
   if (!main) return false;
   const header = main.querySelector('header');
   const headerDigits = header?.textContent?.replace(/[^\d]/g, '') ?? '';
   return headerDigits.includes(query);
+}
+
+// WA 通讯录里存了备注名的客户，header 只显示名字（如 "Aca"），头里没数字 →
+// chatOpenForQuery 永远 false，触发 deep-link reload。补一个"header 文本变了
+// 且非空"的兜底判定：只要点 💬 后聊天面板换了一个有内容的 header，就当成成功。
+function headerChangedFrom(initial: string): boolean {
+  const cur = getMainHeaderText();
+  return Boolean(cur) && cur !== initial;
 }
 
 function sleep(ms: number) {
@@ -80,6 +94,9 @@ export async function jumpToChat(
 ): Promise<boolean> {
   if (chatOpenForQuery(query)) return true;
 
+  // 记下点 💬 之前的 header 文本——之后用来判断"聊天面板有没有切到新的"
+  const initialHeader = getMainHeaderText();
+
   const input = findSearchInput();
   if (input) {
     input.focus();
@@ -98,13 +115,13 @@ export async function jumpToChat(
 
     for (let i = 0; i < 20; i++) {
       await sleep(150);
-      if (chatOpenForQuery(query)) return true;
+      if (chatOpenForQuery(query) || headerChangedFrom(initialHeader)) return true;
     }
 
     pressEnter(input);
     for (let i = 0; i < 10; i++) {
       await sleep(200);
-      if (chatOpenForQuery(query)) return true;
+      if (chatOpenForQuery(query) || headerChangedFrom(initialHeader)) return true;
     }
   }
 
