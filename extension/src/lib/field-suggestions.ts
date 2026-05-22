@@ -1,4 +1,5 @@
 import type { ChatMessage } from '@/content/whatsapp-messages';
+import { isSalesPitch } from './sales-pitch';
 
 export type SuggestedField =
   | 'name'
@@ -89,8 +90,17 @@ const VALID_FIELDS: SuggestedField[] = [
 ];
 
 export function buildPrompt(messages: ChatMessage[], contact: ContactSnapshot): string {
+  // 标 AD_COPY 防 GLM 把广告数字误抽成客户 budget_usd。两个方向都要标：
+  //   - Sales 侧：销售发的 FB 广告 / 促销话术（"$11,000+ less than RAV4"）
+  //   - Customer 侧：FB lead form 自动注入的入站广告模板（"BYD QIN PLUS DMI Priced from $9000"）
   const transcript = messages
-    .map((m) => `[${m.fromMe ? 'Sales' : 'Customer'}] ${m.text}`)
+    .map((m) => {
+      const isAd = isSalesPitch(m.text);
+      const role = m.fromMe
+        ? (isAd ? 'Sales-AD_COPY' : 'Sales')
+        : (isAd ? 'Customer-FB_AD_AUTO_MSG' : 'Customer');
+      return `[${role}] ${m.text}`;
+    })
     .join('\n');
 
   const current = JSON.stringify(
@@ -112,18 +122,28 @@ export function buildPrompt(messages: ChatMessage[], contact: ContactSnapshot): 
 - name: 客户姓名（英文，首字母大写）
 - country: 客户所在国家（标准英文名，城市映射到国家：Mombasa→Kenya、Lagos→Nigeria、Dubai→UAE 等）
 - language: 主要交流语言（English / French / Spanish / Arabic / Chinese / Portuguese 等）
-- budget_usd: 整体预算（美元数字。"25k" → 25000；其他货币按近似换算）
+- budget_usd: **客户自己**说出的预算（美元数字。"25k" → 25000；其他货币按近似换算）
+  - **只从 [Customer] 消息里抽**，且必须是客户**明确表达自己的预算**（"my budget is X" / "I have X" / "around X" / "can pay X" / "looking at X" 等）
+  - **绝不抽 [Sales] / [Sales-AD_COPY] / [Customer-FB_AD_AUTO_MSG] 消息里的任何数字**
+    - [Sales-AD_COPY] = 销售自己的广告 / 促销话术（"$11,000+ less than RAV4"）
+    - [Customer-FB_AD_AUTO_MSG] = Facebook lead form 自动注入的入站广告模板（含 "Priced from $X" / "Calling all" / "logo-facebook-round" 等特征），长得像客户发的但实际是 FB 系统消息，不是客户本人的话
+  - 广告里的 "$X less than" / "save $X" / "X% off" / "Priced from $X" 等数字一律忽略
 - destination_port: 目的港英文名（Mombasa / Lagos / Dakar）
 
 # 任务 2：车型兴趣（提到的所有车都列出来，不要漏）
 - model: 车型完整名（品牌+型号，如 "Toyota Hilux" / "BYD Song Plus" / "坦克 500"）
 - condition: "new" / "used" / null（看客户提到 brand new 还是 used）
-- target_price_usd: 该车的目标价（数字，没提到就 null）
+- target_price_usd: 该车的**客户目标价**（数字，没提到就 null）
+  - **只在客户明确说出自己愿意为该车付多少时才填**（"I can pay $X for it" / "my target is $X" / "around $X"）
+  - **绝不抽 [Sales-AD_COPY] / [Customer-FB_AD_AUTO_MSG] 里的任何数字**（"$11,000+ less than RAV4" / "Priced from $9000" 都是营销话术，不是客户目标价）
+  - 销售自己在 [Sales] 报的价（"CIF $29,500"）也不是客户目标价，是销售的报价，不填
 
 车型识别规则：
 - 客户问的、销售推荐的、聊天里提到的所有具体车型都列
 - 同一车的 new + used 算两条（如客户问"hilux 新车多少，二手多少"）
 - 不要重复 existing_vehicle_interests 里已有的车型
+- **广告对比锚不算客户兴趣**：当 [Sales-AD_COPY] / [Customer-FB_AD_AUTO_MSG] 里出现 "X less than Y" / "compared to Y" 这种结构时，**Y 是营销对比锚，不是客户感兴趣的车**（例："$11,000 less than the Toyota RAV4" — 客户感兴趣的是广告主角，**不是** Toyota RAV4）
+- 广告主角（客户点广告进来的那辆车）才是真兴趣
 
 # 已有数据
 ${current}
@@ -147,6 +167,9 @@ ${current}
 - evidence 必须是聊天里出现的**原文片段**，不能改写、不能翻译、不能编造
 - 找不到任何字段返回 "suggestions": []
 - 找不到任何车型返回 "vehicles": []
+- **[Sales] / [Sales-AD_COPY] 是销售（Miles）自己发的话**，不是客户说的——别把销售推销话术里的数字、目的地、车型偏好当成客户表达
+- **[Customer-FB_AD_AUTO_MSG] 是 Facebook 系统自动注入的入站广告模板**（含 logo-facebook-round / Priced from $X / Calling all 等特征）——不是客户本人在说话，里面的数字一律不抽
+- budget_usd 只信 [Customer] 明确说自己预算的句子；广告里的 "$11,000+ less than RAV4" / "Priced from $9000" 等数字一律不抽
 
 # 聊天记录（最新在下）
 ${transcript}`;
@@ -191,7 +214,13 @@ export function buildTagPrompt(
   existingTags: string[],
 ): string {
   const transcript = messages
-    .map((m) => `[${m.fromMe ? 'Sales' : 'Customer'}] ${m.text}`)
+    .map((m) => {
+      const isAd = isSalesPitch(m.text);
+      const role = m.fromMe
+        ? (isAd ? 'Sales-AD_COPY' : 'Sales')
+        : (isAd ? 'Customer-FB_AD_AUTO_MSG' : 'Customer');
+      return `[${role}] ${m.text}`;
+    })
     .join('\n');
 
   return `你是汽车出口公司 CRM 的客户标签建议助手。从下面的 WhatsApp 聊天里抽取 3-5 个对销售有用的客户特征标签。
@@ -236,7 +265,13 @@ export function buildTaskPrompt(
   existingTitles: string[],
 ): string {
   const transcript = messages
-    .map((m) => `[${m.fromMe ? 'Sales' : 'Customer'}] ${m.text}`)
+    .map((m) => {
+      const isAd = isSalesPitch(m.text);
+      const role = m.fromMe
+        ? (isAd ? 'Sales-AD_COPY' : 'Sales')
+        : (isAd ? 'Customer-FB_AD_AUTO_MSG' : 'Customer');
+      return `[${role}] ${m.text}`;
+    })
     .join('\n');
 
   return `你是汽车出口公司 CRM 的销售跟进助手。看下面的 WhatsApp 聊天，给销售经理提 0-3 条**下一步具体动作**任务建议。

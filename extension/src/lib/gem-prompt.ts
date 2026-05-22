@@ -1,5 +1,7 @@
 import type { ChatMessage } from '@/content/whatsapp-messages';
 import type { Database } from './database.types';
+import { isSalesPitch } from './sales-pitch';
+import { collapseMediaRuns } from './chat-media-utils';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type VehicleInterestRow = Database['public']['Tables']['vehicle_interests']['Row'];
@@ -56,12 +58,21 @@ function formatNewIndividual(ctx: GemPromptContext): string {
     }
   }
 
-  lines.push('', '[Chat Messages]');
-  // 先合并连续的媒体附件，再取最近 50 条 —— 不然 prompt 里全是 IMG-xxx.jpg 占位
-  const collapsed = collapseMediaRuns(ctx.messages);
-  const recent = collapsed.slice(-50);
-  for (const msg of recent) {
-    lines.push(formatMessage(msg, false));
+  if (ctx.messages.length === 0) {
+    // 冷启动：完全没历史，按 [Sales Guidance] / Gem 指令写第一句开场白
+    lines.push(
+      '',
+      '[Chat Messages]',
+      '(none yet — this is the very first contact. Write a natural opening message.)',
+    );
+  } else {
+    lines.push('', '[Chat Messages]');
+    // 先合并连续的媒体附件，再取最近 50 条 —— 不然 prompt 里全是 IMG-xxx.jpg 占位
+    const collapsed = collapseMediaRuns(ctx.messages);
+    const recent = collapsed.slice(-50);
+    for (const msg of recent) {
+      lines.push(formatMessage(msg, false));
+    }
   }
 
   lines.push('', FORMAT_CONSTRAINT);
@@ -100,11 +111,19 @@ function formatNewGroup(ctx: GemPromptContext): string {
     }
   }
 
-  lines.push('', '[Chat Messages]');
-  const collapsed = collapseMediaRuns(ctx.messages);
-  const recent = collapsed.slice(-50);
-  for (const msg of recent) {
-    lines.push(formatMessage(msg, true));
+  if (ctx.messages.length === 0) {
+    lines.push(
+      '',
+      '[Chat Messages]',
+      '(none yet — write a natural opening message to the group.)',
+    );
+  } else {
+    lines.push('', '[Chat Messages]');
+    const collapsed = collapseMediaRuns(ctx.messages);
+    const recent = collapsed.slice(-50);
+    for (const msg of recent) {
+      lines.push(formatMessage(msg, true));
+    }
   }
 
   lines.push('', FORMAT_CONSTRAINT);
@@ -112,7 +131,10 @@ function formatNewGroup(ctx: GemPromptContext): string {
 }
 
 /**
- * 已有 Gem 对话，只发新消息（最近 5 条逻辑消息，媒体连发已合并）
+ * 已有 Gem 对话，重发最近 50 条聊天消息（跟首次对齐）。
+ *
+ * 之前只带 5 条，导致客户上一轮回复后又陆续发了几条新消息时，Gem 看不到关键信息
+ * （典型：客户给了预算 / 改了车型 / 新发图）。统一 50 条覆盖跨多轮场景。
  */
 export function formatUpdate(
   phoneOrGroupName: string | null,
@@ -123,7 +145,7 @@ export function formatUpdate(
     ? `[Update - Group: ${phoneOrGroupName ?? '(unknown)'}]`
     : `[Update - Phone: ${normalizePhone(phoneOrGroupName)}]`;
   const lines = [header];
-  const collapsed = collapseMediaRuns(newMessages).slice(-5);
+  const collapsed = collapseMediaRuns(newMessages).slice(-50);
   for (const msg of collapsed) {
     lines.push(formatMessage(msg, isGroup));
   }
@@ -140,12 +162,20 @@ export function formatGuidance(guidance: string): string {
 
 /**
  * 强制 Gem 把 [WhatsApp Reply] 分段输出，避免一大坨墙文字客户读不下去。
+ * 顺带塞了 AD COPY 规则 —— Gem 的 system prompt 在用户 Gem builder 里改不动，
+ * 但这段 FORMAT_CONSTRAINT 每次都会拼到对话末尾，作为兜底说明。
  */
 const FORMAT_CONSTRAINT = `[Format Constraint]
 The [WhatsApp Reply] section MUST be split into 2-4 short paragraphs.
 Separate paragraphs with a single blank line (i.e. \\n\\n).
 Each paragraph: max 2-3 sentences. No single paragraph longer than ~50 words.
-This is mandatory for readability — customers won't read a wall of text.`;
+This is mandatory for readability — customers won't read a wall of text.
+
+[Ad Copy Rule — hard, never break]
+Two kinds of messages in [Chat Messages] contain marketing numbers that are NOT the customer's budget:
+(1) \`Sales (AD COPY — marketing pitch, NOT customer budget)\` = FB ad / promo Miles sent out ("$11,000+ less than RAV4", "save $X").
+(2) \`Customer (FB AD AUTO-MSG — Facebook lead template, NOT customer budget)\` = inbound FB lead-form template, looks like the customer wrote it but is system-injected ad copy ("Priced from $9000", "Calling all car dealers", "logo-facebook-round").
+Numbers in BOTH types are marketing claims, never the customer's budget or commitment. The customer's real budget only counts when the plain \`Customer\` role (no tag) explicitly says it ("my budget is X" / "I have X"). Do NOT write AD COPY / FB AD AUTO-MSG numbers into [Client Record] Budget, and do NOT reference them in [WhatsApp Reply] as if the customer committed to them.`;
 
 function buildProfileLines(
   contact: GemPromptContext['contact'],
@@ -167,80 +197,17 @@ function buildProfileLines(
 function formatMessage(msg: ChatMessage, isGroup: boolean): string {
   const ts = formatTimestamp(msg.timestamp);
   let role: string;
+  const isAd = isSalesPitch(msg.text);
   if (msg.fromMe) {
-    role = 'Sales';
+    // 销售自发的 FB 广告 / 促销话术
+    role = isAd ? 'Sales (AD COPY — marketing pitch, NOT customer budget)' : 'Sales';
   } else if (isGroup) {
-    // 群里发言人优先用 sender，没有就用通用 "Member"
     role = msg.sender ? `Member (${msg.sender})` : 'Member';
   } else {
-    role = 'Customer';
+    // FB lead form 自动注入的 inbound — 长得像客户发的但实际是 FB 广告模板
+    role = isAd ? 'Customer (FB AD AUTO-MSG — Facebook lead template, NOT customer budget)' : 'Customer';
   }
   return `[${ts}] ${role}: ${msg.text}`;
-}
-
-/**
- * 判断一条消息是不是「纯媒体附件」—— 文本只是图片/视频/文档的占位符，没有真实内容
- *  - `[媒体]`（导入解析时把 `<省略影音内容>` 替换成的占位）
- *  - `IMG-20260505-WA0014.jpg (文件附件)` / `VID-...mp4 (文件附件)` 等手机端导出格式
- *  - 空文本（DOM 端图片消息没 caption 时）
- */
-function isMediaOnly(text: string): boolean {
-  const t = text.trim();
-  if (!t) return true;
-  if (t === '[媒体]' || t === '<媒体>') return true;
-  // 手机端导出的文件附件占位（IMG/VID/AUD/DOC/PTT/STK 等）
-  if (
-    /^‎?(IMG|VID|VIDEO|AUD|AUDIO|DOC|PTT|STK|PHOTO|GIF)[-_].+\.(jpg|jpeg|png|gif|webp|mp4|mov|webm|opus|m4a|mp3|pdf|docx?|xlsx?|pptx?)\s*\(文件附件\)$/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * 合并连续的媒体消息：同一发送方连续 N 条纯附件 → 1 行 `[图片]` / `[图片 × N]`，
- * 给 Gem 让出空间给真正的对话内容。
- *
- * 历史上用过 `<sent N media items>`，但 Gem 偶尔不当回事（"我要不要发图？" 这类
- * 输出）。改成更明确的 `[图片]` Gem 识别率明显高。"图片"是泛指的占位语义，
- * 涵盖图/视频/PDF/配置表（DOM 上区分不开附件 mime）。
- */
-function collapseMediaRuns(messages: ChatMessage[]): ChatMessage[] {
-  const result: ChatMessage[] = [];
-  let run: ChatMessage[] = [];
-
-  const flush = () => {
-    if (run.length === 0) return;
-    const first = run[0];
-    const last = run[run.length - 1];
-    const n = run.length;
-    result.push({
-      id: first.id + (n > 1 ? `:+${n - 1}` : ''),
-      fromMe: first.fromMe,
-      text: n === 1 ? '[图片]' : `[图片 × ${n}]`,
-      timestamp: last.timestamp ?? first.timestamp,
-      sender: first.sender,
-    });
-    run = [];
-  };
-
-  for (const m of messages) {
-    if (isMediaOnly(m.text)) {
-      if (run.length === 0 || run[run.length - 1].fromMe === m.fromMe) {
-        run.push(m);
-      } else {
-        flush();
-        run.push(m);
-      }
-    } else {
-      flush();
-      result.push(m);
-    }
-  }
-  flush();
-  return result;
 }
 
 function formatTimestamp(ms: number | null): string {
