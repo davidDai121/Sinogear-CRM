@@ -5,7 +5,7 @@ import {
   waitForChatMessages,
   type ChatMessage,
 } from '@/content/whatsapp-messages';
-import { loadMessages } from '@/lib/message-sync';
+import { loadMessages, mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
 import { stringifyError } from '@/lib/errors';
 import { logContactEvent } from '@/lib/events-log';
 import type {
@@ -103,8 +103,13 @@ export function TagsSection({ contactId, contactPhone }: Props) {
         // 群聊：用轮询版，WA Web 冷启动单发会空
         messages = await waitForChatMessages(5000, 30, 1);
       }
-      // 2. DOM 空 → fallback 到数据库（导入的历史 + 之前 useMessageSync 同步过的）
-      if (!messages.length) {
+      // 2. DOM 有消息：fire-and-forget 持久化 + merge DB 老消息（DOM 渲染从下往上慢慢出现，
+      //    可能只有最新 1 条，必须靠 DB 兜底——参见 GPT/Claude/Gem section 一样的处理）
+      if (messages.length > 0) {
+        void syncMessages(contactId, messages);
+        messages = await mergeDomWithDbMessages(messages, contactId, 50);
+      } else {
+        // 3. DOM 空 → fallback 到数据库（导入的历史 + 之前 useMessageSync 同步过的）
         const rows = await loadMessages(contactId, 50);
         if (!rows.length) {
           throw new Error(

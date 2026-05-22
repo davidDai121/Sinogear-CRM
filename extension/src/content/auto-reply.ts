@@ -32,10 +32,16 @@ import {
   waitForPreviewClosed,
   waitForPreviewReady,
 } from './whatsapp-compose';
-import { readChatMessages, type ChatMessage } from './whatsapp-messages';
+import {
+  readChatMessages,
+  waitForChatMessages,
+  type ChatMessage,
+} from './whatsapp-messages';
+import { mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
 import { formatNewCustomer, formatUpdate } from '@/lib/gem-prompt';
 import { parseGemResponse } from '@/lib/gem-parser';
 import { sanitizeReplyForCustomer } from '@/lib/reply-sanitize';
+import { recordFill } from '@/lib/ai-reply-attribution';
 import { logContactEvent } from '@/lib/events-log';
 import { logAiReply } from '@/lib/ai-reply-log';
 import {
@@ -81,43 +87,19 @@ async function recoverStuckSchedules(): Promise<void> {
   for (const s of states) {
     if (s.phase !== 'scheduled') continue;
     if (s.scheduledAt > now) continue;
-    console.log(
-      '[auto-reply] 恢复延误触发',
-      s.contactId,
-      '应在',
-      new Date(s.scheduledAt).toLocaleString(),
-    );
     void executeAutoReply(s.contactId);
   }
 }
 
 async function executeAutoReply(contactId: string): Promise<void> {
-  if (!(await isContactAutoReplyEnabled(contactId))) {
-    console.log('[auto-reply] 此客户未开启自动回复（默认关），跳过执行', contactId);
-    return;
-  }
+  if (!(await isContactAutoReplyEnabled(contactId))) return;
 
   const state = await getState(contactId);
-  if (!state) {
-    console.warn('[auto-reply] state 已被清除，跳过', contactId);
-    return;
-  }
-  if (state.phase !== 'scheduled') {
-    console.log(
-      '[auto-reply] state phase ≠ scheduled，跳过',
-      contactId,
-      state.phase,
-    );
-    return;
-  }
+  if (!state) return;
+  if (state.phase !== 'scheduled') return;
 
   await patchState(contactId, { phase: 'firing' });
   const isFollowup = state.roundCount > 0;
-  console.log(
-    '[auto-reply] 开始执行',
-    contactId,
-    isFollowup ? `(续聊 round ${state.roundCount})` : '(首轮)',
-  );
 
   // log 用：跨 try/catch 捕获 prompt + 时长 + orgId
   const startedAt = Date.now();
@@ -164,12 +146,6 @@ async function executeAutoReply(contactId: string): Promise<void> {
       isFollowup && isPhotoRequest(state.lastInboundText ?? '');
     const shouldSendImages =
       !!state.vehicleId && (!isFollowup || requestedPhotos);
-    if (requestedPhotos) {
-      console.log(
-        '[auto-reply] 续聊里客户要图，本轮再发一次图',
-        contactId,
-      );
-    }
 
     // 3. 跑 Gem（首轮：formatNewCustomer + lead context；续聊：formatUpdate 仅带新消息）
     await patchState(contactId, {
@@ -225,12 +201,12 @@ async function executeAutoReply(contactId: string): Promise<void> {
         await patchState(contactId, { imagesSentAt: Date.now() });
       }
       // 不管图是否发出去，文字 reply 都跟着发（确保客户至少收到文字回复）
-      const textSent = await sendTextReply(reply);
+      const textSent = await sendTextReply(reply, contactId);
       if (!textSent) {
         throw new Error('找不到 WA 输入框或发送键，文字 reply 没发出去');
       }
     } else {
-      const ok = await sendTextReply(reply);
+      const ok = await sendTextReply(reply, contactId);
       if (!ok) {
         throw new Error('找不到 WA 输入框或发送键，请检查聊天是否打开');
       }
@@ -280,11 +256,6 @@ async function executeAutoReply(contactId: string): Promise<void> {
     });
 
     await patchState(contactId, { phase: 'done', doneAt: Date.now() });
-    console.log(
-      '[auto-reply] 完成',
-      contactId,
-      `round ${state.roundCount}`,
-    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[auto-reply] 失败', contactId, message);
@@ -338,7 +309,6 @@ async function sendImages(
     console.warn('[auto-reply] 车源图片全部下载失败');
     return false;
   }
-  console.log(`[auto-reply] 准备 paste ${files.length} 张图到 WA…`);
 
   const pasted = pasteFilesToWhatsApp(files);
   if (!pasted) {
@@ -365,13 +335,14 @@ async function sendImages(
   if (!closed) {
     console.warn('[auto-reply] 预览迟迟没关（图可能还在上传）— 继续往下');
   }
-  console.log('[auto-reply] ✓ 图已发');
   return true;
 }
 
-async function sendTextReply(reply: string): Promise<boolean> {
+async function sendTextReply(reply: string, contactId: string): Promise<boolean> {
   const filled = fillWhatsAppCompose(reply);
   if (!filled) return false;
+  // 归因 attribution：自动回复路径下发送的文本走 gem_auto 来源
+  void recordFill({ contactId, source: 'gem_auto', text: reply, logId: null });
   // 给 React state 一拍同步，让发送键 enable
   await sleep(400);
   const sent = await sendCurrentCompose();
@@ -416,18 +387,7 @@ async function pickGemTemplate(
       const best = scored
         .filter((x) => x.s > 0)
         .sort((a, b) => b.s - a.s)[0];
-      if (best) {
-        console.log(
-          '[auto-reply] 按车型匹配 Gem 模板:',
-          best.t.name,
-          `(${vehicle.brand} ${vehicle.model})`,
-        );
-        return best.t;
-      }
-      console.log(
-        '[auto-reply] 没匹配到专车 Gem，回退默认模板',
-        `(${vehicle.brand} ${vehicle.model})`,
-      );
+      if (best) return best.t;
     }
   }
 
@@ -453,8 +413,16 @@ async function buildPrompt(
   isFollowup: boolean,
   sendingPhotosThisRound: boolean,
 ): Promise<string> {
-  // 读 DOM 上的实际消息
-  let messages: ChatMessage[] = readChatMessages(30);
+  // 读 DOM 上的实际消息 —— 用 waitForChatMessages 稳态判定避免读到只有 1 条
+  // bubble（销售刚发完图就触发自动回复时常见）。然后 fire-and-forget 持久化到
+  // DB + merge 老消息，保证 prompt 上下文齐全。
+  let messages: ChatMessage[] = await waitForChatMessages(5000, 30, 1).catch(
+    () => readChatMessages(30),
+  );
+  if (messages.length > 0) {
+    void syncMessages(contact.id, messages);
+    messages = await mergeDomWithDbMessages(messages, contact.id, 50);
+  }
 
   // DOM 读不到时兜底用 state.leadText
   if (messages.length === 0) {
@@ -585,9 +553,5 @@ function isPhotoRequest(text: string): boolean {
 
 async function wasCancelled(contactId: string): Promise<boolean> {
   const s = await getState(contactId);
-  if (!s) {
-    console.log('[auto-reply] state 已被用户取消，中止执行', contactId);
-    return true;
-  }
-  return false;
+  return !s;
 }

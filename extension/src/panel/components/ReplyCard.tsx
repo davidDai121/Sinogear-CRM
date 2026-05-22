@@ -127,6 +127,27 @@ export function ReplyCard({
           </button>
         )}
       </div>
+      {existingTranslation && (
+        <div
+          className="sgc-gem-card"
+          style={{
+            background: '#f0fdf4',
+            borderColor: '#bbf7d0',
+            marginTop: 6,
+            padding: '6px 10px',
+          }}
+        >
+          <div className="sgc-gem-card-label" style={{ fontSize: 11 }}>
+            🌐 中文翻译与策略（AI 输出）
+          </div>
+          <div
+            className="sgc-gem-card-body"
+            style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}
+          >
+            {existingTranslation}
+          </div>
+        </div>
+      )}
       {fallbackTrans && (
         <div
           className="sgc-gem-card"
