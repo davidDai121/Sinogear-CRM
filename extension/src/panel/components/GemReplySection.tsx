@@ -7,7 +7,7 @@ import {
   waitForChatMessages,
   type ChatMessage,
 } from '@/content/whatsapp-messages';
-import { loadMessages } from '@/lib/message-sync';
+import { loadMessages, mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
 import { formatNewCustomer, formatUpdate } from '@/lib/gem-prompt';
 import {
   parseBudgetValue,
@@ -15,6 +15,7 @@ import {
   type ParsedClientRecord,
 } from '@/lib/gem-parser';
 import { fillWhatsAppCompose } from '@/content/whatsapp-compose';
+import { recordFill } from '@/lib/ai-reply-attribution';
 import { logContactEvent } from '@/lib/events-log';
 import type { CustomerStage } from '@/lib/database.types';
 import { logAiReply, markAiReplyFilled } from '@/lib/ai-reply-log';
@@ -36,17 +37,21 @@ interface Props {
   needsJump?: boolean;
 }
 
+/** 'dom' = 实时 WA 聊天；'db' = 导入的历史；
+ *  'guidance' = 完全没历史，仅按销售指令冷启动生成（新客户首条开场白） */
+type MessageSource = 'dom' | 'db' | 'guidance';
+
 type Status =
   | { kind: 'idle' }
   | { kind: 'reading' }
-  | { kind: 'sending'; foreground: boolean; source: 'dom' | 'db'; count: number }
+  | { kind: 'sending'; foreground: boolean; source: MessageSource; count: number }
   | { kind: 'waiting' }
   | {
       kind: 'done';
       text: string;
       chatUrl: string;
       model: string | null;
-      source: 'dom' | 'db';
+      source: MessageSource;
       count: number;
       /** ai_reply_logs row id — fillReply 用它把 was_filled 翻成 true */
       logId: string | null;
@@ -145,55 +150,67 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
     setStatus({ kind: 'reading' });
     const startedAt = Date.now();
     let promptForLog = '';
-    let messageSourceForLog: 'dom' | 'db' = 'dom';
+    let messageSourceForLog: MessageSource = 'dom';
     let messageCountForLog = 0;
     const guidanceForLog = followup.trim();
     const modeForLog = existingConv ? 'gem_followup' : 'gem_first';
     try {
-      // 1. Read chat messages — DOM 优先；DOM 空时 fallback 到 messages 表（导入的历史）
-      // 注意：这里的 jumpToChat 不开启 deep-link fallback——若开启会触发 reload，
-      // 中断当前 generate() 调用。正常跳不到（如 David Eze 这类 WA Web 本地无 chat
-      // 但已导入 .txt 的客户）时，让它静默失败、走下面的 DB messages fallback。
-      let messages: ChatMessage[] = [];
-      let messageSource: 'dom' | 'db' = 'dom';
-      if (needsJump) {
-        // 个人按手机号跳，群按群名跳（jumpToChat 会按搜索匹配上）
-        const query = contact.phone
-          ? contact.phone.replace(/^\+/, '')
-          : contact.name?.trim() || contact.wa_name?.trim() || '';
-        if (query) {
-          const ok = await jumpToChat(query);
-          if (ok) {
-            messages = await waitForChatMessages(5000, 30, 1);
+      // 1. Read chat messages — DOM 优先 + DB merge + 持久化；DOM 空时 fallback 到
+      // messages 表（导入的历史）
+      //
+      // DOM 路径必须 merge DB：WA Web 渲染从下往上慢慢出现，刚发完图就点 Generate
+      // DOM 可能只有最新 1 条 bubble。waitForChatMessages 改稳态判定后好了很多，
+      // 但 DB 兜底仍然关键。同时 fire-and-forget syncMessages 把本次 DOM 持久化，
+      // 下次 Generate 即使 DOM 全丢（虚拟滚动）也能从 DB 完整恢复。
+      //
+      // jumpToChat 不开启 deep-link fallback——若开启会触发 reload，中断当前 generate()。
+      const loadAiMessages = async (): Promise<{
+        messages: ChatMessage[];
+        source: MessageSource;
+      }> => {
+        let dom: ChatMessage[] = [];
+        if (needsJump) {
+          // 个人按手机号跳，群按群名跳（jumpToChat 会按搜索匹配上）
+          const query = contact.phone
+            ? contact.phone.replace(/^\+/, '')
+            : contact.name?.trim() || contact.wa_name?.trim() || '';
+          if (query) {
+            const ok = await jumpToChat(query);
+            if (ok) dom = await waitForChatMessages(5000, 30, 1);
+          } else {
+            dom = await waitForChatMessages(5000, 30, 1);
           }
-          // 跳不到：messages 留空，下面的"DOM 没消息时读 DB"分支接管
         } else {
-          messages = await waitForChatMessages(5000, 30, 1);
+          dom = await waitForChatMessages(5000, 30, 1);
         }
-      } else {
-        // 即使不需要 jump 也走轮询版——WA Web 冷启动 ≈ 10s 后 bubble 才
-        // 渲染好，单发 readChatMessages 会一发就空，错误地误判"没消息"
-        messages = await waitForChatMessages(5000, 30, 1);
-      }
-      if (messages.length === 0) {
+        if (dom.length > 0) {
+          void syncMessages(contact.id, dom);
+          const merged = await mergeDomWithDbMessages(dom, contact.id, 50);
+          return { messages: merged, source: 'dom' };
+        }
         // DOM 没消息（手机端聊天 / WA Web 还没加载），用导入的历史
         const rows = await loadMessages(contact.id, 50);
         if (rows.length === 0) {
+          // 冷启动：完全没历史，但用户在销售指令里写了意图 → 按指令冷开
+          if (followup.trim()) return { messages: [], source: 'guidance' };
           throw new Error(
-            '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，或在「客户」tab 用「📥 导入手机聊天」导入 .txt 历史。',
+            '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，「客户」tab 用「📥 导入手机聊天」导入 .txt 历史，或在下方"销售指令"里写明意图来冷启动。',
           );
         }
-        messages = rows.map((r) => ({
-          id: r.wa_message_id,
-          fromMe: r.direction === 'outbound',
-          text: r.text,
-          timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
-          // DB 加载的历史消息没存 sender；群聊从 messages 表 fallback 时拿不到，
-          // 但 Gem prompt 里仍能正常按 fromMe 区分销售/客户
-          sender: null,
-        }));
-        messageSource = 'db';
-      }
+        return {
+          messages: rows.map((r) => ({
+            id: r.wa_message_id,
+            fromMe: r.direction === 'outbound',
+            text: r.text,
+            timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
+            // DB 加载的历史消息没存 sender；群聊从 messages 表 fallback 时拿不到，
+            // 但 Gem prompt 里仍能正常按 fromMe 区分销售/客户
+            sender: null,
+          })),
+          source: 'db',
+        };
+      };
+      const { messages, source: messageSource } = await loadAiMessages();
 
       // 2. Load vehicle interests for richer context (only on new conversation)
       let vehicleInterests: VehicleInterestRow[] = [];
@@ -235,7 +252,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         ? contact.name?.trim() || contact.wa_name?.trim() || null
         : contact.phone;
       const basePrompt = existingConv
-        ? formatUpdate(updateLabel, messages.slice(-5), isGroup)
+        ? formatUpdate(updateLabel, messages.slice(-50), isGroup)
         : formatNewCustomer({
             contact,
             vehicleInterests,
@@ -397,9 +414,12 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         alert('找不到 WhatsApp 输入框，请确认聊天已打开');
         return;
       }
-      if (status.kind === 'done' && status.logId) {
-        void markAiReplyFilled(status.logId);
+      const logId = status.kind === 'done' ? status.logId : null;
+      if (logId) {
+        void markAiReplyFilled(logId);
       }
+      // 归因 attribution：记下这次填入，syncMessages 写出站消息时匹配文本来标 ai_source
+      void recordFill({ contactId: contact.id, source: 'gem', text: cleanText, logId });
     } catch (err) {
       alert(stringifyError(err));
     }
@@ -527,6 +547,9 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
               {status.source === 'db' && (
                 <>📜 用导入的历史记录（{status.count} 条）·{' '}</>
               )}
+              {status.source === 'guidance' && (
+                <>📝 仅按销售指令冷启动 ·{' '}</>
+              )}
               正在{status.foreground ? '前台' : '后台'}打开 Gemini 并发送 prompt…
             </div>
           )}
@@ -542,6 +565,9 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
                   ✅ 用模型：{status.model}
                   {status.source === 'db' && (
                     <> · 📜 基于导入的历史（{status.count} 条）</>
+                  )}
+                  {status.source === 'guidance' && (
+                    <> · 📝 仅按销售指令冷启动（无聊天历史）</>
                   )}
                 </div>
               )}

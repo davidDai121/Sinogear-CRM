@@ -14,6 +14,7 @@ import type {
 } from '@/lib/field-suggestions';
 import { runGem, isBusy as isGemBusy } from '@/lib/gem-automation';
 import { runClaude, isBusy as isClaudeBusy } from '@/lib/claude-automation';
+import { runGpt, isBusy as isGptBusy } from '@/lib/gpt-automation';
 import { alarmKey, parseAlarmKey } from '@/lib/auto-reply-state';
 
 const AI_BASE_URL =
@@ -21,10 +22,6 @@ const AI_BASE_URL =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const AI_MODEL = import.meta.env.VITE_AI_MODEL ?? 'qwen-turbo-latest';
 const AI_URL = `${AI_BASE_URL.replace(/\/$/, '')}/chat/completions`;
-
-chrome.runtime.onInstalled.addListener((details) => {
-  console.log('[Sino Gear CRM] installed:', details.reason);
-});
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'PING') {
@@ -111,6 +108,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return false;
   }
 
+  if (msg?.type === 'GPT_RUN') {
+    handleGptRun(msg as GptRunRequest)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
+    return true;
+  }
+
+  if (msg?.type === 'GPT_BUSY') {
+    sendResponse({ ok: true, busy: isGptBusy() });
+    return false;
+  }
+
   if (msg?.type === 'BULK_CAPTURE_ARM') {
     const tabId = _sender.tab?.id;
     if (typeof tabId === 'number') {
@@ -118,7 +127,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       // 兜底：60s 没收到 disarm 就自动关掉，避免长期挂起
       setTimeout(() => {
         if (bulkArmed && Date.now() - bulkArmed.armedAt >= 59000) {
-          console.log('[sgc/sw] bulk capture timeout, auto-disarm');
           bulkArmed = null;
         }
       }, 60000);
@@ -256,17 +264,6 @@ if (chrome.downloads?.onCreated) {
     }
     const { tabId } = bulkArmed;
 
-    // 完整记录 onCreated 拿到了啥（debug 看 zip 还是单文件）
-    console.log('[sgc/sw] downloads.onCreated:', {
-      id: item.id,
-      url: item.url,
-      finalUrl: item.finalUrl,
-      filename: item.filename,
-      mime: item.mime,
-      totalBytes: item.totalBytes,
-      referrer: item.referrer,
-    });
-
     const url = item.url || item.finalUrl || '';
     const filename = (item.filename || '').split(/[\\/]/).pop() || '';
     const mime = item.mime || '';
@@ -336,6 +333,36 @@ async function handleClaudeRun(req: ClaudeRunRequest) {
       prompt: req.prompt,
       active: req.active,
       responseTimeoutMs: req.responseTimeoutMs,
+    });
+    return {
+      ok: true,
+      responseText: result.responseText,
+      chatUrl: result.chatUrl,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err as Error)?.message ?? err) };
+  }
+}
+
+interface GptRunRequest {
+  type: 'GPT_RUN';
+  url: string;
+  prompt: string;
+  active?: boolean;
+  responseTimeoutMs?: number;
+  ensureThinking?: boolean;
+}
+
+async function handleGptRun(req: GptRunRequest) {
+  if (!req.url) return { ok: false, error: '缺少 ChatGPT URL' };
+  if (!req.prompt) return { ok: false, error: '缺少 prompt' };
+  try {
+    const result = await runGpt({
+      url: req.url,
+      prompt: req.prompt,
+      active: req.active,
+      responseTimeoutMs: req.responseTimeoutMs,
+      ensureThinking: req.ensureThinking,
     });
     return {
       ok: true,

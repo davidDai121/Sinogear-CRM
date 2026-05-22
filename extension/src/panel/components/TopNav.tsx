@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { manualRetranslate } from '@/content/auto-translate';
 import { GemTemplatesModal } from './GemTemplatesModal';
+import { GPTTemplatesModal } from './GPTTemplatesModal';
 import { AIReplyLogModal } from './AIReplyLogModal';
 import { TeamMembersModal } from './TeamMembersModal';
 import { ScopePicker } from './ScopePicker';
@@ -73,6 +74,7 @@ export function TopNav({
   const translate = useAutoTranslateToggle();
   const scope = useScope();
   const [showGemTemplates, setShowGemTemplates] = useState(false);
+  const [showGptTemplates, setShowGptTemplates] = useState(false);
   const [showAiLog, setShowAiLog] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
   const [allCount, setAllCount] = useState<number | undefined>();
@@ -153,6 +155,14 @@ export function TopNav({
         <button
           type="button"
           className="sgc-topnav-toggle"
+          onClick={() => setShowGptTemplates(true)}
+          title="管理 Custom GPT 模板（chatgpt.com/gpts 自建的 URL）"
+        >
+          🧠 GPT
+        </button>
+        <button
+          type="button"
+          className="sgc-topnav-toggle"
           onClick={() => setShowAiLog(true)}
           title="查看每次 AI 调用的完整 prompt + 响应（Claude / Gem / 自动回复）。可一键复制为 markdown 给 Claude review 质量。"
         >
@@ -177,6 +187,13 @@ export function TopNav({
         <GemTemplatesModal
           orgId={orgId}
           onClose={() => setShowGemTemplates(false)}
+        />
+      )}
+
+      {showGptTemplates && (
+        <GPTTemplatesModal
+          orgId={orgId}
+          onClose={() => setShowGptTemplates(false)}
         />
       )}
 

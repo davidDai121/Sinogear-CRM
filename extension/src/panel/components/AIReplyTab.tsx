@@ -3,11 +3,12 @@ import type { Database } from '@/lib/database.types';
 import { TranslateReplyPanel } from './TranslateReplyPanel';
 import { GemReplySection } from './GemReplySection';
 import { ClaudeReplySection } from './ClaudeReplySection';
+import { GPTReplySection } from './GPTReplySection';
 import { VehicleRecommendations } from './VehicleRecommendations';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 
-type Mode = 'translate' | 'gem' | 'claude';
+type Mode = 'translate' | 'gem' | 'claude' | 'gpt';
 
 const STORAGE_KEY = 'aiReplyMode';
 
@@ -32,7 +33,7 @@ export function AIReplyTab({ orgId, contact, needsJump }: Props) {
   useEffect(() => {
     void chrome.storage.local.get(STORAGE_KEY).then((s) => {
       const v = s[STORAGE_KEY];
-      if (v === 'translate' || v === 'gem' || v === 'claude') setMode(v);
+      if (v === 'translate' || v === 'gem' || v === 'claude' || v === 'gpt') setMode(v);
     });
   }, []);
 
@@ -53,6 +54,9 @@ export function AIReplyTab({ orgId, contact, needsJump }: Props) {
             onChange={(e) => switchMode(e.target.value as Mode)}
           >
             <option value="gem">🤖 Gemini Gem 回复（结构化）</option>
+            <option value="gpt">
+              🧠 GPT-5 Thinking 回复（Miles 第一人称 · 灵活）
+            </option>
             <option value="claude">
               ✨ Claude AI 回复（多模式 · 续聊 · 讨论 · 推荐）
             </option>
@@ -81,6 +85,14 @@ export function AIReplyTab({ orgId, contact, needsJump }: Props) {
 
       {mode === 'claude' && (
         <ClaudeReplySection
+          orgId={orgId}
+          contact={contact}
+          needsJump={needsJump}
+        />
+      )}
+
+      {mode === 'gpt' && (
+        <GPTReplySection
           orgId={orgId}
           contact={contact}
           needsJump={needsJump}

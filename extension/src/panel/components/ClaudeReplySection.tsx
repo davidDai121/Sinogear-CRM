@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
@@ -7,24 +7,19 @@ import {
   waitForChatMessages,
   type ChatMessage,
 } from '@/content/whatsapp-messages';
-import { loadMessages } from '@/lib/message-sync';
+import { loadMessages, mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
 import {
   buildFirstMessage,
   buildFollowUpMessage,
-  DEFAULT_STYLE_ANCHORS,
-  detectObjection,
   type ClaudeMode,
-  type StyleAnchor,
 } from '@/lib/claude-prompt';
-
-/** anchor 唯一性 key — reply 前 60 字符（足够区分但短到可序列化） */
-const anchorKey = (a: StyleAnchor): string => a.reply.slice(0, 60);
 import {
   parseBudgetValue,
   parseClaudeResponse,
   type ParsedClientRecord,
 } from '@/lib/claude-parser';
 import { fillWhatsAppCompose } from '@/content/whatsapp-compose';
+import { recordFill } from '@/lib/ai-reply-attribution';
 import { logContactEvent } from '@/lib/events-log';
 import type { CustomerStage } from '@/lib/database.types';
 import { logAiReply, markAiReplyFilled } from '@/lib/ai-reply-log';
@@ -42,16 +37,20 @@ interface Props {
   needsJump?: boolean;
 }
 
+/** 'dom' = 实时 WA 聊天；'db' = 导入的历史；
+ *  'guidance' = 完全没历史，仅按销售指令冷启动生成（新客户首条开场白） */
+type MessageSource = 'dom' | 'db' | 'guidance';
+
 type Status =
   | { kind: 'idle' }
   | { kind: 'reading' }
-  | { kind: 'sending'; foreground: boolean; mode: ClaudeMode; source: 'dom' | 'db'; count: number }
+  | { kind: 'sending'; foreground: boolean; mode: ClaudeMode; source: MessageSource; count: number }
   | {
       kind: 'done';
       mode: ClaudeMode;
       text: string;
       chatUrl: string;
-      source: 'dom' | 'db';
+      source: MessageSource;
       count: number;
       /** ai_reply_logs row id — fillReply 用它把 was_filled 翻成 true */
       logId: string | null;
@@ -82,28 +81,6 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
   const [guidance, setGuidance] = useState('');
   const [guidanceLoaded, setGuidanceLoaded] = useState(false);
   const [discuss, setDiscuss] = useState('');
-  const [styleAnchors, setStyleAnchors] = useState<StyleAnchor[]>([]);
-  // 用户 disable 掉的 anchor key 集合，按 orgId 持久化到 chrome.storage
-  const [anchorDisabled, setAnchorDisabled] = useState<Record<string, boolean>>({});
-
-  // default + dynamic 合并，去重（同一段 reply 不重复）
-  const combinedAnchors = useMemo<StyleAnchor[]>(() => {
-    const seen = new Set<string>();
-    const all: StyleAnchor[] = [];
-    for (const a of [...DEFAULT_STYLE_ANCHORS, ...styleAnchors]) {
-      const k = anchorKey(a);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      all.push(a);
-    }
-    return all;
-  }, [styleAnchors]);
-
-  // 实际传给 Claude 的 anchors = combined 减去用户 disable 的，上限 8 段
-  const enabledAnchors = useMemo<StyleAnchor[]>(
-    () => combinedAnchors.filter((a) => !anchorDisabled[anchorKey(a)]).slice(0, 8),
-    [combinedAnchors, anchorDisabled],
-  );
 
   // ── 前台开关偏好 ──
   useEffect(() => {
@@ -149,90 +126,6 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
     setDiscuss('');
   }, [contact.id]);
 
-  // ── 风格锚点：从 messages 表拉销售自己过往成功客户的 outbound 片段 ──
-  // 一次性按 org 加载（跨 contact 复用），用 chrome.storage 缓存 1 天
-  useEffect(() => {
-    let cancelled = false;
-    const cacheKey = `claudeStyleAnchors:${orgId}`;
-    const oneDayMs = 24 * 60 * 60 * 1000;
-    void (async () => {
-      // 先读缓存
-      const cached = await chrome.storage.local.get(cacheKey);
-      const entry = cached[cacheKey] as
-        | { ts: number; anchors: StyleAnchor[] }
-        | undefined;
-      if (entry && Date.now() - entry.ts < oneDayMs && entry.anchors?.length) {
-        if (!cancelled) setStyleAnchors(entry.anchors);
-        return;
-      }
-      // 失效或没有 → 拉取
-      const { data: contacts } = await supabase
-        .from('contacts')
-        .select('id, country, language, customer_stage')
-        .eq('org_id', orgId)
-        .in('customer_stage', ['quoted', 'won']);
-      if (!contacts || contacts.length === 0) return;
-      const contactById = new Map(contacts.map((c) => [c.id, c]));
-      const ids = contacts.map((c) => c.id);
-      const { data: msgs } = await supabase
-        .from('messages')
-        .select('contact_id, text, sent_at')
-        .in('contact_id', ids)
-        .eq('direction', 'outbound')
-        .order('sent_at', { ascending: false })
-        .limit(60);
-      if (!msgs) return;
-      // 筛：长度 50-400，去附件占位
-      const goodMsgs = msgs.filter((m) => {
-        const t = (m.text ?? '').trim();
-        if (t.length < 50 || t.length > 400) return false;
-        if (/^\[图片|^IMG-|^VID-|\(文件附件\)/i.test(t)) return false;
-        return true;
-      });
-      // 随机挑 8 个，多样化
-      shuffleInPlace(goodMsgs);
-      const picked = goodMsgs.slice(0, 8).map((m): StyleAnchor => {
-        const c = contactById.get(m.contact_id);
-        const ctxParts: string[] = [];
-        if (c?.country) ctxParts.push(c.country);
-        if (c?.language) ctxParts.push(c.language);
-        if (c?.customer_stage) ctxParts.push(c.customer_stage);
-        return {
-          context: ctxParts.length ? ctxParts.join(' · ') : 'past customer',
-          reply: m.text ?? '',
-        };
-      });
-      if (cancelled) return;
-      setStyleAnchors(picked);
-      void chrome.storage.local.set({
-        [cacheKey]: { ts: Date.now(), anchors: picked },
-      });
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [orgId]);
-
-  // 读 anchorDisabled 持久化
-  useEffect(() => {
-    const key = `claudeAnchorDisabled:${orgId}`;
-    void chrome.storage.local.get(key).then((res) => {
-      const v = res[key];
-      if (v && typeof v === 'object') setAnchorDisabled(v as Record<string, boolean>);
-    });
-  }, [orgId]);
-
-  const toggleAnchor = (anchor: StyleAnchor) => {
-    const k = anchorKey(anchor);
-    setAnchorDisabled((prev) => {
-      const next = { ...prev };
-      if (next[k]) delete next[k];
-      else next[k] = true;
-      void chrome.storage.local.set({ [`claudeAnchorDisabled:${orgId}`]: next });
-      return next;
-    });
-  };
-
   const toggleForeground = (next: boolean) => {
     setForeground(next);
     void chrome.storage.local.set({ claudeForeground: next });
@@ -244,47 +137,62 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
     setStatus({ kind: 'reading' });
     const startedAt = Date.now();
     let promptForLog = '';
-    let messageSourceForLog: 'dom' | 'db' = 'dom';
+    let messageSourceForLog: MessageSource = 'dom';
     let messageCountForLog = 0;
     const guidanceForLog = guidance.trim();
     try {
-      // 1. 读消息：DOM 优先；空时走 messages 表
-      let messages: ChatMessage[] = [];
-      let messageSource: 'dom' | 'db' = 'dom';
-      if (needsJump) {
-        const query = contact.phone
-          ? contact.phone.replace(/^\+/, '')
-          : contact.name?.trim() || contact.wa_name?.trim() || '';
-        if (query) {
-          const ok = await jumpToChat(query);
-          if (ok) {
-            messages = await waitForChatMessages(5000, 30, 1);
+      // 1. 读消息：DOM 优先；空时走 messages 表；完全没历史时若有 guidance 则冷启动
+      //
+      // DOM 路径下也强制走 mergeDomWithDbMessages —— WA Web 渲染消息从下往上慢慢
+      // 出现，销售刚发完图就点 Generate 时 DOM 可能只有最新 1 条 bubble。
+      // waitForChatMessages 已改成稳态判定（count 不增长才返回），但 DB 兜底仍然
+      // 关键：DB 里有上次 useMessageSync 持久化的老消息，DOM 当下渲染不出来的能补回来。
+      // 同时 fire-and-forget syncMessages 把本次 DOM 写进 DB，下次 Generate 即使
+      // DOM 全丢（虚拟滚动）也能从 DB 完整恢复。
+      const loadAiMessages = async (): Promise<{
+        messages: ChatMessage[];
+        source: MessageSource;
+      }> => {
+        let dom: ChatMessage[] = [];
+        if (needsJump) {
+          const query = contact.phone
+            ? contact.phone.replace(/^\+/, '')
+            : contact.name?.trim() || contact.wa_name?.trim() || '';
+          if (query) {
+            const ok = await jumpToChat(query);
+            if (ok) dom = await waitForChatMessages(5000, 30, 1);
+          } else {
+            dom = await waitForChatMessages(5000, 30, 1);
           }
         } else {
-          messages = await waitForChatMessages(5000, 30, 1);
+          // 即使不需要 jump 也走轮询版——WA Web 冷启动后 div#main 出现 ≈ 6s，
+          // bubble 渲染 ≈ 10s+
+          dom = await waitForChatMessages(5000, 30, 1);
         }
-      } else {
-        // 即使不需要 jump 也走轮询版——WA Web 冷启动后 div#main 出现 ≈ 6s，
-        // bubble 渲染 ≈ 10s+；单发 readChatMessages 会一发就空，错误地
-        // 走 DB fallback，DB 又没数据时误报"没可读消息"
-        messages = await waitForChatMessages(5000, 30, 1);
-      }
-      if (messages.length === 0) {
+        if (dom.length > 0) {
+          void syncMessages(contact.id, dom);
+          const merged = await mergeDomWithDbMessages(dom, contact.id, 50);
+          return { messages: merged, source: 'dom' };
+        }
         const rows = await loadMessages(contact.id, 50);
         if (rows.length === 0) {
+          if (guidance.trim()) return { messages: [], source: 'guidance' };
           throw new Error(
-            '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，或在「客户」tab 用「📥 导入手机聊天」导入 .txt 历史。',
+            '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，「客户」tab 用「📥 导入手机聊天」导入 .txt 历史，或在下方"销售指令"里写明意图来冷启动。',
           );
         }
-        messages = rows.map((r) => ({
-          id: r.wa_message_id,
-          fromMe: r.direction === 'outbound',
-          text: r.text,
-          timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
-          sender: null,
-        }));
-        messageSource = 'db';
-      }
+        return {
+          messages: rows.map((r) => ({
+            id: r.wa_message_id,
+            fromMe: r.direction === 'outbound',
+            text: r.text,
+            timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
+            sender: null,
+          })),
+          source: 'db',
+        };
+      };
+      const { messages, source: messageSource } = await loadAiMessages();
 
       // 2. 群聊成员名单（如果是群）
       let groupMemberNames: string[] | undefined;
@@ -321,18 +229,14 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         vehicleInterests = data ?? [];
       }
 
-      // 4. 卡点雷达
-      const detectedObjection = detectObjection(messages);
-
-      // 5. 构造 prompt + URL
+      // 4. 构造 prompt + URL
       const url = existingConv?.chat_url ?? 'https://claude.ai/new';
       const prompt = existingConv
         ? buildFollowUpMessage({
             mode: chosenMode,
-            newMessages: messages.slice(-10),
+            newMessages: messages.slice(-50),
             isGroup,
             salesGuidance: guidance.trim() || undefined,
-            detectedObjection,
           })
         : buildFirstMessage(
             {
@@ -340,8 +244,6 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
               vehicleInterests,
               messages,
               groupMemberNames,
-              styleAnchors: enabledAnchors,
-              detectedObjection,
               salesGuidance: guidance.trim() || undefined,
             },
             chosenMode,
@@ -387,7 +289,6 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
       }
       await refreshExistingConv();
 
-      // 写 log（不阻塞 UI；失败只 console.warn）
       const logId = await logAiReply({
         orgId,
         contactId: contact.id,
@@ -445,32 +346,47 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
     setStatus({ kind: 'reading' });
     const startedAt = Date.now();
     let promptForLog = '';
-    let sourceForLog: 'dom' | 'db' = 'dom';
+    let sourceForLog: MessageSource = 'dom';
     let countForLog = 0;
     try {
       const url = existingConv?.chat_url ?? 'https://claude.ai/new';
       // 没历史 → 第一次连同上下文一起发；有历史 → 只发问题
       let prompt: string;
-      let source: 'dom' | 'db' = 'dom';
+      let source: MessageSource = 'dom';
       let count = 0;
-      if (!existingConv) {
-        // 复用 generate 的消息加载逻辑（精简版）——同样走轮询版
-        let messages: ChatMessage[] = await waitForChatMessages(5000, 30, 1);
-        if (messages.length === 0) {
-          const rows = await loadMessages(contact.id, 50);
-          messages = rows.map((r) => ({
+      // 公共消息加载 —— 跟 generate 一样：DOM 稳态 + 持久化 + DB merge，DOM 空时纯 DB，
+      // 都空且 discuss 已提了问题 → guidance（不报错，讨论模式允许）
+      const loadDiscussMessages = async (): Promise<{
+        messages: ChatMessage[];
+        source: MessageSource;
+      }> => {
+        const dom: ChatMessage[] = await waitForChatMessages(5000, 30, 1);
+        if (dom.length > 0) {
+          void syncMessages(contact.id, dom);
+          const merged = await mergeDomWithDbMessages(dom, contact.id, 50);
+          return { messages: merged, source: 'dom' };
+        }
+        const rows = await loadMessages(contact.id, 50);
+        if (rows.length === 0) {
+          // 讨论模式：用户已经主动提了问题，无历史也允许（Claude 可基于客户档案回答）
+          return { messages: [], source: 'guidance' };
+        }
+        return {
+          messages: rows.map((r) => ({
             id: r.wa_message_id,
             fromMe: r.direction === 'outbound',
             text: r.text,
             timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
             sender: null,
-          }));
-          source = 'db';
-        }
-        count = messages.length;
-        if (count === 0) {
-          throw new Error('没有可读对话历史。先打开 WhatsApp 聊天或导入 .txt');
-        }
+          })),
+          source: 'db',
+        };
+      };
+
+      if (!existingConv) {
+        const loaded = await loadDiscussMessages();
+        source = loaded.source;
+        count = loaded.messages.length;
         let vehicleInterests: VehicleInterestRow[] = [];
         const { data } = await supabase
           .from('vehicle_interests')
@@ -483,15 +399,22 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
           {
             contact,
             vehicleInterests,
-            messages,
-            styleAnchors: enabledAnchors,
+            messages: loaded.messages,
             salesGuidance: q,
           },
           'discuss',
         );
       } else {
+        // 续聊讨论也要重发最近 50 条 — Claude 那边 chat thread 看到的只是
+        // 上一次 generate 时的历史快照，之后客户陆续发的新消息（最新预算 /
+        // 改车型 / 发图）没人喂给它，必须在本次 prompt 里补上。
+        const loaded = await loadDiscussMessages();
+        source = loaded.source;
+        count = loaded.messages.length;
         prompt = buildFollowUpMessage({
           mode: 'discuss',
+          newMessages: loaded.messages.slice(-50),
+          isGroup: !!contact.group_jid,
           userQuestion: q,
         });
       }
@@ -640,9 +563,12 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         return;
       }
       // 填入成功 → 标 log 为 was_filled（用户认可了这条回复）
-      if (status.kind === 'done' && status.logId) {
-        void markAiReplyFilled(status.logId);
+      const logId = status.kind === 'done' ? status.logId : null;
+      if (logId) {
+        void markAiReplyFilled(logId);
       }
+      // 归因 attribution：记下这次填入，syncMessages 写出站消息时匹配文本来标 ai_source
+      void recordFill({ contactId: contact.id, source: 'claude', text: cleanText, logId });
     } catch (err) {
       alert(stringifyError(err));
     }
@@ -729,56 +655,6 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
           />
         </div>
 
-        {/* 风格锚点：用户可勾选哪些样本被 Claude 看到，前 8 段被实际注入 */}
-        {combinedAnchors.length > 0 && !existingConv && (
-          <details className="sgc-muted" style={{ fontSize: 11, marginTop: 6 }}>
-            <summary style={{ cursor: 'pointer' }}>
-              📚 风格锚点 · 已启用 {enabledAnchors.length}/{combinedAnchors.length}（前 8 个被注入 Claude，点击调整）
-            </summary>
-            <ul style={{ marginTop: 6, paddingLeft: 0, listStyle: 'none' }}>
-              {combinedAnchors.map((a) => {
-                const k = anchorKey(a);
-                const disabled = !!anchorDisabled[k];
-                const enabledIdx = enabledAnchors.indexOf(a);
-                const willBeInjected = enabledIdx >= 0 && enabledIdx < 8;
-                return (
-                  <li
-                    key={k}
-                    style={{
-                      marginBottom: 6,
-                      display: 'flex',
-                      gap: 8,
-                      alignItems: 'flex-start',
-                      opacity: disabled ? 0.4 : 1,
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={!disabled}
-                      onChange={() => toggleAnchor(a)}
-                      style={{ marginTop: 2 }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 10, color: '#667781' }}>
-                        <code>{a.context.slice(0, 100)}{a.context.length > 100 ? '…' : ''}</code>
-                        {willBeInjected && (
-                          <span style={{ marginLeft: 6, color: '#00a884' }}>✓ 注入</span>
-                        )}
-                        {!disabled && !willBeInjected && (
-                          <span style={{ marginLeft: 6, color: '#aaa' }}>(超 8 段上限,不注入)</span>
-                        )}
-                      </div>
-                      <div style={{ fontStyle: 'italic', marginTop: 2 }}>
-                        "{a.reply.slice(0, 120)}{a.reply.length > 120 ? '…' : ''}"
-                      </div>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </details>
-        )}
-
         {/* 续聊状态 */}
         {existingConv && (
           <div className="sgc-gem-progress">
@@ -809,6 +685,9 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
           <div className="sgc-gem-progress">
             {status.source === 'db' && (
               <>📜 用导入的历史记录（{status.count} 条）·{' '}</>
+            )}
+            {status.source === 'guidance' && (
+              <>📝 仅按销售指令冷启动 ·{' '}</>
             )}
             正在{status.foreground ? '前台' : '后台'}打开 Claude 并发送（
             {MODE_LABELS[status.mode]}）…
@@ -880,7 +759,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
 interface ResultViewProps {
   mode: ClaudeMode;
   parsed: ReturnType<typeof parseClaudeResponse>;
-  source: 'dom' | 'db';
+  source: MessageSource;
   count: number;
   chatUrl: string;
   contact: ContactRow;
@@ -903,6 +782,11 @@ function ResultView({
       {source === 'db' && (
         <div className="sgc-gem-progress">
           ✅ 基于导入的历史记录（{count} 条）
+        </div>
+      )}
+      {source === 'guidance' && (
+        <div className="sgc-gem-progress">
+          📝 仅按销售指令冷启动生成（无聊天历史）
         </div>
       )}
 
@@ -1338,27 +1222,36 @@ function buildContactPatch(
   return patch;
 }
 
-function ClientRecordCard({
+export function ClientRecordCard({
   record,
   contact,
+  source = 'claude',
 }: {
   record: ParsedClientRecord;
   contact: ContactRow;
+  /** 来源标签，写入 ai_extracted 事件的 payload，方便回看是哪个 AI 抽的 */
+  source?: 'claude' | 'gpt' | 'gem';
 }) {
   const [existingTags, setExistingTags] = useState<string[]>([]);
+  const [existingTagsLoaded, setExistingTagsLoaded] = useState(false);
   const [applying, setApplying] = useState(false);
   const [done, setDone] = useState<{ fields: number; tags: number } | null>(
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  // 自动 apply 锁：每个 (contact_id + record 文本指纹) 只触发一次，
+  // 切换客户 / 重新生成回复后才会再 auto-apply
+  const autoAppliedKey = useRef<string | null>(null);
 
   useEffect(() => {
+    setExistingTagsLoaded(false);
     void supabase
       .from('contact_tags')
       .select('tag')
       .eq('contact_id', contact.id)
       .then(({ data }) => {
         setExistingTags((data ?? []).map((r) => r.tag));
+        setExistingTagsLoaded(true);
       });
   }, [contact.id]);
 
@@ -1380,9 +1273,8 @@ function ClientRecordCard({
     const v = record[key];
     return typeof v === 'string' && v.length > 0;
   });
-  if (!rows.length && !record.tags?.length) return null;
 
-  const apply = async () => {
+  const apply = useCallback(async () => {
     setApplying(true);
     setError(null);
     try {
@@ -1407,7 +1299,7 @@ function ClientRecordCard({
         if (tagErr) throw new Error(tagErr.message);
       }
       void logContactEvent(contact.id, 'ai_extracted', {
-        source: 'claude',
+        source,
         fields: Object.keys(patch),
         tags: tagsToAdd,
       });
@@ -1418,13 +1310,26 @@ function ClientRecordCard({
     } finally {
       setApplying(false);
     }
-  };
+  }, [contact.id, patch, tagsToAdd, fieldCount, tagCount, source]);
+
+  // 自动保存：tags 加载完成 + 有要写的字段/标签 + 还没自动应用过这条 record
+  // → 静默写入 DB。指纹 = contact.id|record JSON，保证切客户 / 重新生成时
+  // 重新触发一次（同一 record 不重复写）
+  useEffect(() => {
+    if (!existingTagsLoaded || total === 0 || applying || done) return;
+    const fingerprint = `${contact.id}|${JSON.stringify(record)}`;
+    if (autoAppliedKey.current === fingerprint) return;
+    autoAppliedKey.current = fingerprint;
+    void apply();
+  }, [existingTagsLoaded, total, applying, done, contact.id, record, apply]);
+
+  if (!rows.length && !record.tags?.length) return null;
 
   const hasTags = record.tags && record.tags.length > 0;
 
   return (
     <details className="sgc-gem-card sgc-gem-card-record" open>
-      <summary className="sgc-gem-card-label">👤 Claude 识别的客户档案</summary>
+      <summary className="sgc-gem-card-label">👤 AI 识别的客户档案</summary>
       <div className="sgc-gem-card-body">
         <ul className="sgc-record-list">
           {rows.map(([key, label]) => {
@@ -1451,33 +1356,36 @@ function ClientRecordCard({
         </ul>
 
         <div className="sgc-gem-result-actions">
-          {done ? (
+          {applying ? (
+            <span className="sgc-muted">💾 自动保存中…</span>
+          ) : done ? (
             <span className="sgc-muted">
-              ✅ 已应用 {done.fields} 项字段 + {done.tags} 个标签
+              ✅ 已自动保存 {done.fields} 项字段
+              {done.tags > 0 ? ` + ${done.tags} 个标签` : ''}
             </span>
           ) : total === 0 ? (
             <span className="sgc-muted">客户资料已是最新</span>
-          ) : (
-            <button
-              type="button"
-              className="sgc-btn-secondary"
-              onClick={apply}
-              disabled={applying}
-            >
-              {applying ? '应用中…' : `应用 ${total} 项到客户资料`}
-            </button>
-          )}
+          ) : null}
         </div>
 
-        {error && <div className="sgc-error">{error}</div>}
+        {error && (
+          <div className="sgc-error">
+            自动保存失败：{error}
+            <button
+              type="button"
+              className="sgc-btn-link"
+              onClick={() => {
+                autoAppliedKey.current = null;
+                void apply();
+              }}
+              style={{ marginLeft: 8 }}
+            >
+              重试
+            </button>
+          </div>
+        )}
       </div>
     </details>
   );
 }
 
-function shuffleInPlace<T>(arr: T[]): void {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-}
