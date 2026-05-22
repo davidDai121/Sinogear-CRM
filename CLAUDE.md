@@ -219,9 +219,25 @@ Supabase（托管 Postgres + Auth）
 │       ├── 0015_cascade_handlers_on_member_removal.sql
 │       │                                org 成员被移除时，trigger 级联清掉他在该 org
 │       │                                所有 contact 上的 handler 行（防孤儿撞单）
-│       └── 0016_groups.sql              支持 WA 群聊作为 contact：加 group_jid 列 +
-│                                        partial unique 索引 + check 约束 +
-│                                        放宽 phone NOT NULL
+│       ├── 0016_groups.sql              支持 WA 群聊作为 contact：加 group_jid 列 +
+│       │                                partial unique 索引 + check 约束 +
+│       │                                放宽 phone NOT NULL
+│       ├── 0017_app_config.sql          app_config(key,value) + required_version
+│       │                                公开可读、写入 service_role only（强制版本闸门）
+│       ├── 0018_fix_group_jid_unique.sql 0016 的 partial unique INDEX 换成普通
+│       │                                UNIQUE CONSTRAINT（避免 onConflict 报 42P10）
+│       ├── 0019_message_directions_rpc.sql last_message_direction_per_contact RPC
+│       │                                给每个 contact 算最后入站/出站消息时间
+│       ├── 0020_contact_pins.sql        contact_pins (contact_id, user_id) per-user 置顶
+│       ├── 0021_auto_reply_logs.sql     ai_reply_logs（早期想入库，后改 chrome.storage）
+│       ├── 0022_message_directions_counts.sql 0019 RPC 扩展回 inbound_count/outbound_count
+│       ├── 0023_gpt_conversations.sql   gpt_conversations(contact_id, chat_url)
+│       │                                ChatGPT per-contact chat URL 缓存（无 template）
+│       ├── 0024_message_ai_source.sql   messages 加 ai_source 列：claude/gem/gem_auto/gpt
+│       │                                标记出站消息的 AI 归因来源（NULL = manual）
+│       └── 0025_enable_realtime.sql     启用 contacts/vehicle_interests/contact_tags/
+│                                        contact_handlers Realtime；REPLICA IDENTITY FULL
+│                                        让 DELETE/UPDATE payload.old 含完整旧行
 └── （仅此一个目录；旧 backend/ frontend/ docs/ 已删）
 ```
 
@@ -271,9 +287,16 @@ gem_templates           id, org_id, name, gem_url, description, is_default,
 gem_conversations       id, contact_id, template_id, gem_chat_url,
                         last_used_at, created_at
                         UNIQUE(contact_id, template_id)
+claude_conversations    contact_id (PK), chat_url, last_used_at, created_at
+                        Claude.ai per-contact chat URL（单一 Miles persona，无 template）
+gpt_conversations       contact_id (PK), chat_url, last_used_at, created_at
+                        ChatGPT per-contact chat URL（单一 Miles persona，无 template）
 messages                id, contact_id, wa_message_id, direction(inbound/outbound),
-                        text, sent_at, synced_at
+                        text, sent_at, synced_at, ai_source
                         UNIQUE(contact_id, wa_message_id)
+                        ai_source: claude/gem/gem_auto/gpt（出站消息 AI 归因，NULL=manual）
+contact_pins            contact_id, user_id (PK 复合) — per-user 置顶客户
+app_config              key (PK), value — required_version 公开可读，写入 service_role only
 _keepalive              singleton (id=1, last_ping) — pg_cron 每日心跳
                         防 Supabase 免费层 7 日无活动自动暂停
 ```
@@ -291,7 +314,7 @@ _keepalive              singleton (id=1, last_ping) — pg_cron 每日心跳
 - `is_org_member(org_id)` — RLS 用
 - `touch_updated_at()` trigger — contacts/vehicles/quotes/gem_templates 自动更新 updated_at
 
-**所有 14 个 migration 都已应用到生产 Supabase。**
+**所有 25 个 migration（0001–0025）都已应用到生产 Supabase。**
 
 ## 启动
 
@@ -341,7 +364,8 @@ npm run package
 
 ### 基础设施
 - [x] Chrome 扩展骨架（MV3 + Vite + React + TS，@crxjs/vite-plugin 2.4 正式版）
-- [x] Supabase 多租户 schema + RLS（**14 个 migration 全部上线**）
+- [x] Supabase 多租户 schema + RLS（**25 个 migration 全部上线**）
+- [x] **Supabase Realtime**（migration 0025）：useCrmData / ScopeContext 改 Realtime + 30min 兜底 refetch，替代 20s 轮询，省 egress（详见 2026-05-20 节）
 - [x] 邮箱密码登录（chrome.storage 持久 session）+ 创建团队
 - [x] **团队成员管理 UI**（顶栏 👥 团队）：list / invite / 改角色 / 移除（仅 owner/admin）
 - [x] **Supabase 免费层防自动暂停**：0012 `pg_cron` 每日 03:00 UTC 写心跳到 `_keepalive` 表
@@ -427,7 +451,7 @@ npm run package
 - [x] **客户质量分级**：⭐⭐⭐ 大客户 / ⭐⭐ 有潜力（默认）/ ⭐ 普通 / 🗑 垃圾
 - [x] **跟进提醒**：`stalled` 阶段 + `reminder_ack_at` + `reminder_disabled`
 - [x] **Google 联系人双向同步**（People API + chrome.identity OAuth）
-- [x] **数据自动刷新**：useCrmData 20s 轮询 + 自动 syncAutoStages
+- [x] **数据自动刷新**：useCrmData Realtime + 30min 兜底 refetch + 自动 syncAutoStages
 
 ## 待完成功能
 
@@ -542,10 +566,75 @@ npm run package
 **未做的可选项**（用户决定要不要）：
 - 写"批量验证"工具（4 小时跑 1000 次 reload 区分真活/真死号）—— 不解决搜索问题，只能给死号打标签便于清理。当前 🔴 orphan 那档已经是清理候选，**不值得再花 4 小时**。
 
+### 近期补完（2026-05-13 ~ 2026-05-20）— 多 AI 整合 + Realtime + 自动回复 + AI 归因
+
+**AI 回复三足鼎立：Gem / Claude / GPT 同 UI 共存**
+- [x] **Claude AI 回复**（`lib/claude-automation.ts` + `lib/claude-prompt.ts` + `panel/components/ClaudeReplySection.tsx`）：
+  - 网页端自动化 claude.ai（chrome.tabs + 注入脚本）；首次开新对话拿 chat URL → `claude_conversations` 表 per-contact 缓存；下次续聊
+  - **prompt 体系升级**（`claude-prompt.ts`）：ROLE_PROMPT（Miles 第一人称 + 6 类买家自适应）+ VEHICLE_KNOWLEDGE（全场景注入，所有 SKU + EXW 价 + 卖点 + 目标买家）+ GHANA_MARKET_PLAYBOOK（isGhanaContext 命中时注入：CIF 价格 / 关税 / Stallion vs Zonda 竞品 / 6 节点漏斗）+ Color Stock Rule（hard rule，绝不问颜色）
+  - **5 种 mode**：reply（默认，只出 reply + translation，可选 Customer Read / Client Record）/ analyze（深度分析 5 段）/ variants（3 个不同语气）/ quote（quote draft + 报价回复）/ discuss（自由对话）
+  - **客户信号注入**（`lib/customer-signals.ts`）：英语水平 + 情绪 + 沉默天数 + Pricing Math 段 — 在 chat history 之前注入到 prompt
+  - **Pricing Math 段去重**（`claude-prompt.ts` 1 次注入 + signals 不重复）
+- [x] **GPT-5 Thinking 回复**（`lib/gpt-automation.ts` + `lib/gpt-prompt.ts` + `panel/components/GPTReplySection.tsx` + migration `0023`）：
+  - 网页端自动化 chatgpt.com；首次开新对话拿 chat URL → `gpt_conversations` 表 per-contact 缓存
+  - **故意精简 prompt**：GPT-5 Thinking 自己联网查 + 推理报价效果更好，prompt 不喂 Vehicle Knowledge / Ghana playbook（Claude 那边保留，因为 Claude 默认不联网）
+  - 输出格式跟 Claude 一致（[WhatsApp Reply] + [Translation] + 可选 [Client Record]），共用 parser
+- [x] **AIReplyTab dropdown 切三档**：`🤖 Gem` / `🧠 GPT-5 Thinking` / `✨ Claude`，按钮选择持久化 chrome.storage
+
+**AI source attribution（出站消息 AI 归因）**
+- [x] **`lib/ai-reply-attribution.ts`**（183 行）：fillReply 时存 5 分钟 pending fill 窗口（chrome.storage.local），syncMessages 写出站消息时按 contactId + 时间窗口 + 文本相似度（公共前缀比例 ≥ 0.6）匹配，命中后写 `messages.ai_source`
+- [x] **migration `0024_message_ai_source.sql`**：messages 加 ai_source 列（claude/gem/gem_auto/gpt/null）
+- [x] **MessagesHistoryModal 来源 chip**：每条出站消息显示来源标签（✨Claude / 🤖Gem / ⚡自动 / 🧠GPT / 🌐翻译 / ⌨️手打）+ 顶部统计行"出站 N 条：claude × N，gem × M，manual × K"
+- [x] **AIReplyLogModal 加 GPT 分类**：source 枚举扩展支持 gpt
+- [x] **设计取舍**：相似度 60% 阈值容忍"改了 1-2 个字"，宽松匹配会误判 manual 为 AI；销售改太多就归 null 是预期行为
+
+**Supabase Realtime（替代 20s 轮询，省 egress）**
+- [x] **migration `0025_enable_realtime.sql`**：contacts / vehicle_interests / contact_tags / contact_handlers 加入 `supabase_realtime` publication；**REPLICA IDENTITY FULL** 让 DELETE/UPDATE payload.old 包含完整旧行（关联表前端 reducer 需要 contact_id 定位归属）
+- [x] **`useCrmData` 改 Realtime 架构**（752 行重写）：
+  - 初次加载 + 30min 兜底 refetch + 5min msg_directions 单独刷新 + visibilitychange throttled refetch（5min 节流防狂切 tab 烧 egress）
+  - Realtime 订阅 contacts/vehicle_interests/contact_tags，事件 reducer 增量更新本地 state map
+  - WA IDB 数据保持 30s 轮询（本地读，零 egress）
+  - **slim select**：`CONTACT_LIST_COLS = 'id, phone, group_jid, wa_name, name, country, language, budget_usd, customer_stage, quality, destination_port'` — 不再 select *（notes / google_* 等大字段在 useContact 详情卡才拉）
+  - **乐观置顶**（`setPinned`）：本地 state 立刻翻转 → DB 后台写 → 失败回滚
+- [x] **`ScopeContext` 改 Realtime**（293 行）：contact_handlers 表 Realtime 订阅，事件按 (contact_id|user_id) 复合 key 增删，无需重建整个 map；30min 兜底 refetch + visibility 节流；首次启动孤儿认领分页拉全集 contact ID（突破 1000 行限制）
+- [x] **egress 模型**：每销售每天 ~20-30 MB（初次 1.4MB + Realtime 几 KB/事件 + msg_directions 5min RPC ~50KB × 72 + 30min 兜底 ~1.4MB × 12）→ 月度 3 销售 25 天 ≈ 1.5GB，远低于 Supabase 免费 5GB
+- [x] **migration `0019` + `0022`** 提供 `last_message_direction_per_contact` RPC：给"我该回"判定回填客户最后入站/出站时间 + 计数（5 分钟刷新）
+
+**Facebook lead 自动回复链路（无人值守）**
+- [x] **`content/auto-reply.ts`**：完整 orchestrator —— 收到 SW 的 AUTO_REPLY_FIRE → jumpToChat → 跑 Gem（active=true）→ parseGemResponse → 有 vehicleId 就走"发图（pasteFilesToWhatsApp + 预览发送键）+ 文字 reply"两步，无车走纯文字 → upsert gem_conversation → 写 ai_extracted 时间轴 + ai_reply_logs（source=gem_auto, wasFilled=true）
+- [x] **`lib/auto-reply-state.ts`**：state machine（scheduled/firing/gem_running/sending_images/reply_filled/done/error），chrome.storage 持久化；用户在 banner 点"中止"删 state，下一个 await 之间 wasCancelled 检测到就 return
+- [x] **SW 端 chrome.alarms 调度**：SCHEDULE_AUTO_REPLY 创建 alarm（SW 休眠也能唤醒）→ 到点找 WA Web tab 发 AUTO_REPLY_FIRE；recoverStuckSchedules 在用户重开 WA 时扫一遍 scheduled 状态，延误了立即触发
+- [x] **续聊路径**：客户回了新消息后 1 分钟触发，formatUpdate 仅带最近几条消息，gem_chat_url 沿用首轮的，纯文字（不发图，除非客户问图）
+- [x] **`lib/reply-sanitize.ts`** P0 安全：auto-send 前必须 sanitize（自动发=没人 review，泄漏 RMB 价 / floor 是灾难）
+- [x] **per-contact 开关**：默认关闭，用户在 banner 上明确启用（`isContactAutoReplyEnabled`），不全局自动跑
+- [x] **isPhotoRequest 关键词识别**：续聊里客户要图（"more photos / 再发几张 / 多发图"等）→ 本轮再发一次图
+
+**其他**
+- [x] **`lib/contact-pins.ts` + per-user 置顶**（migration `0020`）：(contact_id, user_id) PK，乐观更新写 DB
+- [x] **`lib/ai-reply-log.ts` 改 chrome.storage.local 存储**（之前考虑过入库 `0021_auto_reply_logs.sql`，最终改本地存）：FIFO LRU，800 条上限，AIReplyLogModal 列表 + markdown 导出给 Claude review 质量
+- [x] **`MessagesHistoryModal` 加完整出站统计**：source × count 标签，让 boss 一眼看哪个 AI 用得多
+- [x] **强制版本闸门 → 0017 已上线**（前文 2026-05-10 已记，沿用至今）
+- [x] **`useCrmData` 分页全面铺开**：`fetchAllContacts` / `fetchAllVehicleInterests` / `fetchAllContactTags` 全走 PAGE=1000 分页，**`.order(...)` 必须加**（PostgREST 不保证 range 跨页稳定，并发写入时同行可能跨页重复）
+
+### 近期补完（2026-05-22）— WA Web DOM 漂移：客户 inbound 全部丢失
+
+- [x] **`findDataId` 改用 closest + testid，不再固定 N 层父链爬**（`content/whatsapp-messages.ts:65-86`）
+
+**症状**：销售用 AI 续聊（Gem / Claude / GPT 三个都一样），prompt 里 `[New Messages Since Last Reply]` 段只剩销售自己发的 photo 占位（`[Sales sent 1 photo to customer]`），**客户最近发的所有文字 inbound（"9,000 Ghana / ??? / And location"）完全消失**；`messages` 表也只有销售 outbound 占位，客户文字 0 条入库（=> useMessageSync 跑过但每次都漏 inbound）。
+
+**根因**：WA Web 这一版把消息 `data-id` 挪到了 `.message-in / .message-out` 的 **3 层祖父之上**（L11 = `[data-testid^="conv-msg-"]` wrapper）。`readChatMessages` → `findDataId` 之前 `for (i=0; i<3; i++)` 只看 L8/L9/L10，L11 永远查不到 → 所有 inbound bubble `id=null` 被 `continue` 静默跳过 → DOM 输出全空 → DB 同样空（useMessageSync 同链路）→ mergeDomWithDbMessages 也兜不住。
+
+**修复**：`findDataId` 改用 `el.closest('[data-testid^="conv-msg-"]')` 顺祖先链找消息级 wrapper，不限层数；兜底层数从 3 放回 6 + 加 `id.length >= 16` 长度过滤防 FB 广告 / 会话级共享 wrapper 误抓。`conv-msg-` 是消息级独有的 testid，不会撞会话级。
+
+**诊断方法**：DevTools console 跑 `document.querySelector('div#main')?.querySelectorAll('.message-in, .message-out').length` 看 bubble 数；再找客户文字（如 "9,000 Ghana"）反查它的 closest `[data-testid]` —— 这次抓到的是 `conv-msg-AC0FE7C196C0022A03512CB28F2D1DF3`，wrapper data-id 是 30 字符 hex。
+
+**教训**：whatsapp-messages.ts 之前两次修过这个上限（6 → 3 → 现在 closest）。任何固定 N 层父链爬都会因 DOM 漂移坏掉。**新加 DOM 解析逻辑一律用 `closest(testid-prefix)` 或 fiber 路径，不要写 `for i < N`**。
+
 ### 还可以做的（不急）
 
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
 - [ ] Chrome Web Store 私有发布（$5 + 1-3 天审核 → 全员自动更新，告别 zip 分发）
+- [ ] `ai_reply_logs` 真正入库（目前 chrome.storage.local 单人单机，团队没法 review 别人的 prompt 质量）
 
 ## Gem 配置流程（用户首次设置）
 
@@ -569,6 +658,7 @@ WhatsApp 绿色主题：
 - WhatsApp Web 业务账号（@lid 格式）通过 IndexedDB `contact.phoneNumber` 字段映射到真实手机号
 - MV3 service worker 会休眠，不能做后台 24h 监听（必须打开 WhatsApp Web 标签页）。批量抽取跑大量请求时偶尔会因 SW 休眠而静默停止，重新点继续即可（不会重复抽）
 - WhatsApp Web 改 DOM 时会破坏 `whatsapp-dom.ts` 选择器；IndexedDB schema 也可能变（虽然更稳定）
+- **`findDataId` 永远别再写固定层数父链**（`whatsapp-messages.ts`）：反复因 WA Web DOM 漂移坏过（6 → 3 → 2026-05-22 改 closest + testid）。新版 data-id 在 `.message-in/.message-out` 的 3 层祖父之上的 `[data-testid^="conv-msg-"]` wrapper 上。任何"从 message-in 元素往上爬找 data-id"的逻辑一律用 `el.closest('[data-testid^="conv-msg-"]')`，不要 `for i < N`。一旦这块再坏：**客户所有 inbound 消息从 DOM / DB / AI prompt 同时消失**，销售完全感知不到（DB 表面有消息 = 销售 outbound 占位，但客户回复 0 条），AI 续聊永远只看到销售自己发图
 - WhatsApp 搜索框已从 `contenteditable` 改成原生 `<input>`，跳转用 **search + Enter** 而非模拟点击（React 上的 click 事件不触发）
 - AI API 限流：`service-worker.ts` 已加 3 次指数退避（3s/8s/15s）；bulk extract 默认 4/min；auto-translate 顺序队列 + 200ms 间隔（因为换 Google Translate 后无配额限制）
 - `auto-translate.ts` 早期版本有 drop bug（MAX_CONCURRENT=2 超出直接丢，长聊天后面消息翻不出），已改为顺序 Promise 队列
@@ -602,6 +692,16 @@ WhatsApp 绿色主题：
   - send 协议处理服务端解析 + chat 加载需要 **≥14 秒**，少于这个时间检查 chat header 会误判为"号未注册"（之前 David Eze 实测验证 fail 的根因——8 秒等待不够）
 - **WA Web 多 tab 共享 session 不需要重新扫码**（2026-05-12 验证）：之前以为 WA Web 强制单 tab，实际上同一个 Chrome profile 里第二个 tab 打开 web.whatsapp.com 直接进——session 通过 IndexedDB 共享。这让"用独立 tab 跑后台任务而不打扰主 tab"成为可能。但 IDB 是共享的，两个 tab 写冲突还是要小心
 - **活性体检 5 档分类**（`Vitality` 联合类型）：`active` / `stale` / `cold` / **`imported`**（新增，不在 WA Web 缓存但 messages 表有数据）/ `orphan`。**🔵 imported 绝对不要删**——是真客户，只是 WA Web 缓存装不下。任何处理"WA Web 搜不到"的代码都要先看是不是 imported 档
+- **Realtime + REPLICA IDENTITY FULL 教训**（migration 0025）：默认 REPLICA IDENTITY 只发 PK，但 `vehicle_interests` / `contact_tags` PK 不含 contact_id，前端 reducer 收到 DELETE / UPDATE 事件时无法定位 state 里属于哪个 contact 的归属。**新加 Realtime-订阅表时如果 PK 不含外键归属列，必须 `ALTER TABLE … REPLICA IDENTITY FULL`**。FULL 把整行旧值都写进 WAL，万级以下行数 overhead 可忽略
+- **Realtime filter 不支持 join**：`postgres_changes` filter 只能单列 equality（如 `org_id=eq.<uuid>`），关联表（`vehicle_interests` / `contact_handlers` 等无 org_id 列）只能 listen all-rows，RLS 在服务端确保只下发本 org 可见行。订阅时要清楚 filter 不够细就靠 RLS 兜底
+- **slim select 别 select \***：1700 contacts 一次拉全场景下，`select('*')` 每行多 KB（含 notes / google_* / created_at 这些大字段），egress 翻几倍。`CONTACT_LIST_COLS` 只 11 列够列表 / 撞单 / autoStage 用；详情卡（notes 等）走 useContact 单查。**加新列到 list 渲染前问自己：能不能单查？**
+- **`.in('id', [...])` URL 长度炸弹依然有效**（前文 2026-05-08 已记）。Realtime 改造后已经全部换 `contact_handlers!inner(user_id)` 服务端 join 路径
+- **AI source attribution 是启发式不是真理**（`lib/ai-reply-attribution.ts`）：5 分钟窗口 + 60% 公共前缀阈值。销售改太多字（前缀 60% 不命中）→ 归 null；fill 后超 5 分钟才发 → 归 null。这些都是预期行为不是 bug。`messages.ai_source = null` ≠ "manual"，应理解为"未归因"
+- **GPT 不喂 reference data 是有意为之**（`gpt-prompt.ts`）：GPT-5 Thinking 自己联网查 + 推理报价效果更好，prompt 不要塞车型库 / Ghana playbook 等 reference。Claude 那边保留（Claude 默认不联网）。修改 prompt 时不要"对齐两个 AI"
+- **Claude `[Sales Guidance — TOP PRIORITY]` 段是 override 不是 hint**：销售在 textarea 里写"用阿拉伯语回复 + 强硬一点"，prompt 顶部注入这段，Claude 必须严格执行覆盖默认行为。改 prompt 模板时不要把这段降级成普通指令
+- **自动回复 P0 安全：reply 必须先 `sanitizeReplyForCustomer` 再 paste**（`content/auto-reply.ts`）：自动发=没人 review，Gem 偶尔会把 [INTERNAL] EXW 价或 floor 拼到回复里，泄漏 = 灾难。手动 fillReply 路径可以放过（销售自己看到才发），但 auto-send 路径绝对不能省 sanitize
+- **MV3 SW + chrome.alarms 调度自动回复**（`background/service-worker.ts` SCHEDULE_AUTO_REPLY）：用 alarm 不用 setTimeout—— alarm 能唤醒休眠的 SW，setTimeout 跟着 SW 一起死。alarm 触发后找 WA Web tab 发 AUTO_REPLY_FIRE；用户重开 WA 时 `recoverStuckSchedules` 扫一遍 scheduled 状态延误的就立即触发
+- **`ai-reply-log.ts` 改本地存储不上 Supabase**：单人主用，单条 ~10 KB × MAX_ENTRIES=800 ≈ 8MB 在 chrome.storage.local 10MB 配额内。FIFO LRU evict。**团队场景将来要 review 别人的 prompt 质量再考虑入库**——目前 `ai_reply_logs` migration 0021 已建但代码不用
 
 ## 用户偏好
 

@@ -25,6 +25,21 @@ interface CacheEntry {
 
 let nameToPhoneCache = new Map<string, CacheEntry>();
 
+/**
+ * 归一化名字做 cache key。WA Web 在 DOM header 偶尔显示 typographic 引号
+ * （'）而 IDB chat.name 存的是 ASCII 单引号（'）—— 不归一化时
+ * "China car's" vs "China car's" 完全不匹配。同时 trim 防尾空格。
+ */
+function normalizeName(raw: string): string {
+  return raw
+    .trim()
+    .replace(/[‘’‚‛]/g, "'")
+    .replace(/[“”„‟]/g, '"');
+}
+
+/** 上次因 cache miss 触发 refresh 的时间戳，防止抖动期间疯狂 refresh */
+let lastCacheMissRefreshAt = 0;
+
 export async function refreshChatNameCache(): Promise<void> {
   try {
     const wa = await readWhatsAppData();
@@ -32,7 +47,7 @@ export async function refreshChatNameCache(): Promise<void> {
 
     const addEntry = (name: string | null | undefined, jid: string) => {
       if (!name) return;
-      const key = name.trim();
+      const key = normalizeName(name);
       if (!key) return;
       if (next.has(key)) return;
       // 群聊：jid 以 @g.us 结尾
@@ -71,6 +86,87 @@ function findMainPane(): Element | null {
     document.querySelector('div#main') ||
     document.querySelector('[data-testid="conversation-panel"]')
   );
+}
+
+/**
+ * 2026-05 起 WA Web 不再把 JID 放进 DOM attribute，但 React fiber 上的
+ * `chat` model 仍然保留完整结构（id._serialized / contact.phoneNumber /
+ * formattedTitle）。`#main` 元素 fiber 向上 ~5 层就有这个 chat 对象。
+ *
+ * 字段名带 `__x_` 前缀是 MobX observable 包装的产物；同时直接名 (`id`,
+ * `contact`, `phoneNumber`) 在某些组件层也可能存在——两个都试一下。
+ */
+function getXProp<T = unknown>(obj: unknown, key: string): T | null {
+  if (!obj || typeof obj !== 'object') return null;
+  const o = obj as Record<string, unknown>;
+  const v = o[key] ?? o[`__x_${key}`];
+  return (v as T) ?? null;
+}
+
+/** JID 字段可能是裸字符串 `"233@c.us"` 或对象 `{_serialized: "233@c.us"}`，统一抽出 string */
+function asJidString(v: unknown): string | null {
+  if (typeof v === 'string') return v;
+  if (v && typeof v === 'object') {
+    const ser = (v as Record<string, unknown>)._serialized;
+    if (typeof ser === 'string') return ser;
+  }
+  return null;
+}
+
+interface FiberChatModel {
+  id?: unknown;
+  __x_id?: unknown;
+  formattedTitle?: string;
+  __x_formattedTitle?: string;
+  contact?: unknown;
+  __x_contact?: unknown;
+}
+
+function readChatFromMainFiber(main: Element): {
+  name: string | null;
+  phone: string | null;
+  rawJid: string | null;
+  groupJid: string | null;
+} | null {
+  const fiberKey = Object.keys(main).find((k) => k.startsWith('__reactFiber'));
+  if (!fiberKey) return null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let cur: any = (main as any)[fiberKey];
+  let depth = 0;
+  let chat: FiberChatModel | null = null;
+  while (cur && depth < 15) {
+    const mp = cur.memoizedProps;
+    if (mp && typeof mp === 'object') {
+      const candidate = mp.chat as FiberChatModel | undefined;
+      const idStr = asJidString(getXProp(candidate, 'id'));
+      if (candidate && idStr) {
+        chat = candidate;
+        break;
+      }
+    }
+    cur = cur.return;
+    depth++;
+  }
+  if (!chat) return null;
+
+  const chatJid = asJidString(getXProp(chat, 'id'));
+  if (!chatJid) return null;
+
+  const nameRaw = getXProp(chat, 'formattedTitle');
+  const name = typeof nameRaw === 'string' ? nameRaw : null;
+
+  if (chatJid.endsWith('@g.us')) {
+    return { name, phone: null, rawJid: chatJid, groupJid: chatJid };
+  }
+
+  // 个人聊天：@c.us 直接含手机号；@lid 业务号要看 contact.phoneNumber 拿真实 @c.us
+  let phone = jidToPhone(chatJid);
+  if (!phone) {
+    const contact = getXProp(chat, 'contact');
+    const pnJid = asJidString(getXProp(contact, 'phoneNumber'));
+    if (pnJid) phone = jidToPhone(pnJid);
+  }
+  return { name, phone, rawJid: chatJid, groupJid: null };
 }
 
 function readNameFromHeader(scope: ParentNode): string | null {
@@ -144,12 +240,24 @@ export function readCurrentChat(): CurrentChat {
   const main = findMainPane();
   if (!main) return EMPTY_CHAT;
 
+  // 0. 最优路径：直接从 #main 的 React fiber 读 chat 模型。
+  //    新版 WA Web (2026-05+) 不再把 JID 放进 DOM attribute / IDB chat.name，
+  //    但 fiber 上的 chat 对象一直完整保留 id/phoneNumber/formattedTitle。
+  //    这是唯一不依赖 nameToPhoneCache 命中的可靠路径。
+  const fromFiber = readChatFromMainFiber(main);
+  if (fromFiber && (fromFiber.phone || fromFiber.groupJid)) {
+    if (fromFiber.rawJid && fromFiber.phone) {
+      void rememberJidPhone(fromFiber.rawJid, fromFiber.phone);
+    }
+    return fromFiber;
+  }
+
   const name = readNameFromHeader(main) || readNameFromHeader(document);
   if (!name) return EMPTY_CHAT;
 
-  // 1. 先看 IDB 缓存（按 header 显示名查 JID）——
-  //    新版 WhatsApp 不再把 JID 放进消息 data-id，所以 DOM 抓不到，必须靠 IDB
-  const cached = nameToPhoneCache.get(name.trim());
+  // 1. IDB 缓存（按 header 显示名查 JID）—— fiber 拿不到时的兜底
+  const normalizedName = normalizeName(name);
+  const cached = nameToPhoneCache.get(normalizedName);
   if (cached?.groupJid) {
     return { name, phone: null, rawJid: cached.jid, groupJid: cached.groupJid };
   }
@@ -158,6 +266,19 @@ export function readCurrentChat(): CurrentChat {
   const groupJid = readGroupJidFromScope(main);
   if (groupJid) {
     return { name, phone: null, rawJid: null, groupJid };
+  }
+
+  // 3. Cache miss 且 DOM 也抓不到 JID → 可能是新建的群 / 刚加的客户，
+  //    IDB 已有但 30s 轮询还没扫到。throttled 触发一次 refresh，
+  //    refresh 完 dispatch sgc:refresh-chat 让 useCurrentChat 重读。
+  if (!cached) {
+    const now = Date.now();
+    if (now - lastCacheMissRefreshAt > 3000) {
+      lastCacheMissRefreshAt = now;
+      void refreshChatNameCache().then(() => {
+        window.dispatchEvent(new CustomEvent('sgc:refresh-chat'));
+      });
+    }
   }
 
   let phone: string | null = null;
