@@ -11,6 +11,8 @@
 import { supabase } from './supabase';
 import type { ChatMessage } from '@/content/whatsapp-messages';
 import type { Database } from './database.types';
+import { attributeOutboundMessage } from './ai-reply-attribution';
+import { markAiReplyFilled } from './ai-reply-log';
 
 type MessageRow = Database['public']['Tables']['messages']['Row'];
 
@@ -20,27 +22,60 @@ export async function syncMessages(
 ): Promise<{ inserted: number; error?: string }> {
   if (!contactId || messages.length === 0) return { inserted: 0 };
 
-  const rows = messages
-    .filter((m) => m.id && m.text)
-    .map((m) => ({
-      contact_id: contactId,
-      wa_message_id: m.id,
-      direction: m.fromMe ? ('outbound' as const) : ('inbound' as const),
-      text: m.text,
-      sent_at: m.timestamp ? new Date(m.timestamp).toISOString() : null,
-    }));
+  // 对每条出站消息归因：查 pending fills（5 分钟窗口内 + 文本相似度匹配） → 写 ai_source
+  // 入站消息 ai_source 永远 null
+  const rows = await Promise.all(
+    messages
+      .filter((m) => m.id && m.text)
+      .map(async (m) => {
+        const direction = m.fromMe ? ('outbound' as const) : ('inbound' as const);
+        let aiSource: string | null = null;
+        let attributedLogId: string | null = null;
+        if (direction === 'outbound') {
+          const attr = await attributeOutboundMessage({
+            contactId,
+            text: m.text,
+            sentAt: m.timestamp ?? undefined,
+          });
+          if (attr) {
+            aiSource = attr.source;
+            attributedLogId = attr.logId;
+          }
+        }
+        return {
+          contact_id: contactId,
+          wa_message_id: m.id,
+          direction,
+          text: m.text,
+          sent_at: m.timestamp ? new Date(m.timestamp).toISOString() : null,
+          ai_source: aiSource,
+          _attributedLogId: attributedLogId, // 内部字段，upsert 前剥掉
+        };
+      }),
+  );
 
   if (rows.length === 0) return { inserted: 0 };
 
+  // 剥内部字段
+  const upsertRows = rows.map(({ _attributedLogId, ...row }) => row);
+
   const { error, count } = await supabase
     .from('messages')
-    .upsert(rows, {
+    .upsert(upsertRows, {
       onConflict: 'contact_id,wa_message_id',
       ignoreDuplicates: true,
       count: 'exact',
     });
 
   if (error) return { inserted: 0, error: error.message };
+
+  // upsert 成功后，对归因到的 ai_reply_log 标 was_sent —— fire and forget
+  for (const row of rows) {
+    if (row._attributedLogId) {
+      void markAiReplyFilled(row._attributedLogId);
+    }
+  }
+
   return { inserted: count ?? 0 };
 }
 
@@ -65,6 +100,45 @@ export async function loadMessages(
     .order('sent_at', { ascending: false, nullsFirst: false })
     .limit(limit);
   return (data ?? []).reverse();
+}
+
+/**
+ * DOM 消息 + DB 消息合并：DOM 优先（最新状态），DB 补 DOM 没拿到的（DOM 部分加载）。
+ *
+ * 为啥需要：WA Web 刚发完图后 DOM 只有最新 1 条 bubble，老消息还没渲染出来；
+ * `readChatMessages` / `waitForChatMessages` 拿到 ≥1 就返回，AI prompt 就成了
+ * "只有最新一条" 的残缺上下文。任何「DOM 消息 → AI prompt」的路径都该过这个 helper。
+ *
+ * 合并规则：
+ *   - dedup by `id` (DOM) === `wa_message_id` (DB)
+ *   - DB 行用 outbound/inbound 推导 fromMe，没 sender（DB 不存）
+ *   - 按 timestamp ASC 排序（正序）
+ *
+ * 注意：`messages` 表行依赖 useMessageSync 先把客户在 DOM 见过的消息持久化过。
+ * 客户的 reply 如果用户从没打开过聊天，DB 也没有 → 这种 case 兜不住。
+ * 但只要正常浏览过该客户一次，customer reply 就会进 DB。
+ */
+export async function mergeDomWithDbMessages(
+  domMessages: ChatMessage[],
+  contactId: string,
+  dbLimit = 50,
+): Promise<ChatMessage[]> {
+  const dbRows = await loadMessages(contactId, dbLimit);
+  if (dbRows.length === 0) return domMessages;
+  const domIds = new Set(domMessages.map((m) => m.id));
+  const extras: ChatMessage[] = dbRows
+    .filter((r) => !domIds.has(r.wa_message_id))
+    .map((r) => ({
+      id: r.wa_message_id,
+      fromMe: r.direction === 'outbound',
+      text: r.text,
+      timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
+      sender: null,
+    }));
+  if (extras.length === 0) return domMessages;
+  return [...domMessages, ...extras].sort(
+    (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0),
+  );
 }
 
 /**

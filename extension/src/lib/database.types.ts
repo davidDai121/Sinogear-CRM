@@ -420,6 +420,57 @@ export interface Database {
         };
         Relationships: [];
       };
+      gpt_conversations: {
+        Row: {
+          id: string;
+          contact_id: string;
+          template_id: string;
+          chat_url: string;
+          last_used_at: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          contact_id: string;
+          template_id: string;
+          chat_url: string;
+          last_used_at?: string;
+        };
+        Update: {
+          chat_url?: string;
+          last_used_at?: string;
+        };
+        Relationships: [];
+      };
+      gpt_templates: {
+        Row: {
+          id: string;
+          org_id: string;
+          name: string;
+          gpt_url: string;
+          description: string | null;
+          is_default: boolean;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          org_id: string;
+          name: string;
+          gpt_url: string;
+          description?: string | null;
+          is_default?: boolean;
+          created_by?: string | null;
+        };
+        Update: {
+          name?: string;
+          gpt_url?: string;
+          description?: string | null;
+          is_default?: boolean;
+        };
+        Relationships: [];
+      };
       messages: {
         Row: {
           id: string;
@@ -429,6 +480,8 @@ export interface Database {
           text: string;
           sent_at: string | null;
           synced_at: string;
+          /** 出站消息的 AI 来源：claude/gem/gem_auto/gpt，NULL = manual */
+          ai_source: string | null;
         };
         Insert: {
           id?: string;
@@ -438,10 +491,12 @@ export interface Database {
           text: string;
           sent_at?: string | null;
           synced_at?: string;
+          ai_source?: string | null;
         };
         Update: {
           text?: string;
           sent_at?: string | null;
+          ai_source?: string | null;
         };
         Relationships: [];
       };

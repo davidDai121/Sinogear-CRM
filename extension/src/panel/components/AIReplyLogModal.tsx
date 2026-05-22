@@ -28,6 +28,7 @@ const SOURCE_LABELS: Record<AiReplySource, string> = {
   claude: '✨ Claude',
   gem: '🤖 Gemini',
   gem_auto: '⚡ 自动回复',
+  gpt: '🧠 GPT',
 };
 
 export function AIReplyLogModal({ orgId, onClose }: Props) {

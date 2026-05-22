@@ -87,6 +87,13 @@ const SECTION_HEADERS = [
   'WhatsApp Reply',
   'Translation',
   'Translation & Strategy',
+  // GPT prompt 用的是 [Full Translation & Strategy]（gpt-prompt OUTPUT_REMINDER）；
+  // 跟 Claude 的 [Translation & Strategy] 不一样，没匹配上时 [WhatsApp Reply] 段
+  // 会吞掉中文翻译 + 策略，ReplyCard 又用 Google Translate "兜底"，体验崩
+  'Full Translation & Strategy',
+  '完整翻译与策略',
+  '完整翻译',
+  '中文翻译与策略',
   'Strategy',
   'Client Record',
   'Pain Points',
@@ -111,6 +118,10 @@ export function parseClaudeResponse(rawText: string): ParsedClaudeResponse {
   const translation =
     sections['translation'] ||
     sections['translation & strategy'] ||
+    sections['full translation & strategy'] ||
+    sections['完整翻译与策略'] ||
+    sections['完整翻译'] ||
+    sections['中文翻译与策略'] ||
     sections['中文翻译'] ||
     null;
 

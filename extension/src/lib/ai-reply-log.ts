@@ -19,7 +19,7 @@
  * "unlimitedStorage" 权限即可，对外 API 不变。
  */
 
-export type AiReplySource = 'claude' | 'gem' | 'gem_auto';
+export type AiReplySource = 'claude' | 'gem' | 'gem_auto' | 'gpt';
 
 export interface AiReplyLog {
   id: string;
@@ -34,7 +34,8 @@ export interface AiReplyLog {
   response_parsed: Record<string, unknown> | null;
   /** TOP PRIORITY guidance text user typed in textarea, if any */
   guidance: string | null;
-  message_source: 'dom' | 'db' | null;
+  /** 'dom' = WA 实时聊天 · 'db' = 导入的历史 · 'guidance' = 仅按销售指令冷启动（无历史） */
+  message_source: 'dom' | 'db' | 'guidance' | null;
   message_count: number | null;
   chat_url: string | null;
   was_filled: boolean;
@@ -62,7 +63,7 @@ export interface LogAiReplyParams {
   response?: string | null;
   responseParsed?: Record<string, unknown> | null;
   guidance?: string | null;
-  messageSource?: 'dom' | 'db' | null;
+  messageSource?: 'dom' | 'db' | 'guidance' | null;
   messageCount?: number | null;
   chatUrl?: string | null;
   /** True if reply was auto-sent (auto-reply) or pre-filled at insert time. Otherwise false; flip later. */
