@@ -630,11 +630,58 @@ npm run package
 
 **教训**：whatsapp-messages.ts 之前两次修过这个上限（6 → 3 → 现在 closest）。任何固定 N 层父链爬都会因 DOM 漂移坏掉。**新加 DOM 解析逻辑一律用 `closest(testid-prefix)` 或 fiber 路径，不要写 `for i < N`**。
 
+### 近期补完（2026-05-26 ~ 2026-05-27）— 时间戳大修 + AI 回复 UI 持久化 + 防跨聊天污染 + Meta CAPI
+
+**起点**：用户报告 Samuel chat 的 prompt 顶部出现 `[05-26 15:26] Sales sent 2 photos / Customer sent 1 document`——他 5-21 之后没跟 Samuel 聊过，"为什么凭空冒出 5-26 的消息"。深入挖出一整串相关 bug：纯媒体 bubble 没 timestamp / 中文时段 12 小时偏移 / done card stale 持久化 / 跨聊天污染等。3 天迭代 13 个 task，最终 commit `aca0365` + `c8a3c61` push 完。
+
+#### AI 回复 prompt / 时间戳大修
+
+- [x] **parsePrePlainText 加中文时段解析**（`whatsapp-messages.ts`）：long-standing bug 一直没察觉。WA Web 中文界面 `data-pre-plain-text="[下午5:18, 2026年5月18日]..."` 用中文时段标记，之前正则只匹配 `(AM|PM)?` → "下午5:18" parse 成 hour=5（应该 17）。所有 PM 时间偏 12 小时，相对顺序对所以没被发现。新增中文时段（凌晨/清晨/早上/上午/中午/下午/晚上）+12 转换
+- [x] **formatTimestamp(null) → `??-?? ??:??`**（三个 prompt 文件）：纯媒体 bubble 无 caption 时没 `data-pre-plain-text`，timestamp=null → 之前 `new Date()` 兜底显示当下时刻。Samuel "5-21 凭空冒出 5-26 媒体"就是这个 bug。返回 `??-?? ??:??`，prompt 顶部加注释说明"位置非按时序"
+- [x] **readChatMessages 重写 + currentDate 追踪**：按 DOM 顺序合并 bubble + date header span 遍历，date header（"2026年5月18日" / "星期四" / "今天" / "昨天"）出现时更新 currentDate。纯媒体 bubble 从内 `<span>下午2:11</span>` + currentDate 合成准确 sent_at
+- [x] **stripTrailingMeta 剥末尾噪音**：之前 `getMessageText` innerText 把 bubble 底部 "下午2:32" / "已编辑" 一起带进 text → prompt 里每条消息后跟着冗余中文时间。出口剥一遍。**英文保守**：必须带 AM/PM 才剥（防误伤客户写"meet at 5:00"）
+- [x] **删除占位识别 + DB 覆盖**：DOM "你已删除这条消息" → text 改 `[已删除]`，`syncMessages` 用 onConflict 覆盖之前抓过的原文（用户后来在 WA 端撤回的）
+
+#### AI 回复 UI 持久化 + 续聊上下文
+
+- [x] **`usePersistedReplyStatus` hook**（`panel/hooks/usePersistedReplyStatus.ts`）：done 状态按 `(source, contactId)` 持久化到 chrome.storage，切走客户回来能恢复回复 UI。**race fix**：async get 完成时用 functional setState 判定 `current.kind === initial.kind` 才用 stale 恢复，避免覆盖用户已触发的 generate。**自动盖 generatedAt 戳**
+- [x] **`GeneratedAtBadge` 组件**：done card 上方显示生成时间 + "X 分钟前"，> 10 分钟橙色警告"可能不含最新消息，请重新生成"。让 stale 状态一眼可见（用户曾切回客户看到 1 小时前的 prompt 误以为是当下，抱怨"时间错 + 缺消息"）
+- [x] **`buildFollowUpMessage` / `formatUpdate` 注入精简客户档案**（三个 prompt 文件）：续聊也带 `[Customer Context]` block + Vehicle Interests，防 thread 长后 AI 忘客户 anchor。Section 标题改成 `[Recent Chat History — last 50, may overlap...]` 不再骗 AI 说是新增消息
+
+#### 防跨聊天污染（jumpToChat 严格身份校验）
+
+- [x] **`jumpToChat` 加 RequireMatch + `verifyHeaderMatches`**（`lib/jump-to-chat.ts`）：之前 `headerChangedFrom` 弱兜底"只要 header 变了就算成功"会导致跨聊天污染（搜索过程中 WA 临时切到错 chat，DOM 读到别人消息，`syncMessages` 写错位到目标 contact）。新增严格判定（phone digits 或 name 命中 header）。AI 自动化路径必须传 `requireMatch`；用户主动跳转路径保持旧宽松行为
+- [x] **三个 ReplySection 全路径加 verify**：`loadChatMessages` / `loadAiMessages` / `loadDiscussMessages` 都加 jumpToChat requireMatch + 写 DB 前 sanity check（防 race：generate 期间用户手动切 WA chat）。needsJump=false 路径也加 verify
+
+#### 自动 backfill NULL sent_at + 一次性 backfill 失败教训
+
+- [x] **`syncMessages` 加 `backfillNullSentAt`**：DOM 新拿到准确 timestamp 时反向 UPDATE DB 里 sent_at IS NULL 的老行。`sent_at=is.null` filter 保证不覆盖已有时间（幂等安全）。配合 readChatMessages 修源头，老 NULL row 在用户重新打开聊天时自动填上真实 sent_at
+- [x] **历史 1362 行 NULL sent_at 一次性 backfill + **立即回滚****：scripts/backfill-null-sent-at.mjs 用 `sent_at = synced_at` 近似 backfill。用户实测发现 Samuel 那 PDF 实际 5-21 14:11 客户发的被错标成 5-26 15:26（synced_at 是销售首次打开 WA sync 进 DB 的时刻，跟实际发送时间可能差几天）。立刻 rollback-null-sent-at-backfill.mjs 用 `sent_at = synced_at` 精确相等作签名识别 backfill 行（真实 WA sent_at 精度只到 minute，不会等于 microsecond 级 synced_at），1362 行全部回滚成 NULL。**教训**：DB 数据 backfill 不能凭"看起来差不多对"的近似，最稳还是修源头 + 用户重新打开自动填
+
+#### Meta Conversions API + AI 自动推断 customer_stage（业务功能）
+
+- [x] **`fb-conversions.ts` Meta CAPI 客户端**：`mapStageToFbEvent` 把 customer_stage 映射到 Meta 标准事件（qualifying→Lead / negotiating→InitiateCheckout / quoted→AddPaymentInfo / won→Purchase / lost→Lost；new/stalled 跳过）；fire-and-forget 调 `conversions-api` Edge Function 不阻塞 UI
+- [x] **`stage-inference.ts` + `useAutoFbStage` hook**：LLM 看聊天判断 5 个 stage 输出 confidence + reasoning。守护规则：每 contact 1h 内最多 1 次 AI 推断；消息 < 5 条 / 最后入站 > 30 天 / 24h 内有 manual 改 stage / won 锁 / lost 半锁 / confidence < 0.8 → skip
+- [x] **service-worker 加 `INFER_STAGE` handler** 调 callQwen
+- [x] **events-log 钩入 `triggerFbConversion`**：`logContactEvent('stage_changed')` 自动触发 Meta 转发；contact_events 加 fb_conversion_sent / fb_lead_received 事件类型
+- [x] **migrations 0028-0030**：contacts 加 `fb_lead_id` / `ctwa_clid` / `fb_ad_id`；vehicle_media 加 `file_name`；contact_events 加 fb_conversion_sent / fb_lead_received 事件
+- [x] **functions/conversions-api + fb-lead-webhook**：Meta 转发 + FB lead form 接收 Edge Functions
+- [x] **TimelineSection 显示 AI stage 推断的 confidence + reasoning + FB 事件 icon**
+- [x] **ContactCard 接入 `useAutoFbStage`**（跳过群聊）
+
+#### 其他
+
+- [x] **vehicle-matcher 重构 `scoreVehiclesByText`**：substring 二元匹配 → 打分式（精度更高）；`vehicle-aliases.ts` 加 GAC Trumpchi（Emkoo / GS8 / GS4）中英别名
+- [x] **VehicleRecommendations 用新 scoreVehiclesByText**
+- [x] **auto-reply 用 vehicle_media.file_name 真实文件名** 发图，替代之前生成的占位名
+- [x] **bulk-extract 顺手 `syncMessages`**：批量抽取时把 DOM 抓到的消息持久化进 messages 表
+
 ### 还可以做的（不急）
 
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
 - [ ] Chrome Web Store 私有发布（$5 + 1-3 天审核 → 全员自动更新，告别 zip 分发）
 - [ ] `ai_reply_logs` 真正入库（目前 chrome.storage.local 单人单机，团队没法 review 别人的 prompt 质量）
+- [ ] `waitForChatMessages` 稳态判定 600ms 仍可能漏最新消息（销售刚发完图就 generate）；目前靠"延迟几秒再点 generate"+ GeneratedAtBadge stale 警告兜底，未来可加"DOM 上最新 bubble 时间戳 ≈ now"的判定
 
 ## Gem 配置流程（用户首次设置）
 
@@ -702,6 +749,16 @@ WhatsApp 绿色主题：
 - **自动回复 P0 安全：reply 必须先 `sanitizeReplyForCustomer` 再 paste**（`content/auto-reply.ts`）：自动发=没人 review，Gem 偶尔会把 [INTERNAL] EXW 价或 floor 拼到回复里，泄漏 = 灾难。手动 fillReply 路径可以放过（销售自己看到才发），但 auto-send 路径绝对不能省 sanitize
 - **MV3 SW + chrome.alarms 调度自动回复**（`background/service-worker.ts` SCHEDULE_AUTO_REPLY）：用 alarm 不用 setTimeout—— alarm 能唤醒休眠的 SW，setTimeout 跟着 SW 一起死。alarm 触发后找 WA Web tab 发 AUTO_REPLY_FIRE；用户重开 WA 时 `recoverStuckSchedules` 扫一遍 scheduled 状态延误的就立即触发
 - **`ai-reply-log.ts` 改本地存储不上 Supabase**：单人主用，单条 ~10 KB × MAX_ENTRIES=800 ≈ 8MB 在 chrome.storage.local 10MB 配额内。FIFO LRU evict。**团队场景将来要 review 别人的 prompt 质量再考虑入库**——目前 `ai_reply_logs` migration 0021 已建但代码不用
+- **`parsePrePlainText` 必须识别中文时段**（`whatsapp-messages.ts`）：WA Web 中文界面 `data-pre-plain-text="[下午5:18, ...]"` 用中文时段标记（凌晨/清晨/早上/上午/中午/下午/晚上）不是英文 AM/PM。Long-standing bug：之前只匹配 AM/PM → 所有 PM 时间偏 12 小时（"下午5:18" 错成 5:18，相对顺序对所以没被发现）。**任何"看 WA Web 时间字串"的逻辑都要兼容中文时段 + 英文 AM/PM 两种**。中午 / 下午 / 晚上 = PM 走 < 12 → +12；上午 / 凌晨 / 清晨 / 早上 = AM 走 12 → 0
+- **`formatTimestamp(null)` 别用 `new Date()` 兜底**（三个 prompt 文件）：WA Web 纯媒体 bubble（图/视频/PDF 无 caption）没 `data-pre-plain-text`，`getMessageTimestamp` 返回 null → 之前 `new Date()` 兜底 = **显示当下时刻**。"客户 5-21 之后没聊过，prompt 里却出现 5-26 媒体"就是这个 bug。返回 `??-?? ??:??`，prompt 顶部加注释告诉 AI "位置非按时序，时间未知"
+- **`getMessageTimestamp` 纯媒体 fallback 走 currentDate + bubble 内时间字串**：`readChatMessages` 主循环按 DOM 顺序合并 bubble + date header span 遍历，遇到 date header（"2026年5月18日" / "星期四" / "今天" / "昨天" / "前天" / "周一~周日"）更新 currentDate。纯媒体 bubble pre-plain-text 不存在时，从 `[data-testid="msg-meta"]` 内 `<span>下午2:11</span>` 拿时间 + currentDate 合成 sent_at
+- **`stripTrailingMeta` 剥消息末尾 WA Web meta**：`getMessageText` innerText 抓 selectable-text 时会把 bubble 底部"下午2:32" / "已编辑" 等一起带进 text，跟前面结构化 `[MM-DD HH:MM]` 重复 + 矛盾让 AI 困惑。出口剥一遍。**英文兜底必须带 AM/PM 才剥**（防误伤客户写"meet at 5:00"）。新加 prompt-bound 文本字段时记得过这道
+- **`jumpToChat` 弱兜底已替换成 RequireMatch**（`lib/jump-to-chat.ts`）：之前 `headerChangedFrom` "header 变了就算跳成功" → 跨聊天污染（搜索过程中 WA 临时切到错 chat，DOM 读到别人的消息，`syncMessages` 写错位到目标 contact 永久污染 messages 表）。**AI 自动化路径**（generate / fillReply / bulk-extract / auto-reply / TagsSection / ContactTasksSection）**必须**传 `requireMatch={phone, name, waName}`；**用户主动跳转路径**（ContactsPage 行点击 / 💬 / FilteredChatList）保持旧宽松行为不用传。`verifyHeaderMatches` 判定：phone digits 命中 header 数字 OR name (≥ 2 字符) 命中 header 文本
+- **`syncMessages` 写 DB 前必须 sanity check 当前 chat**（三个 ReplySection 的 `loadAiMessages`）：读完 DOM 后再调 verifyHeaderMatches 一次防 race（generate 期间用户手动切 WA chat）。不匹配 → 放弃 DOM 消息走 DB fallback
+- **DB 数据 backfill 不能用 `synced_at` 作 sent_at 近似**（2026-05-26 实测踩坑）：synced_at 是销售首次打开 WA Web sync 进 DB 的时刻，跟消息实际发送时间可能差几天。Samuel 那 PDF 实际 5-21 14:11 客户发的，synced_at = 5-26 15:26（销售 5-26 才打开看），backfill 用 `sent_at = synced_at` 错标 5 天。**真实信息丢了就丢了，靠源头修 + 用户重新打开聊天自动 backfill**（`readChatMessages` 修源头 + `syncMessages` 反向更新）。任何 batch backfill 历史数据之前先 dry-run 跑代表性样本对比
+- **AI 回复 done card 必须明示 generatedAt**（`GeneratedAtBadge`）：`usePersistedReplyStatus` 持久化的 done card 没显示生成时间时，用户切回客户看到 1 小时前的 prompt 会误以为是当下的，抱怨"时间错 + 缺消息"。done card 顶部 banner "生成于 XX:XX（X 分钟前）"，> 10 分钟橙色警告"可能不含最新消息，请重新生成"。**新加 persisted UI 状态都要明示时间戳**
+- **`usePersistedReplyStatus` async get race**（`panel/hooks/usePersistedReplyStatus.ts`）：useEffect 启动 async get 后，如果用户立刻点 generate 改了 state，async get 完成时**不能用 stale 直接覆盖**——必须 functional setState 判 `current.kind === initial.kind` 才用 stale 恢复。早期 bug：generate 跑完几秒后 async get 回调把 new done 覆盖回 stale done，UI 显示 stale 状态用户以为没点中
+- **删除占位识别 + DB 覆盖**（`DELETED_PLACEHOLDER_PATTERNS` + `isDeletedPlaceholderText`）：DOM 抓到"你已删除这条消息" / "This message was deleted" → text 改 `[已删除]`，`syncMessages` 用 onConflict 覆盖之前抓过的原文（用户后来在 WA 端撤回的）。**先 `stripTrailingMeta` 再判删除占位**（防"你已删除这条消息中午11:31"因尾巴匹配不上而失败）
 
 ## 用户偏好
 
@@ -709,3 +766,5 @@ WhatsApp 绿色主题：
 - 销售工作台 UX 参考 WAPlus（顶部 tab + 右侧 CRM 面板）
 - 中文交流，UI 文案中文 + 客户对话原文（多语言）
 - 修改后让我用 Chrome MCP 自动验证，不要每次都让用户手动验
+- **prompt 里不要重复传时间**：结构化 `[MM-DD HH:MM]` 已经够了，WA Web bubble 末尾的"下午X:YY" / "晚上X:YY" / "已编辑" 等必须剥掉（2026-05-27 用户明确说"你就别传俩时间给各个 ai 了，把什么下午中午的都删掉"）。任何新加的 prompt-bound 文本字段都要过 `stripTrailingMeta`
+- **bug fix 之前先确认用户用的是哪个版本**：踩过坑——我修了代码以为 fix 已生效，用户实际还装着旧版本。判断方法：让用户看 `chrome://extensions/` → Sino Gear CRM → 详细信息 → 版本号，或者打开 panel devtools console 跑 `chrome.runtime.getManifest().version_name`；或者直接看 prompt 里的具体内容是否反映新逻辑（如时间是否 +12）
