@@ -3,28 +3,31 @@ import type { Database } from '@/lib/database.types';
 
 type VehicleRow = Database['public']['Tables']['vehicles']['Row'];
 
+export interface ScoredVehicle {
+  v: VehicleRow;
+  score: number;
+}
+
 /**
- * 把一段文本（lead 表单 / 聊天消息 / 兴趣 model 字段）匹配到 vehicles 表里最相关的那辆车。
+ * 给每辆车按文本相关性打分。
  *
  * 评分：
- *   - model + brand 都命中 → 高分
- *   - canonical model 命中 → 中分
- *   - 单 brand → 低分
- *   - 至少要 ≥ 3 分才算匹配
+ *   - brand + model 完整命中：+5
+ *   - model 单独命中（≥3 字符）：+3
+ *   - canonical 命中：+2
+ *   - canonical 去掉 brand 前缀后命中（≥3 字符）：+3
+ *   - brand 单独命中：+1（防止整页都是 "BYD" 一类的弱信号误推错车型）
  *
- * 排序：分数高 → updated_at 新 → 第一名。完全没命中返回 null。
- *
- * 自动回复用：lead 文本里有 `this_qin_plus_dmi_..._target_budget` 这种 key，
- * vehicleHint 抽出来 "qin plus dmi"，本函数把它对到库存里那辆 BYD Qin Plus 上。
+ * 阈值由调用方决定（matchVehicleFromText 用 ≥3；VehicleRecommendations 也用 ≥3）。
  */
-export function matchVehicleFromText(
+export function scoreVehiclesByText(
   text: string,
   vehicles: VehicleRow[],
-): VehicleRow | null {
-  if (!text || vehicles.length === 0) return null;
+): ScoredVehicle[] {
+  if (!text || vehicles.length === 0) return [];
   const haystack = text.toLowerCase();
 
-  const scored = vehicles.map((v) => {
+  return vehicles.map((v) => {
     let score = 0;
 
     const brand = v.brand?.toLowerCase() ?? '';
@@ -32,15 +35,9 @@ export function matchVehicleFromText(
     const canon = canonicalizeModel(v.model ?? '').toLowerCase();
     const brandModel = `${brand} ${model}`.trim();
 
-    // 完整 brand+model 命中（最强信号）
     if (brandModel.length >= 4 && haystack.includes(brandModel)) score += 5;
-
-    // model 单独命中（仅当 model 长度 ≥ 3，避免 "C" / "RV" 这种瞎打）
     if (model.length >= 3 && haystack.includes(model)) score += 3;
-
-    // canonical model 命中（如 "qin plus" canon → "byd qin plus"）
     if (canon && canon !== brandModel && haystack.includes(canon)) score += 2;
-    // canonical 去掉 brand 前缀（如 "BYD Qin Plus" → "qin plus"）
     const canonModelOnly = canon.replace(new RegExp(`^${brand}\\s+`, 'i'), '');
     if (
       canonModelOnly &&
@@ -50,14 +47,25 @@ export function matchVehicleFromText(
     ) {
       score += 3;
     }
-
-    // brand 单独（弱信号；防止整页全是 "BYD" 误匹配错车型 → 加 1 分顶天）
     if (brand.length >= 3 && haystack.includes(brand)) score += 1;
 
     return { v, score };
   });
+}
 
-  const ranked = scored
+/**
+ * 把一段文本（lead 表单 / 聊天消息 / 兴趣 model 字段）匹配到 vehicles 表里最相关的那辆车。
+ *
+ * 排序：分数高 → updated_at 新 → 第一名。完全没命中（score < 3）返回 null。
+ *
+ * 自动回复用：lead 文本里有 `this_qin_plus_dmi_..._target_budget` 这种 key，
+ * vehicleHint 抽出来 "qin plus dmi"，本函数把它对到库存里那辆 BYD Qin Plus 上。
+ */
+export function matchVehicleFromText(
+  text: string,
+  vehicles: VehicleRow[],
+): VehicleRow | null {
+  const ranked = scoreVehiclesByText(text, vehicles)
     .filter((s) => s.score >= 3)
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;

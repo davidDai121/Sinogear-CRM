@@ -22,6 +22,57 @@ function readStrippingInjections(el: HTMLElement): string {
   return (clone.innerText || clone.textContent || '').trim();
 }
 
+/**
+ * WA Web "你已删除这条消息" / "This message was deleted" 占位 → 内部用 [已删除] 统一表达。
+ * 销售自己删了消息后，DOM 上仍有 bubble 但 text 变成占位。
+ * 之前的 bug：DB 里已经 sync 过原文，[已删除] 这次没识别，prompt 仍带原文给 AI。
+ */
+const DELETED_PLACEHOLDER_PATTERNS = [
+  /^你已删除这条消息$/,
+  /^这条消息已被删除$/,
+  /^此消息已被删除$/,
+  /^You deleted this message$/i,
+  /^This message was deleted$/i,
+  /^You unsent a message$/i, // Messenger 风格兜底
+];
+
+export const DELETED_TEXT_MARKER = '[已删除]';
+
+function isDeletedPlaceholderText(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  return DELETED_PLACEHOLDER_PATTERNS.some((re) => re.test(t));
+}
+
+/**
+ * 剥消息末尾的 WA Web "trailing meta"：
+ *   - 中文时间标记："下午2:32" / "晚上10:47" / "中午11:33" / "凌晨1:10" 等
+ *   - "已编辑" 标记（可能跟时间一起："已编辑下午2:32" 或单独"已编辑"）
+ *   - 英文时间（兜底）："2:32 PM" / "10:47 PM"
+ *
+ * 这些字串是 WA Web bubble 底部的 meta 信息，innerText 抓 selectable-text
+ * 或 wrap 时会被包进 text。prompt 已经有结构化 [MM-DD HH:MM]，再带这些是噪音 +
+ * 还可能跟结构化时间矛盾（如 "[05-26 23:33] ... 中午11:33" 让 AI 困惑）。
+ *
+ * 循环剥几次防 "已编辑下午2:32" 这种叠加 + 中间有空白。
+ */
+function stripTrailingMeta(text: string): string {
+  let t = text;
+  for (let i = 0; i < 3; i++) {
+    const before = t;
+    // 中文时段 + 时间：稳剥（销售/客户消息不会以"下午2:32"这种结尾）
+    t = t.replace(/\s*(凌晨|清晨|早上|上午|中午|下午|晚上)\s*\d{1,2}:\d{2}\s*$/, '');
+    // 英文必须带 AM/PM 标识才剥 — 避免误伤客户真的写 "let's meet at 5:00" 这种
+    t = t.replace(/\s*\d{1,2}:\d{2}\s*(AM|PM|am|pm)\s*$/, '');
+    // "已编辑" / "Edited" 标记
+    t = t.replace(/\s*已编辑\s*$/, '');
+    t = t.replace(/\s*Edited\s*$/i, '');
+    t = t.trimEnd();
+    if (t === before) break;
+  }
+  return t;
+}
+
 function getMessageText(scope: Element): string {
   // 优先抓真正的消息体（有 data-pre-plain-text 属性的 .copyable-text 才是消息正文 wrapper）。
   // 不带 data-pre-plain-text 的 .copyable-text 是引用气泡 / Facebook 广告 header 卡片
@@ -93,14 +144,46 @@ function parsePrePlainText(pre: string): number | null {
   if (parts.length !== 2) return null;
   const [timePart, datePart] = parts;
 
-  const timeMatch = timePart.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?/);
-  if (!timeMatch) return null;
-  let hours = Number(timeMatch[1]);
-  const minutes = Number(timeMatch[2]);
-  const seconds = timeMatch[3] ? Number(timeMatch[3]) : 0;
-  const meridiem = timeMatch[4]?.toUpperCase();
-  if (meridiem === 'PM' && hours < 12) hours += 12;
-  if (meridiem === 'AM' && hours === 12) hours = 0;
+  // 时间解析：先 try 中文时段（凌晨/清晨/早上/上午/中午/下午/晚上 + h:m），
+  // 不匹配再 try 英文 AM/PM / 24h。
+  // ⚠️ 这块 long-standing bug：之前只识别英文 AM/PM，中文 WA Web 的 "下午5:18"
+  // 被错 parse 成 5:18（实际应该 17:18），所有 PM 时间错 12 小时。
+  let hours = 0;
+  let minutes = 0;
+  let seconds = 0;
+  const cnMatch = timePart.match(
+    /^(凌晨|清晨|早上|上午|中午|下午|晚上)(\d{1,2}):(\d{2})(?::(\d{2}))?$/,
+  );
+  if (cnMatch) {
+    const period = cnMatch[1];
+    hours = Number(cnMatch[2]);
+    minutes = Number(cnMatch[3]);
+    seconds = cnMatch[4] ? Number(cnMatch[4]) : 0;
+    // WA Web 中文时段映射（基于实测真实数据）：
+    //   凌晨/早上/上午 = AM（1-11 保持；"上午12:??" 极少见，视为 0:??）
+    //   中午 11-12 = 上午末 / noon（11:33 是 11:33 AM，12:30 是 12:30 PM noon）— 不 +12
+    //   下午 1-5 = PM（+12）
+    //   晚上 6-11 = PM（+12）
+    // ⚠️ 之前的 bug：把"中午"放到 PM 分支，"中午11:33" 被错 +12 成 23:33（应该 11:33）
+    if (period === '下午' || period === '晚上') {
+      if (hours < 12) hours += 12;
+    } else if (period === '中午') {
+      // 中午 11:?? 保持 11，中午 12:?? 保持 12（noon），不 +12
+      // hours 不变
+    } else {
+      // 凌晨 / 清晨 / 早上 / 上午
+      if (hours === 12) hours = 0;
+    }
+  } else {
+    const enMatch = timePart.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?/);
+    if (!enMatch) return null;
+    hours = Number(enMatch[1]);
+    minutes = Number(enMatch[2]);
+    seconds = enMatch[3] ? Number(enMatch[3]) : 0;
+    const meridiem = enMatch[4]?.toUpperCase();
+    if (meridiem === 'PM' && hours < 12) hours += 12;
+    if (meridiem === 'AM' && hours === 12) hours = 0;
+  }
 
   const numbers = datePart.match(/\d+/g)?.map(Number);
   if (!numbers || numbers.length < 3) return null;
@@ -135,12 +218,118 @@ function parsePrePlainText(pre: string): number | null {
   return d.getTime();
 }
 
-function getMessageTimestamp(scope: Element): number | null {
+function getMessageTimestamp(
+  scope: Element,
+  contextDate?: { y: number; m: number; d: number } | null,
+): number | null {
+  // 优先：data-pre-plain-text（带 caption 的消息都有，含完整日期 + 时间）
   const copyable = scope.querySelector('.copyable-text[data-pre-plain-text]') as HTMLElement | null;
   const pre = copyable?.getAttribute('data-pre-plain-text');
   if (pre) {
     const ts = parsePrePlainText(pre);
     if (ts) return ts;
+  }
+
+  // Fallback：纯媒体 bubble（图/视频/PDF 无 caption）没有 data-pre-plain-text。
+  // WA Web 仍然在 bubble 底部渲染了时间（如 <span>下午2:11</span>），跟上方
+  // 最近的 date header span（如 "2026年5月18日" / "星期四" / "今天"）合成完整 timestamp。
+  // 没 contextDate 时无法判定日期 — 退回 null，让上层（formatTimestamp）显示 ??-?? ??:??。
+  if (!contextDate) return null;
+  const meta = scope.querySelector('[data-testid="msg-meta"]');
+  if (!meta) return null;
+  const spans = Array.from(meta.querySelectorAll('span'));
+  for (const s of spans) {
+    const text = s.textContent?.trim() ?? '';
+    const parsed = parseChineseTime(text);
+    if (parsed) {
+      const d = new Date(contextDate.y, contextDate.m - 1, contextDate.d, parsed.h, parsed.m, 0);
+      const t = d.getTime();
+      return isNaN(t) ? null : t;
+    }
+  }
+  return null;
+}
+
+/**
+ * 解析 WA Web 中文时间字串："下午2:11" / "上午10:51" / "晚上11:58" 等 → {h, m} (24h)。
+ * 不匹配时返回 null。
+ *
+ * 时段映射（按 WA Web / 中国习惯）：
+ *   凌晨/清晨/早上/上午 → AM（h 保持 1-11）；上午12 → 0
+ *   中午 → 12
+ *   下午/晚上 → PM（h < 12 时 +12）；12 保持
+ */
+function parseChineseTime(str: string): { h: number; m: number } | null {
+  // 形如 "下午2:11" / "10:51" / "23:30"（也兼容无时段的 24h 格式）
+  const m = str.match(/^(凌晨|清晨|早上|上午|中午|下午|晚上)?(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const period = m[1];
+  let h = Number(m[2]);
+  const min = Number(m[3]);
+  if (!isFinite(h) || !isFinite(min) || min < 0 || min > 59 || h < 0 || h > 23) return null;
+  if (period === '中午') {
+    h = h === 12 ? 12 : h;
+  } else if (period === '凌晨' || period === '清晨' || period === '早上' || period === '上午') {
+    if (h === 12) h = 0;
+  } else if (period === '下午' || period === '晚上') {
+    if (h < 12) h += 12;
+  }
+  // 无时段（24h）— 不做调整
+  return { h, m: min };
+}
+
+/**
+ * 解析 WA Web 日期分隔栏文本，返回 {y, m, d}。
+ * 支持：
+ *   - "2026年5月18日"
+ *   - "5月18日"（同年）
+ *   - "今天" / "昨天" / "前天"
+ *   - "星期一"~"星期日" / "星期天" / "周一"~"周日"（反推过去最近的那天）
+ *
+ * 不匹配返回 null。今天的判断走 caller 传入的 today 参数（便于测试）。
+ */
+function parseDateHeader(
+  text: string,
+  today: Date = new Date(),
+): { y: number; m: number; d: number } | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (t === '今天') {
+    return { y: today.getFullYear(), m: today.getMonth() + 1, d: today.getDate() };
+  }
+  if (t === '昨天') {
+    const d = new Date(today);
+    d.setDate(d.getDate() - 1);
+    return { y: d.getFullYear(), m: d.getMonth() + 1, d: d.getDate() };
+  }
+  if (t === '前天') {
+    const d = new Date(today);
+    d.setDate(d.getDate() - 2);
+    return { y: d.getFullYear(), m: d.getMonth() + 1, d: d.getDate() };
+  }
+  // "星期X" / "周X"（CN day names）
+  const wkMatch = t.match(/^(?:星期|周)([一二三四五六日天])$/);
+  if (wkMatch) {
+    const map: Record<string, number> = {
+      日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6,
+    };
+    const target = map[wkMatch[1]];
+    if (target === undefined) return null;
+    const todayDow = today.getDay();
+    let delta = todayDow - target;
+    if (delta <= 0) delta += 7; // 找过去最近的那个星期X
+    const d = new Date(today);
+    d.setDate(d.getDate() - delta);
+    return { y: d.getFullYear(), m: d.getMonth() + 1, d: d.getDate() };
+  }
+  // "2026年5月18日" 或 "5月18日"
+  const dm = t.match(/^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日$/);
+  if (dm) {
+    const year = dm[1] ? Number(dm[1]) : today.getFullYear();
+    const mon = Number(dm[2]);
+    const day = Number(dm[3]);
+    if (mon < 1 || mon > 12 || day < 1 || day > 31) return null;
+    return { y: year, m: mon, d: day };
   }
   return null;
 }
@@ -222,43 +411,77 @@ export function readChatMessages(limit = 30): ChatMessage[] {
   const main = findMainPane();
   if (!main) return [];
 
-  const allMatches = Array.from(main.querySelectorAll('.message-in, .message-out'));
-  // 只留顶层气泡：嵌套在另一个 .message-in/.message-out 里的元素是 quoted reply 的引用
-  // 上下文（销售引用客户原话 → 内层 .message-in；客户引用销售 → 内层 .message-out），
-  // 不是独立消息。不过滤的话，内层会被当成一条"凭空冒出的对话"喂给 AI，方向还跟外层反着，
-  // 用户场景："我发附件给客户，AI 误认为是客户发给我的" 就是这么来的。
-  const bubbles = allMatches.filter((el) => {
-    let cur = el.parentElement;
-    while (cur && cur !== main) {
-      if (cur.classList.contains('message-in') || cur.classList.contains('message-out')) {
-        return false;
-      }
-      cur = cur.parentElement;
-    }
-    return true;
+  const panel =
+    main.querySelector('[data-testid="conversation-panel-messages"]') ?? main;
+
+  // 一次性收集 bubble + 候选 date header span，按 DOM 顺序合并遍历。
+  // 维护 currentDate：每次遇到日期分隔栏（"2026年5月18日" / "星期四" / "今天" / "昨天"）就更新。
+  // bubble 用最近的 currentDate 推断 sent_at（仅 fallback，pre-plain-text 优先）。
+  const bubbles = Array.from(panel.querySelectorAll<Element>('.message-in, .message-out'));
+
+  // Date header span：dir="auto" + 文本长度短 + 匹配日期格式
+  const today = new Date();
+  const dateHeaders = Array.from(
+    panel.querySelectorAll<HTMLElement>('span[dir="auto"]'),
+  ).filter((s) => {
+    const t = s.textContent?.trim() ?? '';
+    return t.length > 0 && t.length < 16 && parseDateHeader(t, today) !== null;
+  });
+
+  // 按 DOM 顺序合并 bubbles + date headers
+  const all: Element[] = [...bubbles, ...dateHeaders];
+  all.sort((a, b) => {
+    if (a === b) return 0;
+    const pos = a.compareDocumentPosition(b);
+    return pos & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
   });
 
   const messages: ChatMessage[] = [];
   const seen = new Set<string>();
+  let currentDate: { y: number; m: number; d: number } | null = null;
 
-  for (const bubble of bubbles) {
-    const id = findDataId(bubble);
-    if (!id || seen.has(id)) continue;
-
-    let text = getMessageText(bubble);
-    // 空 text 通常是图/视频/语音 bubble — 探测类型占位，让消息能进 messages 表 + AI 能看到
-    if (!text) {
-      text = detectMediaKind(bubble);
+  for (const el of all) {
+    // Date header span
+    if (el.tagName === 'SPAN') {
+      const text = el.textContent?.trim() ?? '';
+      const parsed = parseDateHeader(text, today);
+      if (parsed) currentDate = parsed;
+      continue;
     }
 
+    // Message bubble (.message-in / .message-out)
+    // 过滤嵌套引用：bubble 在另一个 bubble 内（quoted reply）— 不算独立消息
+    // 嵌套的内层 .message-in/out 是销售引用客户原话 / 客户引用销售 的引用预览，方向跟外层反着。
+    let cur = el.parentElement;
+    let isNested = false;
+    while (cur && cur !== panel) {
+      if (cur.classList.contains('message-in') || cur.classList.contains('message-out')) {
+        isNested = true;
+        break;
+      }
+      cur = cur.parentElement;
+    }
+    if (isNested) continue;
+
+    const id = findDataId(el);
+    if (!id || seen.has(id)) continue;
+
+    let text = getMessageText(el);
+    if (!text) text = detectMediaKind(el);
+    // 剥末尾的 WA Web bubble meta（"下午2:32" / "已编辑" 等），避免跟前面结构化
+    // [MM-DD HH:MM] 重复 + 矛盾。先剥再判删除占位（防 "你已删除这条消息中午11:31"
+    // 因尾巴匹配不上而失败）
+    text = stripTrailingMeta(text);
+    if (isDeletedPlaceholderText(text)) text = DELETED_TEXT_MARKER;
+
     seen.add(id);
-    const fromMe = bubble.classList.contains('message-out');
+    const fromMe = el.classList.contains('message-out');
     messages.push({
       id,
       fromMe,
       text,
-      timestamp: getMessageTimestamp(bubble),
-      sender: fromMe ? null : getMessageSender(bubble),
+      timestamp: getMessageTimestamp(el, currentDate),
+      sender: fromMe ? null : getMessageSender(el),
     });
   }
 

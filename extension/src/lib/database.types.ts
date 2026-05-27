@@ -21,7 +21,9 @@ export type ContactEventType =
   | 'vehicle_added'
   | 'quote_created'
   | 'task_created'
-  | 'ai_extracted';
+  | 'ai_extracted'
+  | 'fb_conversion_sent'
+  | 'fb_lead_received';
 export type FuelType = 'gas' | 'diesel' | 'hybrid' | 'ev';
 export type SaleStatus = 'available' | 'paused' | 'expired';
 export type MessageDirection = 'inbound' | 'outbound';
@@ -83,6 +85,9 @@ export interface Database {
           notes: string | null;
           google_resource_name: string | null;
           google_synced_at: string | null;
+          fb_lead_id: string | null;
+          ctwa_clid: string | null;
+          fb_ad_id: string | null;
           created_by: string | null;
           created_at: string;
           updated_at: string;
@@ -105,6 +110,9 @@ export interface Database {
           notes?: string | null;
           google_resource_name?: string | null;
           google_synced_at?: string | null;
+          fb_lead_id?: string | null;
+          ctwa_clid?: string | null;
+          fb_ad_id?: string | null;
           created_by?: string | null;
         };
         Update: {
@@ -121,6 +129,9 @@ export interface Database {
           notes?: string | null;
           google_resource_name?: string | null;
           google_synced_at?: string | null;
+          fb_lead_id?: string | null;
+          ctwa_clid?: string | null;
+          fb_ad_id?: string | null;
         };
         Relationships: [];
       };
@@ -228,6 +239,7 @@ export interface Database {
           caption: string | null;
           mime_type: string | null;
           file_size_bytes: number | null;
+          file_name: string | null;
           sort_order: number;
           created_by: string | null;
           created_at: string;
@@ -241,6 +253,7 @@ export interface Database {
           caption?: string | null;
           mime_type?: string | null;
           file_size_bytes?: number | null;
+          file_name?: string | null;
           sort_order?: number;
           created_by?: string | null;
         };
@@ -249,6 +262,7 @@ export interface Database {
           url?: string;
           public_id?: string | null;
           caption?: string | null;
+          file_name?: string | null;
           sort_order?: number;
         };
         Relationships: [];

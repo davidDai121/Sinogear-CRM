@@ -31,6 +31,8 @@ const ICON: Record<ContactEventType, string> = {
   quote_created: '💵',
   task_created: '✅',
   ai_extracted: '🤖',
+  fb_conversion_sent: '📣',
+  fb_lead_received: '📨',
 };
 
 function timeAgo(iso: string): string {
@@ -59,6 +61,16 @@ function describe(ev: ContactEventRow): { title: string; detail?: string } {
     case 'stage_changed': {
       const from = STAGE_LABEL[p.from as CustomerStage] ?? String(p.from ?? '');
       const to = STAGE_LABEL[p.to as CustomerStage] ?? String(p.to ?? '');
+      // AI 推断的 stage 变化：显示 confidence + reasoning
+      if (typeof p.ai_confidence === 'number') {
+        const conf = Math.round(p.ai_confidence * 100);
+        const reason =
+          typeof p.ai_reasoning === 'string' ? p.ai_reasoning : undefined;
+        return {
+          title: `阶段 ${from} → ${to}（🤖 AI ${conf}%）`,
+          detail: reason,
+        };
+      }
       const auto = p.automatic ? '（自动）' : '';
       return { title: `阶段 ${from} → ${to}${auto}` };
     }
@@ -98,6 +110,24 @@ function describe(ev: ContactEventRow): { title: string; detail?: string } {
       if (fields.length) parts.push(`${fields.length} 个字段`);
       if (vehicles) parts.push(`${vehicles} 个车型`);
       return { title: `AI 抽取 ${parts.join('、') || '客户信息'}` };
+    }
+    case 'fb_conversion_sent': {
+      const eventName = String(p.event_name ?? '');
+      const status = typeof p.meta_status === 'number' ? p.meta_status : 0;
+      const ok = status >= 200 && status < 300;
+      const test = p.test ? '（测试）' : '';
+      return {
+        title: `Meta 事件 ${eventName}${test}`,
+        detail: ok ? `已上报 (${status})` : `失败 ${status}`,
+      };
+    }
+    case 'fb_lead_received': {
+      const formName = typeof p.form_name === 'string' ? p.form_name : '未命名表单';
+      const leadId = typeof p.fb_lead_id === 'string' ? p.fb_lead_id : '';
+      return {
+        title: `📨 收到 FB Lead Ads 表单`,
+        detail: `${formName}${leadId ? ` · ${leadId}` : ''}`,
+      };
     }
     default:
       return { title: ev.event_type };

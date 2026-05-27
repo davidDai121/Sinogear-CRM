@@ -3749,11 +3749,30 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
   font-size: 13px;
 }
 
+.sgc-vehicle-rec-spec-block {
+  background: #f6f7f9;
+  border: 1px solid #e9edef;
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sgc-vehicle-rec-spec-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
 .sgc-vehicle-rec-spec {
   font-size: 12px;
   color: #667781;
-  line-height: 1.4;
+  line-height: 1.5;
   margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
 }
 
 .sgc-vehicle-rec-media {

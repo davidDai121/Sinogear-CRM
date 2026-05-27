@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { CurrentChat } from '@/content/whatsapp-dom';
 import { useContact } from '../hooks/useContact';
 import { useAutoExtract } from '../hooks/useAutoExtract';
+import { useAutoFbStage } from '../hooks/useAutoFbStage';
 import type { SuggestedField } from '@/lib/field-suggestions';
 import { ContactEditForm } from './ContactEditForm';
 import { GroupMembersSection } from './GroupMembersSection';
@@ -56,6 +57,13 @@ export function ContactCard({ chat, orgId }: Props) {
     save,
     // 群聊里 AI 字段提取语义会乱（多人发言、country/language/budget 不归属任何人），
     // 暂关；Phase 2 可加群专用 prompt
+    enabled: HAS_QWEN_KEY && !isGroup,
+  });
+
+  // AI 自动推断 customer_stage（同样跳过群聊）
+  // 触发 → 推断 → 写 DB → events-log 钩子自动发 Meta Conversions API 事件
+  useAutoFbStage({
+    contact,
     enabled: HAS_QWEN_KEY && !isGroup,
   });
 

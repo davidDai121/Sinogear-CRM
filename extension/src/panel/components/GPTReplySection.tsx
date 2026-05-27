@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
+import { usePersistedReplyStatus } from '@/panel/hooks/usePersistedReplyStatus';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
-import { jumpToChat } from '@/lib/jump-to-chat';
+import { jumpToChat, verifyHeaderMatches, type RequireMatch } from '@/lib/jump-to-chat';
 import {
   waitForChatMessages,
   type ChatMessage,
@@ -21,6 +22,7 @@ import { sanitizeReplyForCustomer, wasReplyDirty } from '@/lib/reply-sanitize';
 import { ReplyCard } from './ReplyCard';
 import { ClientRecordCard } from './ClaudeReplySection';
 import { GPTTemplatesModal } from './GPTTemplatesModal';
+import { GeneratedAtBadge } from './GeneratedAtBadge';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type GptConvRow = Database['public']['Tables']['gpt_conversations']['Row'];
@@ -58,6 +60,8 @@ type Status =
       source: MessageSource;
       count: number;
       logId: string | null;
+      /** 自动由 usePersistedReplyStatus 注入（done 状态写 chrome.storage 时盖戳） */
+      generatedAt?: number;
     }
   | { kind: 'error'; message: string };
 
@@ -80,7 +84,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [showTemplates, setShowTemplates] = useState(false);
   const [foreground, setForeground] = useState(false);
-  const [status, setStatus] = useState<Status>({ kind: 'idle' });
+  const [status, setStatus] = usePersistedReplyStatus<Status>('gpt', contact.id, { kind: 'idle' });
   const [guidance, setGuidance] = useState('');
   const [guidanceLoaded, setGuidanceLoaded] = useState(false);
   const [discuss, setDiscuss] = useState('');
@@ -117,7 +121,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
 
   useEffect(() => {
     void refreshConversations();
-    setStatus({ kind: 'idle' });
+    // status 由 usePersistedReplyStatus 接管：切 contact 时它会自动恢复上次 done card（如有）
     setDiscuss('');
   }, [contact.id]);
 
@@ -208,13 +212,21 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
     messages: ChatMessage[];
     source: MessageSource;
   }> => {
+    // 严格身份校验 —— 必传，防止 jumpToChat 跳错 chat 后 DOM 读到的是别人的消息
+    // 被 syncMessages 写错位到当前 contact，污染 messages 表（历史已经踩过：1349 条
+    // sent_at=NULL 媒体占位就是这么来的相关变种）
+    const requireMatch: RequireMatch = {
+      phone: contact.phone,
+      name: contact.name,
+      waName: contact.wa_name,
+    };
     let messages: ChatMessage[] = [];
     if (needsJump) {
       const query = contact.phone
         ? contact.phone.replace(/^\+/, '')
         : contact.name?.trim() || contact.wa_name?.trim() || '';
       if (query) {
-        const ok = await jumpToChat(query);
+        const ok = await jumpToChat(query, { requireMatch });
         if (ok) {
           messages = await waitForChatMessages(5000, 30, 1);
         }
@@ -222,7 +234,19 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         messages = await waitForChatMessages(5000, 30, 1);
       }
     } else {
-      messages = await waitForChatMessages(5000, 30, 1);
+      // needsJump=false（聊天 tab ContactCard 模式）也要 verify —— React state 跟
+      // 当前 WA chat 之间有短暂 race，verify 拦得住
+      if (verifyHeaderMatches(requireMatch)) {
+        messages = await waitForChatMessages(5000, 30, 1);
+      }
+    }
+    // 写 DB 前最后一次 sanity check（防 race：generate 期间用户切走 WA chat）
+    if (messages.length > 0 && !verifyHeaderMatches(requireMatch)) {
+      console.warn(
+        '[GPTReplySection] DOM 不再是目标客户（用户切了 WA chat？），放弃 DOM 消息走 DB',
+        { contactId: contact.id, phone: contact.phone },
+      );
+      messages = [];
     }
     if (messages.length > 0) {
       // DOM 路径：持久化 + merge
@@ -301,14 +325,14 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
       const isGroup = !!contact.group_jid;
       const groupMemberNames = isGroup ? await loadGroupMemberNames() : undefined;
 
+      // 续聊也拉 vehicle_interests —— buildFollowUpMessage 现在带精简客户档案 +
+      // 车型兴趣，让 GPT thread 长后也不会忘 Samuel 是谁、要买啥
       let vehicleInterests: VehicleInterestRow[] = [];
-      if (!existingConv) {
-        const { data } = await supabase
-          .from('vehicle_interests')
-          .select('*')
-          .eq('contact_id', contact.id);
-        vehicleInterests = data ?? [];
-      }
+      const { data: viData } = await supabase
+        .from('vehicle_interests')
+        .select('*')
+        .eq('contact_id', contact.id);
+      vehicleInterests = viData ?? [];
 
       const url = existingConv?.chat_url ?? selectedTemplate.gpt_url;
       const prompt = existingConv
@@ -316,6 +340,8 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
             newMessages: messages.slice(-50),
             isGroup,
             salesGuidance: guidance.trim() || undefined,
+            contact,
+            vehicleInterests,
           })
         : buildFirstMessage({
             contact,
@@ -468,13 +494,20 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         // 续聊讨论也要补发最近 50 条 — GPT 那边 chat thread 看到的只是
         // 上一次 generate 时的历史快照，之后客户陆续发的新消息（最新预算 /
         // 改车型 / 发图）没人喂给它，必须在本次 prompt 里补上。
+        // 同时带精简客户档案，防 thread 长后 GPT 忘客户 anchor。
         const loaded = await loadChatMessages();
         source = loaded.source;
         count = loaded.messages.length;
+        const { data: viData } = await supabase
+          .from('vehicle_interests')
+          .select('*')
+          .eq('contact_id', contact.id);
         prompt = buildDiscussionMessage({
           newMessages: loaded.messages.slice(-50),
           isGroup: !!contact.group_jid,
           question: q,
+          contact,
+          vehicleInterests: viData ?? [],
         });
       }
       promptForLog = prompt;
@@ -789,6 +822,10 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
 
           {status.kind === 'error' && (
             <div className="sgc-error">{status.message}</div>
+          )}
+
+          {status.kind === 'done' && (
+            <GeneratedAtBadge generatedAt={status.generatedAt} />
           )}
 
           {status.kind === 'done' && status.mode === 'reply' && parsed && (

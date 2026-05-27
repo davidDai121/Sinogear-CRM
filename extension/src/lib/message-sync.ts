@@ -76,7 +76,77 @@ export async function syncMessages(
     }
   }
 
+  // Backfill 历史 NULL sent_at —— 之前因为 WA Web 纯媒体 bubble 没 data-pre-plain-text
+  // 而 syncMessages 写入时 sent_at=null；现在 readChatMessages 修源头后能从 bubble 时间字串
+  // + date header 解析出真实时间。upsert + ignoreDuplicates 不更新已存行，单独 PATCH 把
+  // sent_at IS NULL 的老行用本次解析到的时间填上。filter sent_at=is.null 保证不覆盖
+  // 已有非 null 值。fire-and-forget，不阻塞本次同步。
+  void backfillNullSentAt(contactId, rows);
+
+  // 已删除消息覆盖：DOM 抓到 [已删除] 占位时，DB 里同 wa_message_id 可能还存着销售
+  // 删除前发出去的原文（之前 sync 过）。upsert + ignoreDuplicates 不会更新，需要强制
+  // PATCH 把 DB 的 text 也改成 [已删除]。否则 prompt 还是会把销售已撤回的话喂给 AI。
+  void overwriteDeletedMessages(contactId, rows);
+
   return { inserted: count ?? 0 };
+}
+
+/** WA Web 已删除消息占位的内部统一标记，跟 content/whatsapp-messages.ts 同步 */
+const DELETED_TEXT_MARKER = '[已删除]';
+
+/**
+ * DOM 抓到 [已删除] 占位时，把 DB 里同 wa_message_id 的 text 也改成 [已删除]
+ * （之前 sync 过的原文被覆盖）。filter text=neq.[已删除] 保证幂等。
+ */
+async function overwriteDeletedMessages(
+  contactId: string,
+  rows: Array<{ wa_message_id: string; text: string }>,
+): Promise<void> {
+  const deleted = rows.filter((r) => r.text === DELETED_TEXT_MARKER);
+  if (deleted.length === 0) return;
+  for (const r of deleted) {
+    try {
+      const { error } = await supabase
+        .from('messages')
+        .update({ text: DELETED_TEXT_MARKER })
+        .eq('contact_id', contactId)
+        .eq('wa_message_id', r.wa_message_id)
+        .neq('text', DELETED_TEXT_MARKER);
+      if (error) {
+        console.warn('[overwriteDeletedMessages]', r.wa_message_id, error.message);
+      }
+    } catch (e) {
+      console.warn('[overwriteDeletedMessages]', r.wa_message_id, e);
+    }
+  }
+}
+
+/**
+ * 老 NULL row 在新 DOM 解析到 timestamp 时反向回填 sent_at。
+ * 单条 PATCH 因为 PostgREST 不支持"不同行给不同值"的 batch update。
+ * 用 sent_at=is.null filter 保证只填空，不覆盖已有时间。
+ */
+async function backfillNullSentAt(
+  contactId: string,
+  rows: Array<{ wa_message_id: string; sent_at: string | null }>,
+): Promise<void> {
+  const candidates = rows.filter((r) => r.sent_at != null);
+  if (candidates.length === 0) return;
+  for (const r of candidates) {
+    try {
+      const { error } = await supabase
+        .from('messages')
+        .update({ sent_at: r.sent_at })
+        .eq('contact_id', contactId)
+        .eq('wa_message_id', r.wa_message_id)
+        .is('sent_at', null);
+      if (error) {
+        console.warn('[backfillNullSentAt]', r.wa_message_id, error.message);
+      }
+    } catch (e) {
+      console.warn('[backfillNullSentAt]', r.wa_message_id, e);
+    }
+  }
 }
 
 export async function countMessages(contactId: string): Promise<number> {

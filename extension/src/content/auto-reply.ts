@@ -515,8 +515,11 @@ async function downloadAsFiles(
       const mime = m.mime_type ?? blob.type ?? 'image/jpeg';
       const extMatch = mime.match(/\/(\w+)/);
       const ext = (extMatch?.[1] ?? 'jpg').replace('jpeg', 'jpg');
+      // 优先用上传时存的原文件名；老数据 file_name=null 回退
+      const filename =
+        m.file_name?.trim() || `vehicle-${contactId.slice(0, 8)}-${i + 1}.${ext}`;
       out.push(
-        new File([blob], `vehicle-${contactId.slice(0, 8)}-${i + 1}.${ext}`, {
+        new File([blob], filename, {
           type: mime,
         }),
       );

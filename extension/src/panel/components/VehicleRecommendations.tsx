@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { thumbnailUrl } from '@/lib/cloudinary';
 import { CloudinaryImg } from './CloudinaryImg';
-import { canonicalizeModel } from '@/lib/vehicle-aliases';
+import { scoreVehiclesByText } from '@/lib/vehicle-matcher';
 import { fetchAllPaged } from '@/lib/supabase-paged';
 import { readChatMessages } from '@/content/whatsapp-messages';
-import { pasteFilesToWhatsApp } from '@/content/whatsapp-compose';
+import {
+  pasteFilesToWhatsApp,
+  fillWhatsAppCompose,
+} from '@/content/whatsapp-compose';
 import type {
   Database,
   PricingTier,
@@ -114,37 +117,14 @@ export function VehicleRecommendations({ orgId, contactId }: Props) {
     return () => window.removeEventListener('sgc:chat-changed', h);
   }, [contactId]);
 
-  // 匹配逻辑：字符串子串匹配（model + canonicalized + brand）
+  // 匹配逻辑：复用 vehicle-matcher 的评分（brand 单独只 +1，阈值 ≥3）
+  // 防止"销售之前提过一次 Changan / BYD"就误推 UNI-K / Seagull 一类的错车型。
   const matched = useMemo(() => {
     if (vehicles.length === 0) return [];
-
-    const haystack = (recentText + ' ' + interestModels.join(' ')).toLowerCase();
-    if (!haystack.trim()) return [];
-
-    const scored = vehicles.map((v) => {
-      const candidates = new Set<string>();
-      if (v.model) {
-        candidates.add(v.model.toLowerCase());
-        const canon = canonicalizeModel(v.model);
-        if (canon) candidates.add(canon.toLowerCase());
-      }
-      if (v.brand) candidates.add(v.brand.toLowerCase());
-      const brandModel = `${v.brand} ${v.model}`.toLowerCase().trim();
-      if (brandModel) candidates.add(brandModel);
-
-      let score = 0;
-      for (const cand of candidates) {
-        if (!cand || cand.length < 2) continue;
-        // 整词或 brand+model 组合权重高
-        if (haystack.includes(cand)) {
-          score += cand === brandModel ? 3 : cand.length >= 4 ? 2 : 1;
-        }
-      }
-      return { v, score };
-    });
-
-    return scored
-      .filter((s) => s.score > 0)
+    const text = recentText + ' ' + interestModels.join(' ');
+    if (!text.trim()) return [];
+    return scoreVehiclesByText(text, vehicles)
+      .filter((s) => s.score >= 3)
       .sort((a, b) => b.score - a.score)
       .map((s) => s.v);
   }, [vehicles, recentText, interestModels]);
@@ -273,7 +253,10 @@ function SelectedVehicleCard({ vehicle, media, onClear }: SelectedCardProps) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const blob = await res.blob();
         const ext = extOf(items[i].url, items[i].mime_type ?? blob.type);
-        const filename = `${vehicle.brand}_${vehicle.model}${items.length > 1 ? `_${i + 1}` : ''}.${ext}`;
+        // 优先用上传时存的原文件名；老数据 file_name=null 回退到 brand_model.ext
+        const filename =
+          items[i].file_name?.trim() ||
+          `${vehicle.brand}_${vehicle.model}${items.length > 1 ? `_${i + 1}` : ''}.${ext}`;
         files.push(
           new File([blob], filename, {
             type: items[i].mime_type ?? blob.type,
@@ -348,7 +331,30 @@ function SelectedVehicleCard({ vehicle, media, onClear }: SelectedCardProps) {
       )}
 
       {vehicle.short_spec && (
-        <p className="sgc-vehicle-rec-spec">{vehicle.short_spec}</p>
+        <div className="sgc-vehicle-rec-spec-block">
+          <div className="sgc-vehicle-rec-spec-head">
+            <span className="sgc-muted" style={{ fontSize: 11 }}>
+              📝 配置说明
+            </span>
+            <button
+              type="button"
+              className="sgc-btn-link sgc-btn-small"
+              disabled={!!sending}
+              onClick={() => {
+                const ok = fillWhatsAppCompose(vehicle.short_spec!);
+                setSending(
+                  ok
+                    ? '✓ 已填入聊天框（保留原格式），请检查后发送'
+                    : '❌ 找不到聊天输入框（请先选聊天）',
+                );
+                setTimeout(() => setSending(null), 2500);
+              }}
+            >
+              💬 发说明
+            </button>
+          </div>
+          <p className="sgc-vehicle-rec-spec">{vehicle.short_spec}</p>
+        </div>
       )}
 
       {images.length > 0 && (

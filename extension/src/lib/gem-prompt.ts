@@ -39,7 +39,7 @@ export function formatNewCustomer(ctx: GemPromptContext): string {
 
 function formatNewIndividual(ctx: GemPromptContext): string {
   const phone = normalizePhone(ctx.contact.phone);
-  const lines = [`[Customer Phone: ${phone}]`];
+  const lines = [`[Customer Phone: ${phone}]`, '', formatCurrentTimeBlock()];
 
   const profile = buildProfileLines(ctx.contact);
   if (profile.length) {
@@ -86,6 +86,8 @@ function formatNewGroup(ctx: GemPromptContext): string {
     `[WhatsApp Group Chat]`,
     `Group Name: ${groupName}`,
     memberCount ? `Members (${memberCount}): ${ctx.groupMemberNames!.join(', ')}` : `(member list unavailable)`,
+    '',
+    formatCurrentTimeBlock(),
     '',
     `This is a multi-person group chat, NOT a single-customer 1:1 conversation.`,
     `Multiple people may be asking questions, comparing notes, or chatting casually.`,
@@ -135,16 +137,45 @@ function formatNewGroup(ctx: GemPromptContext): string {
  *
  * 之前只带 5 条，导致客户上一轮回复后又陆续发了几条新消息时，Gem 看不到关键信息
  * （典型：客户给了预算 / 改了车型 / 新发图）。统一 50 条覆盖跨多轮场景。
+ *
+ * 续聊也带精简客户档案（contact + vehicleInterests）—— 防 Gem 对话跑久 / 上下文
+ * 被截断后客户 anchor（预算、国家、stage）丢失。群聊不带（多人不是单一客户）。
  */
 export function formatUpdate(
   phoneOrGroupName: string | null,
   newMessages: ChatMessage[],
   isGroup = false,
+  contact?: GemPromptContext['contact'],
+  vehicleInterests?: GemPromptContext['vehicleInterests'],
 ): string {
   const header = isGroup
     ? `[Update - Group: ${phoneOrGroupName ?? '(unknown)'}]`
     : `[Update - Phone: ${normalizePhone(phoneOrGroupName)}]`;
-  const lines = [header];
+  // 续聊每次都注入当前时间 — Gem 对话 thread 不知道唤起时刻
+  const lines = [header, '', formatCurrentTimeBlock(), ''];
+
+  // 续聊也带客户档案（个人聊天才有意义；群聊跳过）
+  if (contact && !isGroup) {
+    lines.push(
+      `[Customer Profile — refresher, in case earlier turns aged out]`,
+      ...buildProfileLines(contact),
+    );
+    if (vehicleInterests?.length) {
+      lines.push('', `[Vehicle Interests]`);
+      for (const vi of vehicleInterests) {
+        const parts: string[] = [vi.model];
+        if (vi.year) parts.push(String(vi.year));
+        if (vi.condition) parts.push(vi.condition);
+        if (vi.steering) parts.push(vi.steering);
+        if (vi.target_price_usd) parts.push(`target $${vi.target_price_usd}`);
+        lines.push(`- ${parts.join(' · ')}`);
+      }
+    }
+    lines.push('');
+  }
+
+  // 标题诚实化：之前没标题（直接铺消息），改成显式说明这是最近 50 条
+  lines.push(`[Recent Chat Messages — last 50, may overlap with what you've already seen in this thread]`);
   const collapsed = collapseMediaRuns(newMessages).slice(-50);
   for (const msg of collapsed) {
     lines.push(formatMessage(msg, isGroup));
@@ -211,12 +242,33 @@ function formatMessage(msg: ChatMessage, isGroup: boolean): string {
 }
 
 function formatTimestamp(ms: number | null): string {
-  const d = ms ? new Date(ms) : new Date();
+  if (ms == null) return '??-?? ??:??';
+  const d = new Date(ms);
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   const hour = String(d.getHours()).padStart(2, '0');
   const minute = String(d.getMinutes()).padStart(2, '0');
   return `${month}-${day} ${hour}:${minute}`;
+}
+
+const WEEKDAY_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/**
+ * "今天是几号" 时间块 — 注入到 prompt 顶部。
+ * 没这个 Gem 会把最近一条消息当"今天"（实际可能是几天前）。
+ */
+function formatCurrentTimeBlock(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hour = String(now.getHours()).padStart(2, '0');
+  const minute = String(now.getMinutes()).padStart(2, '0');
+  const weekday = WEEKDAY_EN[now.getDay()];
+  return `[Current Time]
+${year}-${month}-${day} ${weekday} ${hour}:${minute} (boss's local time, Asia/Shanghai)
+Message timestamps below are MM-DD HH:MM. Use the date above to interpret "today" / "yesterday" / day-of-week references — don't assume the most recent message is from today.
+Lines marked \`??-?? ??:??\` are messages (typically media attachments without text caption) whose exact send time wasn't recorded. They happened at some point in this conversation; their position in the list is NOT chronological — do not infer "just now" or any specific timing from them.`;
 }
 
 function normalizePhone(phone: string | null): string {

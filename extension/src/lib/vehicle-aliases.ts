@@ -167,6 +167,17 @@ const RULES: AliasRule[] = [
   { match: /(?:changan|长安).*qiyuan\s*a07\b/i, canonical: 'Changan Qiyuan A07' },
   { match: /(?:changan|长安).*qiyuan\s*q05\b/i, canonical: 'Changan Qiyuan Q05' },
 
+  // ─────── GAC Trumpchi 广汽传祺 ───────
+  // Inventory brand 常存中文 "广汽传祺"，model 也是中文（"向往s7"）；
+  // 但销售在 WA 聊客户经常用英文（"Trumpchi Emkoo S7"）。
+  // canonical 不带 brand 前缀（仅型号名）—— 这样 canonModelOnly 路径里
+  // 不管中文还是英文聊天都能 substring 命中。
+  { match: /\bemkoo\b|向往\s*s?7?/i, canonical: 'Emkoo' },
+  { match: /\bgs\s*8\b|传祺\s*gs8/i, canonical: 'GS8' },
+  { match: /\bgs\s*4\b|传祺\s*gs4/i, canonical: 'GS4' },
+  { match: /\bgs\s*3\b|传祺\s*gs3/i, canonical: 'GS3' },
+  { match: /\bm8\b|传祺\s*m8/i, canonical: 'M8' },
+
   // ─────── BAIC / Isuzu / Deepal / Avatr / Zeekr / Ford / Suzuki / Nammi / Mitsubishi ───────
   { match: /\bbaic.*bj40\b|\bbj40\b/i, canonical: 'BAIC BJ40' },
   { match: /\bisuzu.*d[- ]?max\b/i, canonical: 'Isuzu D-Max' },

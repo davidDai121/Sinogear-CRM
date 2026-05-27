@@ -75,6 +75,9 @@ export function buildFirstMessage(
     );
   }
 
+  // 当前时间 — 紧贴客户上下文，让 AI 准确判断"今天/昨天/几天前"
+  sections.push('', formatCurrentTimeBlock());
+
   // 客户上下文
   sections.push('', isGroup ? buildGroupContext(ctx) : buildIndividualContext(ctx));
 
@@ -93,15 +96,32 @@ export function buildFollowUpMessage(opts: {
   userQuestion?: string;
   isGroup?: boolean;
   salesGuidance?: string;
+  /**
+   * 续聊也带精简版客户档案 —— Claude thread 跑久了 / context 被截断后，
+   * 客户 anchor（预算、国家、stage）容易丢；每次续聊重申一遍才稳。
+   * 群聊不带。
+   */
+  contact?: ClaudePromptContext['contact'];
+  vehicleInterests?: ClaudePromptContext['vehicleInterests'];
 }): string {
   const sections: string[] = [];
+
+  // 续聊每次都注入当前时间 — Claude 对话 thread 看不到这次唤起的真实时间
+  sections.push(formatCurrentTimeBlock(), '');
 
   if (opts.salesGuidance?.trim()) {
     sections.push(`[Sales Guidance — TOP PRIORITY]`, opts.salesGuidance.trim(), '');
   }
 
+  // 续聊也带客户档案（个人聊天才有意义；群聊跳过）
+  if (opts.contact && !opts.isGroup) {
+    sections.push(buildSlimCustomerContext(opts.contact, opts.vehicleInterests), '');
+  }
+
   if (opts.newMessages && opts.newMessages.length > 0) {
-    sections.push(`[New Messages Since Last Time]`);
+    // 标题诚实化：之前叫 [New Messages Since Last Time] 是骗 Claude — 实际是最近 50 条整段，
+    // 含上次已看过的内容。改成准确的描述。
+    sections.push(`[Recent Chat History — last 50 messages, may overlap with what you've already seen in this thread]`);
     const collapsed = collapseMediaRuns(opts.newMessages).slice(-50);
     for (const m of collapsed) {
       sections.push(formatMessage(m, opts.isGroup ?? false));
@@ -117,6 +137,40 @@ export function buildFollowUpMessage(opts: {
   }
 
   return sections.join('\n');
+}
+
+/**
+ * 精简版客户档案 —— 续聊用，不含 ROLE_PROMPT / VEHICLE_KNOWLEDGE / chat history。
+ * 每次续聊重申客户 anchor（预算、国家、stage、车型兴趣），防 thread 久了 AI 忘客户。
+ */
+function buildSlimCustomerContext(
+  contact: ClaudePromptContext['contact'],
+  vehicleInterests?: ClaudePromptContext['vehicleInterests'],
+): string {
+  const lines: string[] = [];
+  const phone = normalizePhone(contact.phone);
+  lines.push(`[Customer Context — refresher, in case earlier turns aged out of your thread]`);
+  lines.push(`Phone: ${phone}`);
+  const name = contact.name?.trim() || contact.wa_name?.trim();
+  if (name) lines.push(`Name: ${name}`);
+  if (contact.country) lines.push(`Country: ${contact.country}`);
+  if (contact.language) lines.push(`Language: ${contact.language}`);
+  if (contact.budget_usd) lines.push(`Budget signal: $${contact.budget_usd}`);
+  if (contact.destination_port) lines.push(`Destination Port: ${contact.destination_port}`);
+  if (contact.customer_stage) lines.push(`Stage: ${contact.customer_stage}`);
+  if (contact.notes?.trim()) lines.push(`Sales notes: ${contact.notes.trim()}`);
+  if (vehicleInterests?.length) {
+    lines.push('', `[Vehicle Interests]`);
+    for (const vi of vehicleInterests) {
+      const parts: string[] = [vi.model];
+      if (vi.year) parts.push(String(vi.year));
+      if (vi.condition) parts.push(vi.condition);
+      if (vi.steering) parts.push(vi.steering);
+      if (vi.target_price_usd) parts.push(`target $${vi.target_price_usd}`);
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 // ── 上下文 ──
@@ -812,12 +866,35 @@ function formatMessage(msg: ChatMessage, isGroup: boolean): string {
 }
 
 function formatTimestamp(ms: number | null): string {
-  const d = ms ? new Date(ms) : new Date();
+  if (ms == null) return '??-?? ??:??';
+  const d = new Date(ms);
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   const hour = String(d.getHours()).padStart(2, '0');
   const minute = String(d.getMinutes()).padStart(2, '0');
   return `${month}-${day} ${hour}:${minute}`;
+}
+
+const WEEKDAY_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/**
+ * "今天是几号" 时间块 — 注入到 prompt 顶部。
+ *
+ * 没有这个的话 AI 会把最近一条消息当成"今天"（实际可能是几天前）。
+ * 消息时间戳是 MM-DD HH:MM 没年份，AI 也需要这个参考点反推年份。
+ */
+function formatCurrentTimeBlock(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hour = String(now.getHours()).padStart(2, '0');
+  const minute = String(now.getMinutes()).padStart(2, '0');
+  const weekday = WEEKDAY_EN[now.getDay()];
+  return `[Current Time]
+${year}-${month}-${day} ${weekday} ${hour}:${minute} (boss's local time, Asia/Shanghai)
+Message timestamps below are MM-DD HH:MM. Use the date above to interpret "today" / "yesterday" / "earlier today" / day-of-week references correctly — do NOT assume the most recent message in chat history is from today; it may be days or weeks old.
+Lines marked \`??-?? ??:??\` are messages (typically media attachments without text caption) whose exact send time wasn't recorded. They happened at some point in this conversation; their position in the list is NOT chronological — do not infer "just now" or any specific timing from them.`;
 }
 
 function normalizePhone(phone: string | null): string {

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
+import { usePersistedReplyStatus } from '@/panel/hooks/usePersistedReplyStatus';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
-import { jumpToChat } from '@/lib/jump-to-chat';
+import { jumpToChat, verifyHeaderMatches, type RequireMatch } from '@/lib/jump-to-chat';
 import {
   waitForChatMessages,
   type ChatMessage,
@@ -22,6 +23,7 @@ import { logAiReply, markAiReplyFilled } from '@/lib/ai-reply-log';
 import { sanitizeReplyForCustomer, wasReplyDirty } from '@/lib/reply-sanitize';
 import { ReplyCard } from './ReplyCard';
 import { GemTemplatesModal } from './GemTemplatesModal';
+import { GeneratedAtBadge } from './GeneratedAtBadge';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type GemTemplateRow = Database['public']['Tables']['gem_templates']['Row'];
@@ -55,6 +57,8 @@ type Status =
       count: number;
       /** ai_reply_logs row id — fillReply 用它把 was_filled 翻成 true */
       logId: string | null;
+      /** 自动由 usePersistedReplyStatus 注入（done 状态写 chrome.storage 时盖戳） */
+      generatedAt?: number;
     }
   | { kind: 'error'; message: string };
 
@@ -63,7 +67,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
   const [conversations, setConversations] = useState<GemConversationRow[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [foreground, setForeground] = useState(false);
-  const [status, setStatus] = useState<Status>({ kind: 'idle' });
+  const [status, setStatus] = usePersistedReplyStatus<Status>('gem', contact.id, { kind: 'idle' });
   const [showTemplates, setShowTemplates] = useState(false);
   const [followup, setFollowup] = useState('');
   const [followupLoaded, setFollowupLoaded] = useState(false);
@@ -168,6 +172,13 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         messages: ChatMessage[];
         source: MessageSource;
       }> => {
+        // 严格身份校验 —— 必传，防止 jumpToChat 跳错 chat 后 DOM 读到的是别人的消息
+        // 被 syncMessages 写错位到当前 contact，污染 messages 表
+        const requireMatch: RequireMatch = {
+          phone: contact.phone,
+          name: contact.name,
+          waName: contact.wa_name,
+        };
         let dom: ChatMessage[] = [];
         if (needsJump) {
           // 个人按手机号跳，群按群名跳（jumpToChat 会按搜索匹配上）
@@ -175,13 +186,24 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
             ? contact.phone.replace(/^\+/, '')
             : contact.name?.trim() || contact.wa_name?.trim() || '';
           if (query) {
-            const ok = await jumpToChat(query);
+            const ok = await jumpToChat(query, { requireMatch });
             if (ok) dom = await waitForChatMessages(5000, 30, 1);
           } else {
             dom = await waitForChatMessages(5000, 30, 1);
           }
         } else {
-          dom = await waitForChatMessages(5000, 30, 1);
+          // needsJump=false 也 verify 一遍防 React state 跟 WA chat 之间的 race
+          if (verifyHeaderMatches(requireMatch)) {
+            dom = await waitForChatMessages(5000, 30, 1);
+          }
+        }
+        // 写 DB 前最后一次 sanity check（防 race：generate 期间用户切走 WA chat）
+        if (dom.length > 0 && !verifyHeaderMatches(requireMatch)) {
+          console.warn(
+            '[GemReplySection] DOM 不再是目标客户（用户切了 WA chat？），放弃 DOM 消息走 DB',
+            { contactId: contact.id, phone: contact.phone },
+          );
+          dom = [];
         }
         if (dom.length > 0) {
           void syncMessages(contact.id, dom);
@@ -212,15 +234,13 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
       };
       const { messages, source: messageSource } = await loadAiMessages();
 
-      // 2. Load vehicle interests for richer context (only on new conversation)
-      let vehicleInterests: VehicleInterestRow[] = [];
-      if (!existingConv) {
-        const { data } = await supabase
-          .from('vehicle_interests')
-          .select('*')
-          .eq('contact_id', contact.id);
-        vehicleInterests = data ?? [];
-      }
+      // 2. Load vehicle interests for richer context —— 续聊也拉（formatUpdate 现在带
+      // 精简客户档案 + 车型兴趣，让 Gem 对话长后也不会忘客户 anchor）
+      const { data: viData } = await supabase
+        .from('vehicle_interests')
+        .select('*')
+        .eq('contact_id', contact.id);
+      const vehicleInterests: VehicleInterestRow[] = viData ?? [];
 
       // 2.5. 群聊：从 IDB 拉成员名单给 Gem 用
       let groupMemberNames: string[] | undefined;
@@ -252,7 +272,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         ? contact.name?.trim() || contact.wa_name?.trim() || null
         : contact.phone;
       const basePrompt = existingConv
-        ? formatUpdate(updateLabel, messages.slice(-50), isGroup)
+        ? formatUpdate(updateLabel, messages.slice(-50), isGroup, contact, vehicleInterests)
         : formatNewCustomer({
             contact,
             vehicleInterests,
@@ -556,6 +576,10 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
 
           {status.kind === 'error' && (
             <div className="sgc-error">{status.message}</div>
+          )}
+
+          {status.kind === 'done' && (
+            <GeneratedAtBadge generatedAt={status.generatedAt} />
           )}
 
           {status.kind === 'done' && parsed && (

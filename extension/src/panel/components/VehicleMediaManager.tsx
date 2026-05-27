@@ -75,6 +75,7 @@ export function VehicleMediaManager({ vehicleId }: Props) {
           public_id: result.public_id,
           mime_type: file.type || null,
           file_size_bytes: result.bytes ?? file.size,
+          file_name: file.name || null,
         });
         if (error) throw new Error(error.message);
       } catch (e) {

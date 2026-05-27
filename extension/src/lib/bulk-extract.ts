@@ -3,7 +3,7 @@ import { readChatMessages, type ChatMessage } from '@/content/whatsapp-messages'
 import { waitForActiveChatPhone } from '@/content/whatsapp-dom';
 import { phoneToCountry } from './phone-countries';
 import { jumpToChat } from './jump-to-chat';
-import { loadMessages } from './message-sync';
+import { loadMessages, syncMessages } from './message-sync';
 import { stringifyError } from './errors';
 import { canonicalizeModel } from './vehicle-aliases';
 import type {
@@ -154,6 +154,7 @@ async function extractOne(
 
   // 1. 先尝试 WA Web DOM（jumpToChat + 验证 + 读 DOM）
   let messages: ChatMessage[] = [];
+  let messagesFromDom = false;
   const queryDigits = contact.phone.replace(/^\+/, '');
   const jumped = await jumpToChat(queryDigits);
   if (jumped) {
@@ -164,7 +165,14 @@ async function extractOne(
     if (matched) {
       await sleep(300);
       messages = readChatMessages(30);
+      messagesFromDom = messages.length > 0;
     }
+  }
+
+  // 顺手把 DOM 抓到的消息持久化到 messages 表（DB fallback 路径不重写自己）。
+  // 这样跑一遍批量抽取，messages 表也同时变新鲜——下次 lead 分析不靠老快照。
+  if (messagesFromDom) {
+    void syncMessages(contact.id, messages);
   }
 
   // 2. DOM 没消息 → fallback 到 messages 表（导入的 .txt 历史 / 之前同步过的）

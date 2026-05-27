@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { usePersistedReplyStatus } from '@/panel/hooks/usePersistedReplyStatus';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
-import { jumpToChat } from '@/lib/jump-to-chat';
+import { jumpToChat, verifyHeaderMatches, type RequireMatch } from '@/lib/jump-to-chat';
 import {
   waitForChatMessages,
   type ChatMessage,
@@ -25,6 +26,7 @@ import type { CustomerStage } from '@/lib/database.types';
 import { logAiReply, markAiReplyFilled } from '@/lib/ai-reply-log';
 import { sanitizeReplyForCustomer, wasReplyDirty } from '@/lib/reply-sanitize';
 import { ReplyCard } from './ReplyCard';
+import { GeneratedAtBadge } from './GeneratedAtBadge';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type ClaudeConvRow = Database['public']['Tables']['claude_conversations']['Row'];
@@ -54,6 +56,8 @@ type Status =
       count: number;
       /** ai_reply_logs row id — fillReply 用它把 was_filled 翻成 true */
       logId: string | null;
+      /** 自动由 usePersistedReplyStatus 注入（done 状态写 chrome.storage 时盖戳） */
+      generatedAt?: number;
     }
   | { kind: 'error'; message: string };
 
@@ -77,7 +81,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
   const [mode, setMode] = useState<ClaudeMode>('reply');
   const [existingConv, setExistingConv] = useState<ClaudeConvRow | null>(null);
   const [foreground, setForeground] = useState(false);
-  const [status, setStatus] = useState<Status>({ kind: 'idle' });
+  const [status, setStatus] = usePersistedReplyStatus<Status>('claude', contact.id, { kind: 'idle' });
   const [guidance, setGuidance] = useState('');
   const [guidanceLoaded, setGuidanceLoaded] = useState(false);
   const [discuss, setDiscuss] = useState('');
@@ -122,7 +126,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
 
   useEffect(() => {
     void refreshExistingConv();
-    setStatus({ kind: 'idle' });
+    // status 由 usePersistedReplyStatus 接管：切 contact 时它会自动恢复上次 done card（如有）
     setDiscuss('');
   }, [contact.id]);
 
@@ -153,13 +157,20 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         messages: ChatMessage[];
         source: MessageSource;
       }> => {
+        // 严格身份校验 —— 必传，防止 jumpToChat 跳错 chat 后 DOM 读到的是别人的消息
+        // 被 syncMessages 写错位到当前 contact，污染 messages 表
+        const requireMatch: RequireMatch = {
+          phone: contact.phone,
+          name: contact.name,
+          waName: contact.wa_name,
+        };
         let dom: ChatMessage[] = [];
         if (needsJump) {
           const query = contact.phone
             ? contact.phone.replace(/^\+/, '')
             : contact.name?.trim() || contact.wa_name?.trim() || '';
           if (query) {
-            const ok = await jumpToChat(query);
+            const ok = await jumpToChat(query, { requireMatch });
             if (ok) dom = await waitForChatMessages(5000, 30, 1);
           } else {
             dom = await waitForChatMessages(5000, 30, 1);
@@ -167,7 +178,18 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         } else {
           // 即使不需要 jump 也走轮询版——WA Web 冷启动后 div#main 出现 ≈ 6s，
           // bubble 渲染 ≈ 10s+
-          dom = await waitForChatMessages(5000, 30, 1);
+          // needsJump=false 也 verify 一遍防 React state 跟 WA chat 之间的 race
+          if (verifyHeaderMatches(requireMatch)) {
+            dom = await waitForChatMessages(5000, 30, 1);
+          }
+        }
+        // 写 DB 前最后一次 sanity check（防 race：generate 期间用户切走 WA chat）
+        if (dom.length > 0 && !verifyHeaderMatches(requireMatch)) {
+          console.warn(
+            '[ClaudeReplySection] DOM 不再是目标客户（用户切了 WA chat？），放弃 DOM 消息走 DB',
+            { contactId: contact.id, phone: contact.phone },
+          );
+          dom = [];
         }
         if (dom.length > 0) {
           void syncMessages(contact.id, dom);
@@ -219,15 +241,13 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         }
       }
 
-      // 3. 车型兴趣（仅新对话）
-      let vehicleInterests: VehicleInterestRow[] = [];
-      if (!existingConv) {
-        const { data } = await supabase
-          .from('vehicle_interests')
-          .select('*')
-          .eq('contact_id', contact.id);
-        vehicleInterests = data ?? [];
-      }
+      // 3. 车型兴趣 —— 续聊也拉（buildFollowUpMessage 现在带精简客户档案 + 车型兴趣，
+      // 让 Claude thread 长后也不会忘客户 anchor）
+      const { data: viData } = await supabase
+        .from('vehicle_interests')
+        .select('*')
+        .eq('contact_id', contact.id);
+      const vehicleInterests: VehicleInterestRow[] = viData ?? [];
 
       // 4. 构造 prompt + URL
       const url = existingConv?.chat_url ?? 'https://claude.ai/new';
@@ -237,6 +257,8 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
             newMessages: messages.slice(-50),
             isGroup,
             salesGuidance: guidance.trim() || undefined,
+            contact,
+            vehicleInterests,
           })
         : buildFirstMessage(
             {
@@ -360,7 +382,21 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         messages: ChatMessage[];
         source: MessageSource;
       }> => {
-        const dom: ChatMessage[] = await waitForChatMessages(5000, 30, 1);
+        // 严格校验：discuss 路径之前完全没校验，DOM 抓到啥写到啥
+        const requireMatch: RequireMatch = {
+          phone: contact.phone,
+          name: contact.name,
+          waName: contact.wa_name,
+        };
+        let dom: ChatMessage[] = [];
+        if (verifyHeaderMatches(requireMatch)) {
+          dom = await waitForChatMessages(5000, 30, 1);
+        }
+        // 写 DB 前再 verify 一次防 race
+        if (dom.length > 0 && !verifyHeaderMatches(requireMatch)) {
+          console.warn('[ClaudeReplySection discuss] DOM 不再是目标客户，放弃');
+          dom = [];
+        }
         if (dom.length > 0) {
           void syncMessages(contact.id, dom);
           const merged = await mergeDomWithDbMessages(dom, contact.id, 50);
@@ -408,14 +444,21 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         // 续聊讨论也要重发最近 50 条 — Claude 那边 chat thread 看到的只是
         // 上一次 generate 时的历史快照，之后客户陆续发的新消息（最新预算 /
         // 改车型 / 发图）没人喂给它，必须在本次 prompt 里补上。
+        // 同时带精简客户档案，防 thread 长后 Claude 忘客户 anchor。
         const loaded = await loadDiscussMessages();
         source = loaded.source;
         count = loaded.messages.length;
+        const { data: viData } = await supabase
+          .from('vehicle_interests')
+          .select('*')
+          .eq('contact_id', contact.id);
         prompt = buildFollowUpMessage({
           mode: 'discuss',
           newMessages: loaded.messages.slice(-50),
           isGroup: !!contact.group_jid,
           userQuestion: q,
+          contact,
+          vehicleInterests: viData ?? [],
         });
       }
       promptForLog = prompt;
@@ -696,6 +739,10 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
 
         {status.kind === 'error' && (
           <div className="sgc-error">{status.message}</div>
+        )}
+
+        {status.kind === 'done' && (
+          <GeneratedAtBadge generatedAt={status.generatedAt} />
         )}
 
         {status.kind === 'done' && parsed && (

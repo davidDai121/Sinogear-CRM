@@ -12,6 +12,11 @@ import type {
   ExtractTagsRequest,
   ExtractTasksRequest,
 } from '@/lib/field-suggestions';
+import {
+  buildStagePrompt,
+  validateInference,
+} from '@/lib/stage-inference';
+import type { InferStageRequest } from '@/lib/stage-inference';
 import { runGem, isBusy as isGemBusy } from '@/lib/gem-automation';
 import { runClaude, isBusy as isClaudeBusy } from '@/lib/claude-automation';
 import { runGpt, isBusy as isGptBusy } from '@/lib/gpt-automation';
@@ -72,6 +77,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg?.type === 'EXTRACT_TASKS') {
     handleExtractTasks(msg as ExtractTasksRequest)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
+    return true;
+  }
+
+  if (msg?.type === 'INFER_STAGE') {
+    handleInferStage(msg as InferStageRequest)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
     return true;
@@ -455,6 +467,23 @@ async function handleExtractTasks(req: ExtractTasksRequest) {
   return {
     ok: true,
     tasks: validateTasks(result.parsed),
+  };
+}
+
+async function handleInferStage(req: InferStageRequest) {
+  if (!req.messages?.length) {
+    return {
+      ok: true,
+      inference: { stage: null, confidence: 0, reasoning: '无聊天消息' },
+    };
+  }
+  const result = await callQwen(
+    buildStagePrompt(req.messages, req.currentStage ?? 'new'),
+  );
+  if (!result.ok) return result;
+  return {
+    ok: true,
+    inference: validateInference(result.parsed),
   };
 }
 

@@ -162,6 +162,7 @@ export function AssignMediaToVehicleModal({ orgId, items, onClose }: Props) {
           public_id: result.public_id,
           mime_type: it.file.type || null,
           file_size_bytes: result.bytes ?? it.file.size,
+          file_name: it.file.name || null,
         });
         if (error) throw new Error(error.message);
         succeeded.push(it.id);
