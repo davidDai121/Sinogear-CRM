@@ -653,6 +653,16 @@ npm run package
 - [x] **`jumpToChat` 加 RequireMatch + `verifyHeaderMatches`**（`lib/jump-to-chat.ts`）：之前 `headerChangedFrom` 弱兜底"只要 header 变了就算成功"会导致跨聊天污染（搜索过程中 WA 临时切到错 chat，DOM 读到别人消息，`syncMessages` 写错位到目标 contact）。新增严格判定（phone digits 或 name 命中 header）。AI 自动化路径必须传 `requireMatch`；用户主动跳转路径保持旧宽松行为
 - [x] **三个 ReplySection 全路径加 verify**：`loadChatMessages` / `loadAiMessages` / `loadDiscussMessages` 都加 jumpToChat requireMatch + 写 DB 前 sanity check（防 race：generate 期间用户手动切 WA chat）。needsJump=false 路径也加 verify
 
+#### Emoji 客户名 hotfix — 防跨聊天污染的副作用
+
+- [x] **`verifyHeaderMatches` 比对前两侧剥 emoji**（`lib/jump-to-chat.ts:92-130`）：
+  - 起点：销售在 K-lonchito（Peruvian 客户，wa_name = `"K-lonchito 🥰🥰🥰"`）点 Gem 生成回复，报"当前聊天没有可读消息，且数据库里也没历史记录"——但 WA Web 上明显有消息
+  - 根因：旧逻辑 `headerLower.includes(c.toLowerCase())` 整串比对，candidate `"K-lonchito 🥰🥰🥰"` 不在 header `"K-lonchito待二次跟进 异日必约"` 里（header 不带 emoji）→ verifyHeaderMatches 返 false → DOM 跳过 → DB messages 也 0 条 → 抛 cold-start 错
+  - 影响面（service_role 全 org audit）：**120 / 4437 contact (2.7%) name/wa_name 带 emoji**。其中 **58 个硬挂**（emoji + DB 空，AI 完全废）+ **62 个隐性失效**（DOM 路径被卡 → syncMessages 永远不写新消息进 DB → DB 历史冻结在某老快照，AI 看不到客户最近消息但销售察觉不到，只会觉得 AI 智商不行）
+  - 硬挂 stage 分布：lost 34 + negotiating 8 + stalled 8 + new 8 → **24 个活跃漏斗里的客户 AI 完全用不了**
+  - 修法：新增 `stripEmojiAndNormalize` helper（`\p{Extended_Pictographic}` + `\p{Emoji_Modifier}` + VS16 `️` + ZWJ `‍`，**不要用 `\p{Emoji}`** —— 它把 `# * 0-9` 等基础字符也算 emoji-candidate，会误剥客户名里的数字），candidate 和 header 都先 strip 再 includes。剥完后为空（纯 emoji 名）自动被 `length >= 2` 过滤
+  - 测试：20 条 case 全 PASS（11 真实 worst-case 含 K-lonchito / Zouhour / 😇Pee 含前后包夹和 ZWJ 组合 emoji；5 边缘 / 4 regression 防误剥数字/连字符/撇号/#）
+
 #### 自动 backfill NULL sent_at + 一次性 backfill 失败教训
 
 - [x] **`syncMessages` 加 `backfillNullSentAt`**：DOM 新拿到准确 timestamp 时反向 UPDATE DB 里 sent_at IS NULL 的老行。`sent_at=is.null` filter 保证不覆盖已有时间（幂等安全）。配合 readChatMessages 修源头，老 NULL row 在用户重新打开聊天时自动填上真实 sent_at
@@ -759,6 +769,7 @@ WhatsApp 绿色主题：
 - **AI 回复 done card 必须明示 generatedAt**（`GeneratedAtBadge`）：`usePersistedReplyStatus` 持久化的 done card 没显示生成时间时，用户切回客户看到 1 小时前的 prompt 会误以为是当下的，抱怨"时间错 + 缺消息"。done card 顶部 banner "生成于 XX:XX（X 分钟前）"，> 10 分钟橙色警告"可能不含最新消息，请重新生成"。**新加 persisted UI 状态都要明示时间戳**
 - **`usePersistedReplyStatus` async get race**（`panel/hooks/usePersistedReplyStatus.ts`）：useEffect 启动 async get 后，如果用户立刻点 generate 改了 state，async get 完成时**不能用 stale 直接覆盖**——必须 functional setState 判 `current.kind === initial.kind` 才用 stale 恢复。早期 bug：generate 跑完几秒后 async get 回调把 new done 覆盖回 stale done，UI 显示 stale 状态用户以为没点中
 - **删除占位识别 + DB 覆盖**（`DELETED_PLACEHOLDER_PATTERNS` + `isDeletedPlaceholderText`）：DOM 抓到"你已删除这条消息" / "This message was deleted" → text 改 `[已删除]`，`syncMessages` 用 onConflict 覆盖之前抓过的原文（用户后来在 WA 端撤回的）。**先 `stripTrailingMeta` 再判删除占位**（防"你已删除这条消息中午11:31"因尾巴匹配不上而失败）
+- **`verifyHeaderMatches` 比对 name/wa_name 时必须两侧 strip emoji**（`lib/jump-to-chat.ts`）：销售在 WA 通讯录给客户起带 emoji 爱称（`"K-lonchito 🥰🥰🥰"` / `"🌸🌸Zouhour🌸🌸"` / `"Banks💎👑🌟"`）非常常见，org 内 **~2.7% contact 中招**。但 WA Web header 文本一般不含这些 emoji 或位置不同 → **整串 `header.includes(candidate)` 永远不命中** → DOM 路径被锁死 → AI 生成抛 cold-start 错（DB 空时硬挂）或冻结 DB 历史（DB 有时隐性失效，销售察觉不到只觉得 AI 智商低）。修法 `stripEmojiAndNormalize`：`[\p{Extended_Pictographic}\p{Emoji_Modifier}️‍]` 一次 strip + normalize 空格 + lowercase，两侧都过再 includes。**不要用 `\p{Emoji}`** —— 它把 `# * 0-9` 也算 emoji-candidate，会误剥客户名里的数字。**任何新加"比对 contact 名 vs DOM 文本"的逻辑都先剥 emoji**（销售爱用 emoji 给重要客户做视觉标记，这是常态不是边缘 case）
 
 ## 用户偏好
 

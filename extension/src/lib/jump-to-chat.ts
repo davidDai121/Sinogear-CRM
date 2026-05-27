@@ -77,7 +77,7 @@ function headerChangedFrom(initial: string): boolean {
  *
  * 任一匹配即认定成功：
  *   - phone digits 出现在 header 数字里（备注名客户 header 无数字 → 这条不命中，看 name）
- *   - name / wa_name（trim 后 ≥2 字符）出现在 header 文本里（忽略大小写）
+ *   - name / wa_name（剥 emoji 后 ≥2 字符）出现在 header（同样剥 emoji 后）里（忽略大小写）
  *   - group_jid 模式下，name 通常等于群名，照样命中 name 检查
  *
  * 双重否定：两个都没命中（phone null + name 太短或不匹配）→ return false。
@@ -87,6 +87,20 @@ export interface RequireMatch {
   phone?: string | null;
   name?: string | null;
   waName?: string | null;
+}
+
+// 剥 Unicode emoji 并 normalize：
+//   - 销售在 WA 通讯录给客户起带 emoji 爱称（"K-lonchito 🥰🥰🥰" / "🌸🌸Zouhour🌸🌸"）
+//     很常见（org 里 ~2.7% contact 中招），但 WA Web header 文本经常不含这些 emoji
+//     或 emoji 位置不同。整串 `headerLower.includes(candidate)` 永远不命中 →
+//     verifyHeaderMatches 返 false → DOM 读不了 → AI 生成卡死 + DB 写不了。
+//   - 剥范围：\p{Extended_Pictographic} 覆盖绝大多数 emoji base char；\p{Emoji_Modifier}
+//     吃肤色 modifier (🏻🏼🏽🏾🏿)；️ (VS16) 切 emoji presentation；‍ (ZWJ)
+//     切组合 emoji（family / profession）。**不要用 \p{Emoji}** —— 它把 # * 0-9 等
+//     基础字符也算 emoji-candidate，会误剥客户名里的数字。
+const EMOJI_STRIP_RE = /[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\u200d]/gu;
+function stripEmojiAndNormalize(s: string): string {
+  return s.replace(EMOJI_STRIP_RE, '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 export function verifyHeaderMatches(match: RequireMatch): boolean {
@@ -101,13 +115,16 @@ export function verifyHeaderMatches(match: RequireMatch): boolean {
     if (headerDigits.includes(phoneDigits)) return true;
   }
 
-  // name / wa_name 匹配（长度 ≥ 2 字符才有意义，否则"Yu"这种短名易撞)
+  // name / wa_name 匹配 — 两侧都剥 emoji 再做 includes，否则销售给客户起的带
+  // emoji 爱称跟 WA Web header（一般不带 emoji 或 emoji 位置不同）永远对不上。
+  // 长度 ≥ 2 字符才有意义（否则"Yu"这种短名易撞）；剥完后若为空（纯 emoji 名）
+  // 也自动被过滤。
+  const headerCore = stripEmojiAndNormalize(header);
   const candidates = [match.name, match.waName]
-    .map((s) => s?.trim() ?? '')
+    .map((s) => stripEmojiAndNormalize(s ?? ''))
     .filter((s) => s.length >= 2);
-  const headerLower = header.toLowerCase();
   for (const c of candidates) {
-    if (headerLower.includes(c.toLowerCase())) return true;
+    if (headerCore.includes(c)) return true;
   }
   return false;
 }
