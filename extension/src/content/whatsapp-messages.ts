@@ -76,8 +76,12 @@ function stripTrailingMeta(text: string): string {
 function getMessageText(scope: Element): string {
   // 优先抓真正的消息体（有 data-pre-plain-text 属性的 .copyable-text 才是消息正文 wrapper）。
   // 不带 data-pre-plain-text 的 .copyable-text 是引用气泡 / Facebook 广告 header 卡片
-  // ("Facebook 广告" / "查看详情") — 直接抓第一个 .copyable-text .selectable-text
-  // 会拿到 header，把正文 "Hi, check out the UNI-K Global..." 整段丢掉。
+  // ("Facebook 广告" / "查看详情") — 直接抓第一个 .copyable-text 会拿到 header，把正文
+  // "Hi, check out the UNI-K Global..." 整段丢掉。
+  //
+  // ⚠️ 新版 WA Web (2026-05+) 已经放弃 `.selectable-text` class —— 所有依赖 `.selectable-text`
+  // 的路径都返回空。现在 bubble 文本直接挂在 `.copyable-text` 自身的 textContent / innerText 上。
+  // 改成：先试 .selectable-text（向后兼容老 WA Web），不行再退到 .copyable-text 整段读。
   const realWrap = scope.querySelector(
     '.copyable-text[data-pre-plain-text]',
   ) as HTMLElement | null;
@@ -92,12 +96,21 @@ function getMessageText(scope: Element): string {
   }
 
   // FB 广告气泡 / 引用回复等多 .copyable-text 的场景：data-pre-plain-text 缺失时，
-  // 挑文本最长的 .selectable-text — header 短（"Facebook 广告"），正文长，取最长不会错。
+  // 挑文本最长的 — header 短（"Facebook 广告" 4 字），正文长，取最长不会错。
+  // 先在 .selectable-text 里找（老 WA Web），找不到退到 .copyable-text 自身。
   const allSelectables = scope.querySelectorAll<HTMLElement>(
     '.copyable-text .selectable-text',
   );
   let longest = '';
   for (const el of allSelectables) {
+    const text = readStrippingInjections(el);
+    if (text.length > longest.length) longest = text;
+  }
+  if (longest) return longest;
+
+  // 新 WA Web：.copyable-text 自身就是文本节点（无 .selectable-text 子层），挑最长
+  const allCopyables = scope.querySelectorAll<HTMLElement>('.copyable-text');
+  for (const el of allCopyables) {
     const text = readStrippingInjections(el);
     if (text.length > longest.length) longest = text;
   }
@@ -114,15 +127,34 @@ function getMessageText(scope: Element): string {
 }
 
 function findDataId(el: Element): string | null {
-  // 优先：用 [data-testid^="conv-msg-"] 这个消息级标记的 closest()，不限层数。
-  // 新版 WA Web (2026-05+) 把 data-id 挪到了 .message-in/out 的 3 层祖父之上，
-  // 老的固定 N 层爬（3/6）一旦 DOM 微调就全军覆没（这次正好就是 inbound 客户消息
-  // 全部丢失的根因 — 客户的所有文字 bubble 从未进 messages 表）。
-  // `conv-msg-` 是 message-level wrapper 独有的 testid 前缀，不会撞 FB 广告 / 会话级
-  // 共享 wrapper（那些没 conv-msg- testid，长度判定也兜底）。
+  // 优先：用 [data-testid^="conv-msg-"] 这个 message-group 标记的 closest()，不限层数。
+  // 新版 WA Web (2026-05+) 把 data-id 挪到了 .message-in/out 的 3 层祖父之上的 wrapper。
+  //
+  // ⚠️ 但 conv-msg- wrapper 不一定是"单条消息"级 — 当 customer 通过 FB Ad 点过来时，
+  // 销售那条 ad reply card (outbound) + 客户对 ad 的 reply (inbound) 被 WA Web 打包到
+  // **同一个 conv-msg- wrapper** 内，共享同一个 data-id。bubble 自身 + 整个子树都没有
+  // 独立的 message-level data-id (WA Web 不暴露)。
+  //
+  // 之前的实现直接返回 wrapId → 第二条 bubble 在 readChatMessages 里被 seen.has(id) 当
+  // 重复跳过 → 客户的 "Hi, I'm interested in the Changan UNI-K." 这种 ad-reply 客户消息
+  // 整条从 DOM 路径消失 → 写不进 messages 表 → AI prompt 看不到 → AI 完全不知道车型。
+  //
+  // 修法：检测同 data-id 是否被多个 conv-msg- wrapper 共享（实测 WA Web 给 FB ad-reply pair
+  // 的销售 ad card 和客户回复**各自**建独立 wrapper，但 **data-id 完全相同**——它们是兄弟
+  // 节点不是嵌套，单 wrapper 内就 1 个 bubble，所以"group 内 idx"不能区分）。多 wrapper
+  // 共享时用 in/out 方向作 disambiguator（FB pair 必然一外一内方向不同）。
+  // 单 wrapper 保留原 wrapId 不变 (历史 DB 数据 wa_message_id 用的是 32 字符 hex，
+  // 不带 ::dir 后缀，保持兼容，避免一次性插入大量 dup 行)。
   const msgWrap = el.closest('[data-testid^="conv-msg-"]');
   const wrapId = msgWrap?.getAttribute('data-id');
-  if (wrapId) return wrapId;
+  if (wrapId) {
+    const allSameId = document.querySelectorAll(
+      `[data-testid^="conv-msg-"][data-id="${CSS.escape(wrapId)}"]`,
+    );
+    if (allSameId.length <= 1) return wrapId;
+    const dir = el.classList.contains('message-out') ? 'out' : 'in';
+    return `${wrapId}::${dir}`;
+  }
 
   // 兜底：testid 不存在 / 命名变了时走层数爬，加 length 过滤防共享 wrapper
   // （单条消息的 data-id 通常 16+ 字符 hex；会话级 wrapper 一般更短或纯数字）

@@ -686,6 +686,21 @@ npm run package
 - [x] **auto-reply 用 vehicle_media.file_name 真实文件名** 发图，替代之前生成的占位名
 - [x] **bulk-extract 顺手 `syncMessages`**：批量抽取时把 DOM 抓到的消息持久化进 messages 表
 
+### 近期补完（2026-05-27）— FB ad-reply pair DOM 漂移：客户首句丢失
+
+**起点**：销售给 +226 客户（Burkina Faso，从 FB Ad 跳进 WA 的 lead）发了 17 张 Changan UNI-K 图让 GPT 续聊，GPT prompt 里 chat history 完全没出现客户的 "Hi, I'm interested in the Changan UNI-K."，也没有销售那条 ad reply card 的正文 "...UNI-K Global - 15% more power..."，只剩"Facebook 广告"4 个字 + "[Sales sent 17 photos to customer]" 占位。GPT 不知道车型，只能空泛问"SUV / 轿车 / 皮卡"。
+
+**根因 1（findDataId 误判 dup）**：WA Web 给 FB ad-reply pair **各自建独立的 conv-msg- wrapper**（兄弟节点不嵌套），但 **data-id 完全一样**（销售 ad card outbound + 客户对 ad 的 reply inbound 共享同一个 32 字符 hex）。`findDataId` 用 `closest('[data-testid^="conv-msg-"]')` 后两条 bubble 拿到不同 wrapper element 但 data-id 相同 → `seen.has(id)` 把客户 inbound 当 dup 跳过 → AI 永远看不到客户首句话。Chrome MCP 实测确认：`bubbles[0].closest(...) !== bubbles[1].closest(...)` (sameWrapElement: false) 但 `data-id` 相同 (sameDataId: true)。
+
+**根因 2（.selectable-text 已弃用）**：新版 WA Web 完全放弃 `.selectable-text` class，bubble 文本直接挂在 `.copyable-text` 自身的 textContent 上。`getMessageText` 三条 fallback 全部依赖 `.selectable-text` 找最长 → 全空 → 走最后兜底"任意 `.copyable-text`"拿到**第一个**（FB 卡片 header "Facebook 广告"）→ 正文丢。
+
+- [x] **`findDataId` 加方向后缀 disambiguator**（`whatsapp-messages.ts`）：检测同 data-id 是否被 ≥2 个 conv-msg- wrapper 共享，是的话加 `::out` / `::in` 方向后缀（FB pair 必然一外一内）；单 wrapper 仍返回原 wrapId 不带后缀（**~99.5% 历史消息 wa_message_id 不变，不会大批量 DB dup**）
+- [x] **`getMessageText` 加"最长 .copyable-text textContent"兜底**：放在 `.copyable-text .selectable-text` 之后，新 WA Web 没 `.selectable-text` 时挑最长 `.copyable-text` 自身文本——FB ad card 卡片标题"Facebook 广告"短、正文长，取最长不会错
+
+**Chrome MCP 实测验证**：修复后 readChatMessages 三条全过：(out, `..::out`, "Hi, check out the UNI-K Global - 15% more power and a panoramic roof for $11,000+ less than the Toyota RAV4!")、(in, `..::in`, "Hi, I'm interested in the Changan UNI-K.")、(out, album-id, 空→detectMediaKind→[图片])。
+
+**教训**：closest + testid 也不够 — 同 data-id 多 wrapper 是 WA Web 的真实行为（at least 在 FB ad-reply pair 场景），不能假设"closest 到同 wrapper = 同消息"。Lead-from-FB-ad 场景特别多，每个被踩到的客户**第一句话 inbound 永远丢**——而这通常是客户唯一明确说出"想买什么车"的那句话，AI 全瞎猜。
+
 ### 还可以做的（不急）
 
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
@@ -715,7 +730,9 @@ WhatsApp 绿色主题：
 - WhatsApp Web 业务账号（@lid 格式）通过 IndexedDB `contact.phoneNumber` 字段映射到真实手机号
 - MV3 service worker 会休眠，不能做后台 24h 监听（必须打开 WhatsApp Web 标签页）。批量抽取跑大量请求时偶尔会因 SW 休眠而静默停止，重新点继续即可（不会重复抽）
 - WhatsApp Web 改 DOM 时会破坏 `whatsapp-dom.ts` 选择器；IndexedDB schema 也可能变（虽然更稳定）
-- **`findDataId` 永远别再写固定层数父链**（`whatsapp-messages.ts`）：反复因 WA Web DOM 漂移坏过（6 → 3 → 2026-05-22 改 closest + testid）。新版 data-id 在 `.message-in/.message-out` 的 3 层祖父之上的 `[data-testid^="conv-msg-"]` wrapper 上。任何"从 message-in 元素往上爬找 data-id"的逻辑一律用 `el.closest('[data-testid^="conv-msg-"]')`，不要 `for i < N`。一旦这块再坏：**客户所有 inbound 消息从 DOM / DB / AI prompt 同时消失**，销售完全感知不到（DB 表面有消息 = 销售 outbound 占位，但客户回复 0 条），AI 续聊永远只看到销售自己发图
+- **`findDataId` 永远别再写固定层数父链**（`whatsapp-messages.ts`）：反复因 WA Web DOM 漂移坏过（6 → 3 → 2026-05-22 改 closest + testid → 2026-05-27 再加方向后缀防 FB ad pair data-id 复用）。新版 data-id 在 `.message-in/.message-out` 的 3 层祖父之上的 `[data-testid^="conv-msg-"]` wrapper 上。任何"从 message-in 元素往上爬找 data-id"的逻辑一律用 `el.closest('[data-testid^="conv-msg-"]')`，不要 `for i < N`。一旦这块再坏：**客户所有 inbound 消息从 DOM / DB / AI prompt 同时消失**，销售完全感知不到（DB 表面有消息 = 销售 outbound 占位，但客户回复 0 条），AI 续聊永远只看到销售自己发图
+- **WA Web 给 FB ad-reply pair 复用 data-id**（2026-05-27 修，`findDataId`）：销售那条 FB ad reply card (outbound) + 客户对 ad 的第一条 reply (inbound) **各自有独立的 conv-msg- wrapper**（兄弟节点不嵌套），但 **data-id 完全相同**。`closest('[data-testid^="conv-msg-"]')` 两条 bubble 拿到各自不同 wrapper element 但 data-id 一样 → `seen.has(id)` 把客户 inbound 当 dup 跳过 → AI 永远不知道客户对 ad 说了什么车。修法：`findDataId` 检测同 data-id 是否被 ≥ 2 个 conv-msg- wrapper 共享（`document.querySelectorAll('[data-testid^="conv-msg-"][data-id="..."]')`），是的话加 `::out` / `::in` 方向后缀（FB pair 必然一外一内）。单 wrapper 保留原 id 不带后缀（兼容历史 DB 数据，~99.5% 消息 id 不变）。**Lead-from-FB-ad 的客户每次踩这个 bug 第一句话就丢**，而那通常是客户唯一明确说出"想买什么车"的话，AI 全瞎猜
+- **WA Web 已放弃 `.selectable-text` class**（2026-05-27 修，`getMessageText`）：新版 bubble 文本直接挂在 `.copyable-text` 自身的 textContent / innerText 上，不再有 `.selectable-text` 子层。原来 `getMessageText` 的 3 条 fallback 全部依赖 `.selectable-text` 找最长 → 全返回空 → 走"任意 `.copyable-text`"兜底拿到第一个（FB 卡片的"Facebook 广告"4 字 header）→ 正文丢。修法：新增"挑最长 `.copyable-text` 自身 textContent"分支，放在 `.copyable-text .selectable-text` 之后兜底
 - WhatsApp 搜索框已从 `contenteditable` 改成原生 `<input>`，跳转用 **search + Enter** 而非模拟点击（React 上的 click 事件不触发）
 - AI API 限流：`service-worker.ts` 已加 3 次指数退避（3s/8s/15s）；bulk extract 默认 4/min；auto-translate 顺序队列 + 200ms 间隔（因为换 Google Translate 后无配额限制）
 - `auto-translate.ts` 早期版本有 drop bug（MAX_CONCURRENT=2 超出直接丢，长聊天后面消息翻不出），已改为顺序 Promise 队列
