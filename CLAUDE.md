@@ -796,3 +796,9 @@ WhatsApp 绿色主题：
 - 修改后让我用 Chrome MCP 自动验证，不要每次都让用户手动验
 - **prompt 里不要重复传时间**：结构化 `[MM-DD HH:MM]` 已经够了，WA Web bubble 末尾的"下午X:YY" / "晚上X:YY" / "已编辑" 等必须剥掉（2026-05-27 用户明确说"你就别传俩时间给各个 ai 了，把什么下午中午的都删掉"）。任何新加的 prompt-bound 文本字段都要过 `stripTrailingMeta`
 - **bug fix 之前先确认用户用的是哪个版本**：踩过坑——我修了代码以为 fix 已生效，用户实际还装着旧版本。判断方法：让用户看 `chrome://extensions/` → Sino Gear CRM → 详细信息 → 版本号，或者打开 panel devtools console 跑 `chrome.runtime.getManifest().version_name`；或者直接看 prompt 里的具体内容是否反映新逻辑（如时间是否 +12）
+- **打包发布完整流程**（用户说"打包发布" / "打包" / "发版"时按这个顺序自动做完，不要分步问）：
+  1. **改 CLAUDE.md**：在"### 还可以做的（不急）"之前插入新章节"### 近期补完（YYYY-MM-DD）— 一句话标题"，含**起点**（用户原话或具体症状） / **根因**（Chrome MCP / 实测拿到的证据，不靠猜） / **修法**（具体改了哪几个函数 + 关键代码思路） / **验证**（Chrome MCP / 实测拿到的结果）/ **教训**（下次别再踩的具体规则）。同时在"## 已知问题 / 风险"段补对应的"以后写新代码要注意"那条
+  2. **`cd extension && npm run package`**：自动写 BUILD_VERSION → tsc + vite build → zip 到 `dist-zips/` → 用 service_role 推 `app_config.required_version` 到 Supabase → 还原 build-version.ts（让 git 干净）。**每次打包 = 强制全员升级**，旧版扩展 5 分钟内被 VersionGate 弹窗拦下
+  3. **git commit**：中文 message 多段——首行一句话总结；空行；详细段含起点 / 根因 / 修法。用 HEREDOC + `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer。**只 add 改过的源文件 + CLAUDE.md**（dist-zips/ 已 gitignore，不管它）
+  4. **`git push origin main`**
+  5. 报告用户：版本号 + zip 路径 + 提示 boss 自己 chrome://extensions/ 点 ↻ 重载 + WA Web F5；其他销售会被 VersionGate 拦下要装新 zip
