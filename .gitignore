@@ -17,3 +17,4 @@ baileys-version.json
 .puppeteer_data/
 .claude/
 auth_info_baileys/
+extension/supabase/.temp/
