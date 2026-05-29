@@ -701,6 +701,23 @@ npm run package
 
 **教训**：closest + testid 也不够 — 同 data-id 多 wrapper 是 WA Web 的真实行为（at least 在 FB ad-reply pair 场景），不能假设"closest 到同 wrapper = 同消息"。Lead-from-FB-ad 场景特别多，每个被踩到的客户**第一句话 inbound 永远丢**——而这通常是客户唯一明确说出"想买什么车"的那句话，AI 全瞎猜。
 
+### 近期补完（2026-05-29）— 车源按上传人排序（自己的优先）+ created_by 回填
+
+**起点**：用户看 AI 回复 tab 的车源**选择器**下拉，提需求"哪个业务员上传的车源，能优先看自己的，然后在看到别人的"。澄清后确定：(1) 选择器 + 车源 tab 网格都要自己的排前面；(2) 历史车源回填上传人——brand 以「Grant」开头的归 wanglincheng23，其余归 boss；(3) 卡片/列表显示上传人。
+
+**前提缺失（不是 bug 是从没做）**：`vehicles.created_by` 列一直存在（FK → auth.users, ON DELETE SET NULL），但**插入代码从没写过它**——org Miles 46 条车源全是 NULL，"按上传人排序"的前提数据整体缺失。
+
+**修法**：
+- **回填**（`scripts/backfill-vehicle-uploaders.mjs`，service_role REST + 分页 + `--apply`）：规则 `brand.trim().toLowerCase().startsWith('grant')` → wanglincheng23 (`f06ce7c8`)，其余 → boss daimenglong (`ecca2247`)。PATCH filter 带 `created_by=is.null` 双保险（幂等，再跑不改已填行）。结果 36 boss / 10 Grant / 0 NULL
+- **新建写入**（`VehicleModal.tsx` create-insert 分支）：`supabase.auth.getUser()` 拿当前用户写 `created_by`
+- **排序**（`VehicleRecommendations.tsx` 的 VehiclePicker + `VehiclesPage.tsx` 的 `filtered`）：own-first 分区——mine 在前 others 在后，`mine.length > 0` 才重排否则保持原序。⚠️ VehicleRecommendations 的**自动匹配推荐 chip 仍按相关度 score 排序没动**，只有手动**选择器**是 own-first
+- **徽标**（新建共享 `panel/components/UploaderBadge.tsx`）：自己绿色「👤 我上传」/ 别人 shortName。复用 `ScopeContext` 的 `myUserId` + `membersById`，**不额外发 RPC**
+- **样式**（`styles.css`）：`.sgc-uploader-badge` 加 `align-self: flex-start` 防 column-flex 下 inline-block 被 blockify 拉满整行
+
+**验证**：`npm run typecheck` + `npm run build` 通过。⚠️ **线上 UI 未在浏览器实测**（无 Chrome MCP 连接 + dev server 未跑），靠 boss 装新包后肉眼确认排序 + 徽标。
+
+**教训**：`created_by` 这种"FK 早建好但插入代码从没写"的列很坑——做依赖它的排序/过滤功能前先 SQL 确认列**真有数据**，别假设 FK 存在 = 有值。email→user_id 走 GoTrue admin API（`GET /auth/v1/admin/users?page=&per_page=`），注意拼写：用户给的 `wanglingcheng23` 实际是 `wanglincheng23`（少一个 g），差一字母查空，要跟现有 org members 交叉核对再下手。
+
 ### 还可以做的（不急）
 
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
@@ -787,6 +804,8 @@ WhatsApp 绿色主题：
 - **`usePersistedReplyStatus` async get race**（`panel/hooks/usePersistedReplyStatus.ts`）：useEffect 启动 async get 后，如果用户立刻点 generate 改了 state，async get 完成时**不能用 stale 直接覆盖**——必须 functional setState 判 `current.kind === initial.kind` 才用 stale 恢复。早期 bug：generate 跑完几秒后 async get 回调把 new done 覆盖回 stale done，UI 显示 stale 状态用户以为没点中
 - **删除占位识别 + DB 覆盖**（`DELETED_PLACEHOLDER_PATTERNS` + `isDeletedPlaceholderText`）：DOM 抓到"你已删除这条消息" / "This message was deleted" → text 改 `[已删除]`，`syncMessages` 用 onConflict 覆盖之前抓过的原文（用户后来在 WA 端撤回的）。**先 `stripTrailingMeta` 再判删除占位**（防"你已删除这条消息中午11:31"因尾巴匹配不上而失败）
 - **`verifyHeaderMatches` 比对 name/wa_name 时必须两侧 strip emoji**（`lib/jump-to-chat.ts`）：销售在 WA 通讯录给客户起带 emoji 爱称（`"K-lonchito 🥰🥰🥰"` / `"🌸🌸Zouhour🌸🌸"` / `"Banks💎👑🌟"`）非常常见，org 内 **~2.7% contact 中招**。但 WA Web header 文本一般不含这些 emoji 或位置不同 → **整串 `header.includes(candidate)` 永远不命中** → DOM 路径被锁死 → AI 生成抛 cold-start 错（DB 空时硬挂）或冻结 DB 历史（DB 有时隐性失效，销售察觉不到只觉得 AI 智商低）。修法 `stripEmojiAndNormalize`：`[\p{Extended_Pictographic}\p{Emoji_Modifier}️‍]` 一次 strip + normalize 空格 + lowercase，两侧都过再 includes。**不要用 `\p{Emoji}`** —— 它把 `# * 0-9` 也算 emoji-candidate，会误剥客户名里的数字。**任何新加"比对 contact 名 vs DOM 文本"的逻辑都先剥 emoji**（销售爱用 emoji 给重要客户做视觉标记，这是常态不是边缘 case）
+- **`vehicles.created_by` 之前长期全 NULL**（2026-05-29 才补，`VehicleModal.tsx` + 回填脚本）：FK 早就建了（→ auth.users, ON DELETE SET NULL）但插入代码从没写。任何新加"按上传人/创建人排序、过滤、归属"的功能前，**先 SQL 确认该列真有数据**，别假设 FK 存在 = 有值。回填历史用 service_role 脚本时一律分页拉全集 + PATCH filter 带 `created_by=is.null`（幂等，不重复改已填行）
+- **own-first 排序复用 ScopeContext 不另发 RPC**（`UploaderBadge` / VehiclePicker / VehiclesPage）：自己的排前面 + 上传人徽标都从 `useScope()` 的 `myUserId` + `membersById` 取数据。新加"按主理人/上传人"的列表入口直接 `const { myUserId, membersById } = useScope()`，**别再单独 `useOrgMembers` 调 list_org_members RPC**（ScopeContext 已经维护这两个 map）。⚠️ `useScope()` 必须在 `<ScopeProvider>` 内（AppShell 已包住全部 6 tab）
 
 ## 用户偏好
 

@@ -106,9 +106,13 @@ export function VehicleModal({ orgId, vehicle, onClose, onSaved }: Props) {
       }
       if (data) setEditingVehicle(data as VehicleRow);
     } else {
+      // 记录上传人，让车源列表/选择器能"自己的排前面"
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
       const { data, error } = await supabase
         .from('vehicles')
-        .insert({ ...payload, org_id: orgId })
+        .insert({ ...payload, org_id: orgId, created_by: user?.id ?? null })
         .select('*')
         .single();
       if (error) {

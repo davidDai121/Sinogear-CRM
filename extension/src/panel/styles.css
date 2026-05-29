@@ -2872,6 +2872,26 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
   color: #00805f;
 }
 
+/* 车源上传人徽标（车源 tab 卡片 + AI 回复选择器共用） */
+.sgc-uploader-badge {
+  display: inline-block;
+  /* flex 子项会被 blockify，align-self 防止它在列布局里被拉伸成整行宽 */
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #f0f2f5;
+  color: #667781;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.sgc-uploader-badge.mine {
+  background: #d9f5e8;
+  color: #00805f;
+}
+
 .sgc-checkbox-row {
   flex-direction: row !important;
   align-items: center;
@@ -3935,6 +3955,13 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
 
 .sgc-vehicle-picker-item:hover {
   background: #f0f8f4;
+}
+
+.sgc-vehicle-picker-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
 }
 
 .sgc-vehicle-picker-item strong {

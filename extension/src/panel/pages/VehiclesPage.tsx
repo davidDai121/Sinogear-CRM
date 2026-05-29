@@ -10,6 +10,8 @@ import type {
 import { VehicleModal } from '../components/VehicleModal';
 import { CloudinaryImg } from '../components/CloudinaryImg';
 import { CloudinaryUsageBadge } from '../components/CloudinaryUsageBadge';
+import { UploaderBadge } from '../components/UploaderBadge';
+import { useScope } from '../contexts/ScopeContext';
 
 type VehicleRow = Database['public']['Tables']['vehicles']['Row'];
 type MediaRow = Database['public']['Tables']['vehicle_media']['Row'];
@@ -25,6 +27,7 @@ interface Props {
 }
 
 export function VehiclesPage({ orgId }: Props) {
+  const { myUserId, membersById } = useScope();
   const [items, setItems] = useState<VehicleRow[]>([]);
   const [covers, setCovers] = useState<Record<string, MediaRow>>({});
   const [loading, setLoading] = useState(true);
@@ -95,20 +98,26 @@ export function VehiclesPage({ orgId }: Props) {
     };
   }, [refresh]);
 
-  const filtered = useMemo(
-    () =>
-      items.filter((v) => {
-        if (statusFilter && v.sale_status !== statusFilter) return false;
-        if (!search) return true;
-        const q = search.toLowerCase();
-        return (
-          v.brand.toLowerCase().includes(q) ||
-          v.model.toLowerCase().includes(q) ||
-          (v.version?.toLowerCase().includes(q) ?? false)
-        );
-      }),
-    [items, search, statusFilter],
-  );
+  const filtered = useMemo(() => {
+    const matched = items.filter((v) => {
+      if (statusFilter && v.sale_status !== statusFilter) return false;
+      if (!search) return true;
+      const q = search.toLowerCase();
+      return (
+        v.brand.toLowerCase().includes(q) ||
+        v.model.toLowerCase().includes(q) ||
+        (v.version?.toLowerCase().includes(q) ?? false)
+      );
+    });
+    // 自己上传的排前面（组内保持 updated_at desc）
+    if (!myUserId) return matched;
+    const mine: VehicleRow[] = [];
+    const others: VehicleRow[] = [];
+    for (const v of matched) {
+      (v.created_by === myUserId ? mine : others).push(v);
+    }
+    return mine.length ? [...mine, ...others] : matched;
+  }, [items, search, statusFilter, myUserId]);
 
   return (
     <div className="sgc-page">
@@ -189,6 +198,11 @@ export function VehiclesPage({ orgId }: Props) {
                       {v.year ? `${v.year} ` : ''}
                       {v.version ?? ''}
                     </span>
+                    <UploaderBadge
+                      createdBy={v.created_by}
+                      myUserId={myUserId}
+                      membersById={membersById}
+                    />
                   </div>
                   <span className={`sgc-stage sgc-sale-${v.sale_status}`}>
                     {STATUS_LABEL[v.sale_status]}

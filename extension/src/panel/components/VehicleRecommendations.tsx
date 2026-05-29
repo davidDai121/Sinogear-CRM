@@ -13,6 +13,9 @@ import type {
   Database,
   PricingTier,
 } from '@/lib/database.types';
+import { useScope } from '../contexts/ScopeContext';
+import { UploaderBadge } from './UploaderBadge';
+import type { OrgMember } from '../hooks/useOrgMembers';
 
 type VehicleRow = Database['public']['Tables']['vehicles']['Row'];
 type MediaRow = Database['public']['Tables']['vehicle_media']['Row'];
@@ -36,6 +39,7 @@ const COLLAPSE_KEY = 'aiReplyVehiclesCollapsed';
  * 选择持久化在 chrome.storage.local（per-user，跨 tab 切换保持）
  */
 export function VehicleRecommendations({ orgId, contactId }: Props) {
+  const { myUserId, membersById } = useScope();
   const [vehicles, setVehicles] = useState<VehicleRow[]>([]);
   const [media, setMedia] = useState<Record<string, MediaRow[]>>({});
   const [interestModels, setInterestModels] = useState<string[]>([]);
@@ -210,6 +214,8 @@ export function VehicleRecommendations({ orgId, contactId }: Props) {
           {pickerOpen && (
             <VehiclePicker
               vehicles={vehicles}
+              myUserId={myUserId}
+              membersById={membersById}
               onPick={(id) => selectVehicle(id)}
             />
           )}
@@ -487,15 +493,29 @@ function MediaGroup({
 
 interface PickerProps {
   vehicles: VehicleRow[];
+  myUserId: string | null;
+  membersById: Map<string, OrgMember>;
   onPick: (id: string) => void;
 }
 
-function VehiclePicker({ vehicles, onPick }: PickerProps) {
+function VehiclePicker({ vehicles, myUserId, membersById, onPick }: PickerProps) {
   const [q, setQ] = useState('');
+
+  // 自己上传的排前面（组内保持传入顺序 = updated_at desc）
+  const ownFirst = useMemo(() => {
+    if (!myUserId) return vehicles;
+    const mine: VehicleRow[] = [];
+    const others: VehicleRow[] = [];
+    for (const v of vehicles) {
+      (v.created_by === myUserId ? mine : others).push(v);
+    }
+    return mine.length ? [...mine, ...others] : vehicles;
+  }, [vehicles, myUserId]);
+
   const filtered = useMemo(() => {
-    if (!q.trim()) return vehicles.slice(0, 30);
+    if (!q.trim()) return ownFirst.slice(0, 30);
     const s = q.toLowerCase();
-    return vehicles
+    return ownFirst
       .filter(
         (v) =>
           v.brand.toLowerCase().includes(s) ||
@@ -503,7 +523,7 @@ function VehiclePicker({ vehicles, onPick }: PickerProps) {
           (v.version?.toLowerCase().includes(s) ?? false),
       )
       .slice(0, 30);
-  }, [vehicles, q]);
+  }, [ownFirst, q]);
 
   return (
     <div className="sgc-vehicle-picker">
@@ -526,9 +546,16 @@ function VehiclePicker({ vehicles, onPick }: PickerProps) {
               className="sgc-vehicle-picker-item"
               onClick={() => onPick(v.id)}
             >
-              <strong>
-                {v.brand} {v.model}
-              </strong>
+              <div className="sgc-vehicle-picker-item-top">
+                <strong>
+                  {v.brand} {v.model}
+                </strong>
+                <UploaderBadge
+                  createdBy={v.created_by}
+                  myUserId={myUserId}
+                  membersById={membersById}
+                />
+              </div>
               <span className="sgc-muted">
                 {v.year ? `${v.year} ` : ''}
                 {v.version ?? ''}
