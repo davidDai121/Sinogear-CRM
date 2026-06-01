@@ -326,18 +326,31 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
         return true;
       }
 
-      // ProseMirror / contenteditable：paste 事件最稳。
+      // ProseMirror / contenteditable：策略取决于长度。
+      //
+      // ⚠️ ChatGPT 的"超长粘贴自动转附件"陷阱（2026-06 案例）：
+      //   - 用户长 prompt（如附 50 条聊天历史）走 paste 路径会被 ChatGPT
+      //     的 onPaste handler 拦住，包成 "[Current Time] / Show in text
+      //     field" attachment 卡片
+      //   - 偶尔卡住、加载失败，prompt 实际发不出去
+      //   - execCommand 不触发 paste 事件 → 不会被自动转附件
+      // 修法：
+      //   - 文本 > AUTO_ATTACH_THRESHOLD 直接走 execCommand，不走 paste
+      //   - 短文本继续 paste（一次入位，快）
       //
       // ⚠️ 双重插入坑（用户实测见过 prompt 拼 2 遍）：
       //   1. dispatch paste → ProseMirror 异步处理（有时 > 100ms 才把内容塞入）
       //   2. 50ms 后查长度还是 0 → 判定"没插入" → fallback execCommand 插一遍
       //   3. 然后 ProseMirror 异步 paste 终于落地，再插一遍 → 双倍
-      //
       // 修法：
       //   - 每次插入前 hard-clear 输入框
       //   - paste 后等到 ProseMirror 真插入了，最多 800ms（覆盖慢网络/重 DOM）
       //   - 三种方法严格互斥：上一种失败先 clear 再试下一种
       //   - 兜底 final length 检查：超过预期 1.5x 说明又双倍了，强清重写
+
+      // 4000 是 ChatGPT 自动转附件的经验阈值，留点余量取 3500
+      const AUTO_ATTACH_THRESHOLD = 3500;
+      const isLongText = text.length > AUTO_ATTACH_THRESHOLD;
 
       const hardClear = (): void => {
         input!.textContent = '';
@@ -355,37 +368,43 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
 
       let inserted = false;
 
-      // 尝试 1：paste 事件
-      try {
-        const dt = new DataTransfer();
-        dt.setData('text/plain', text);
-        input.dispatchEvent(
-          new ClipboardEvent('paste', {
-            clipboardData: dt,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-        // 轮询等 paste 真落地（最多 800ms，比 50ms 鲁棒得多）
-        const deadline = Date.now() + 800;
-        while (Date.now() < deadline) {
-          if (insertSuccess()) {
-            inserted = true;
-            break;
+      // 尝试 1：paste 事件（仅短文本——长文本会被 ChatGPT 自动转附件）
+      if (!isLongText) {
+        try {
+          const dt = new DataTransfer();
+          dt.setData('text/plain', text);
+          input.dispatchEvent(
+            new ClipboardEvent('paste', {
+              clipboardData: dt,
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+          // 轮询等 paste 真落地（最多 800ms，比 50ms 鲁棒得多）
+          const deadline = Date.now() + 800;
+          while (Date.now() < deadline) {
+            if (insertSuccess()) {
+              inserted = true;
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 50));
           }
-          await new Promise((r) => setTimeout(r, 50));
+        } catch {
+          inserted = false;
         }
-      } catch {
-        inserted = false;
       }
 
       // 尝试 2：execCommand insertText（先 hard clear，避免 paste 异步落地造成双插）
+      // 长文本直接走这条（跳过 paste）
       if (!inserted) {
         hardClear();
         await new Promise((r) => setTimeout(r, 30));
         try {
           if (document.execCommand('insertText', false, text)) {
-            await new Promise((r) => setTimeout(r, 100));
+            // 长文本给更多时间消化（execCommand 内部也是异步插入大块文本）
+            await new Promise((r) =>
+              setTimeout(r, isLongText ? 400 : 100),
+            );
             inserted = insertSuccess();
           }
         } catch {
@@ -411,6 +430,42 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
           new InputEvent('input', { inputType: 'insertText', bubbles: true }),
         );
       }
+
+      // 即使走 execCommand，ChatGPT 偶尔也会把长内容包成附件 chip。
+      // 做最后一道防护：查找输入区里的 "Show in text field" / "查看文本"
+      // attachment chip，找到就点它的 X 关闭（chip 里的文本会回到内联）
+      const dismissAttachChip = (): void => {
+        // ChatGPT 的 attach chip 通常是 button 或 div 带特定文案
+        const chipButtons = document.querySelectorAll(
+          'button[aria-label*="Remove" i], button[aria-label*="移除" i], button[aria-label*="删除" i], button[aria-label*="close" i], button[aria-label*="关闭" i]',
+        );
+        for (const btn of Array.from(chipButtons) as HTMLButtonElement[]) {
+          // 找在输入区附近（vertical 邻近）的 X 按钮
+          const r = btn.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          // 只考虑在输入框上方 200px 以内的 chip
+          const inputR = input!.getBoundingClientRect();
+          if (r.bottom > inputR.top && r.top < inputR.bottom + 50) {
+            // 文案二次验证：周围有 "Show in text field" / "查看" 等字眼
+            const nearby = btn.closest(
+              '[class*="chip"], [class*="attach"], [class*="file"], [class*="text-document"]',
+            );
+            const nearbyText = (nearby?.textContent ?? '').toLowerCase();
+            if (
+              /show.*text|查看.*文本|text.*field|文本.*框|current\s*time/i.test(
+                nearbyText,
+              )
+            ) {
+              btn.click();
+              return;
+            }
+          }
+        }
+      };
+      // 给 ChatGPT 一点时间决定要不要弹 attach chip，然后扫一遍
+      await new Promise((r) => setTimeout(r, 500));
+      dismissAttachChip();
+
       return true;
     },
     [text],
