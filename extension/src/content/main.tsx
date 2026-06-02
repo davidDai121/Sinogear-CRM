@@ -5,6 +5,7 @@ import {
   refreshChatNameCache,
   type CurrentChat,
 } from './whatsapp-dom';
+import { ensureJidPhoneCacheLoaded } from '@/lib/jid-phone-cache';
 import { initAutoTranslate } from './auto-translate';
 import { initChatMediaCapture } from './chat-media-capture';
 import { initAutoReply } from './auto-reply';
@@ -29,6 +30,14 @@ function mount() {
     window.dispatchEvent(new CustomEvent('sgc:refresh-chat'));
   });
   setInterval(() => void refreshChatNameCache(), 30000);
+
+  // 加载 jid→phone 持久缓存到内存。@lid 业务号 fiber.contact.phoneNumber
+  // 偶尔会空（如 javierulises1412 用户名显示场景），这时 readCurrentChat
+  // 需要用 rawJid 反查 cache。content script 跟 panel 是独立模块实例，
+  // 各自要 init 一次。
+  void ensureJidPhoneCacheLoaded().then(() => {
+    window.dispatchEvent(new CustomEvent('sgc:refresh-chat'));
+  });
 
   observeCurrentChat((chat: CurrentChat) => {
     window.dispatchEvent(

@@ -1,5 +1,8 @@
 import { readWhatsAppData, jidToPhone } from '@/lib/whatsapp-idb';
-import { rememberJidPhone } from '@/lib/jid-phone-cache';
+import {
+  rememberJidPhone,
+  getJidPhoneCacheSync,
+} from '@/lib/jid-phone-cache';
 
 export interface CurrentChat {
   name: string | null;
@@ -163,8 +166,42 @@ function readChatFromMainFiber(main: Element): {
   let phone = jidToPhone(chatJid);
   if (!phone) {
     const contact = getXProp(chat, 'contact');
-    const pnJid = asJidString(getXProp(contact, 'phoneNumber'));
-    if (pnJid) phone = jidToPhone(pnJid);
+    // 多路径找 phone——某些 @lid 业务账户 contact.phoneNumber 是空的，
+    // 但 contact.id / contact.userid 可能是 @c.us 真号
+    const candidates: unknown[] = [
+      getXProp(contact, 'phoneNumber'),
+      getXProp(contact, 'id'),
+      getXProp(contact, 'userid'),
+      getXProp(contact, 'jid'),
+    ];
+    for (const cand of candidates) {
+      const jidStr = asJidString(cand);
+      if (jidStr && jidStr.endsWith('@c.us')) {
+        const p = jidToPhone(jidStr);
+        if (p) {
+          phone = p;
+          break;
+        }
+      }
+    }
+    // 仍未找到：扫 chat 顶层属性里任何 @c.us 字串（最后兜底）
+    if (!phone && chat) {
+      for (const v of Object.values(chat as Record<string, unknown>)) {
+        const jidStr = asJidString(v);
+        if (jidStr && jidStr.endsWith('@c.us')) {
+          const p = jidToPhone(jidStr);
+          if (p) {
+            phone = p;
+            break;
+          }
+        }
+      }
+    }
+    // 最后兜底：内存里的 jidPhoneCache（曾在别的地方写过这个 rawJid → phone 的映射）
+    if (!phone && chatJid) {
+      const cached = getJidPhoneCacheSync()[chatJid];
+      if (cached) phone = cached;
+    }
   }
   return { name, phone, rawJid: chatJid, groupJid: null };
 }
@@ -251,6 +288,11 @@ export function readCurrentChat(): CurrentChat {
     }
     return fromFiber;
   }
+  // fiber 给了 rawJid 但没 phone（@lid 业务号 contact.phoneNumber 空 + 多源
+  // fallback 也没命中）—— 别整段丢，保留 rawJid 让下面 cache 路径还能补救
+  const fiberRawJid =
+    fromFiber && !fromFiber.groupJid ? fromFiber.rawJid : null;
+  const fiberName = fromFiber?.name ?? null;
 
   const name = readNameFromHeader(main) || readNameFromHeader(document);
   if (!name) return EMPTY_CHAT;
@@ -282,7 +324,7 @@ export function readCurrentChat(): CurrentChat {
   }
 
   let phone: string | null = null;
-  let rawJid: string | null = null;
+  let rawJid: string | null = fiberRawJid;
 
   const phoneFromName = extractPhoneFromText(name);
   if (phoneFromName) phone = phoneFromName;
@@ -300,11 +342,22 @@ export function readCurrentChat(): CurrentChat {
     rawJid = cached.jid;
   }
 
+  // 最后兜底：fiber 给的 rawJid（如 @lid 业务号）查 jidPhoneCache。
+  // 这条 cache 在用户之前打开过该聊天且分析出过 phone 时被写入，下次开同
+  // 一聊天即使 fiber.contact.phoneNumber 空了也能用 rawJid 反查
+  if (!phone && rawJid) {
+    const cachedPhone = getJidPhoneCacheSync()[rawJid];
+    if (cachedPhone) phone = cachedPhone;
+  }
+
   // 持久缓存 jid→phone：业务号（@lid）IDB 没同步好映射时，下次 useCrmData
   // 全量扫聊天用这个缓存兜底。fire-and-forget，失败也不影响当前调用
   if (rawJid && phone) {
     void rememberJidPhone(rawJid, phone);
   }
+
+  // 防 fiberName 未使用警告（保留以便后续如果想直接拿 fiber 的 name 也行）
+  void fiberName;
 
   return { name, phone, rawJid, groupJid: null };
 }
