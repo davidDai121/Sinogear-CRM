@@ -44,7 +44,12 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
-    // 突破 Supabase 1000 行默认上限：分页拉
+    // 突破 Supabase 1000 行默认上限：分页拉。
+    //
+    // ⚠️ 必须 order 不可变列（id），不能用 updated_at——后者会被
+    //   Realtime/useMessageSync/autoFbStage 频繁 bump，page 1/page 2 之间
+    //   排序就漂了，导致漏行（用户 2026-06 报告"客户数一直在变小"就是这个坑）。
+    //   显示用的"最近更新优先"在客户端拉完全集后再 sort。
     try {
       const PAGE = 1000;
       const all: ContactRow[] = [];
@@ -53,7 +58,7 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
           .from('contacts')
           .select('*')
           .eq('org_id', orgId)
-          .order('updated_at', { ascending: false })
+          .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) {
           setError(error.message);
@@ -64,6 +69,12 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
         all.push(...rows);
         if (rows.length < PAGE) break;
       }
+      // 客户端按 updated_at DESC 排序，保留旧 UX
+      all.sort((a, b) => {
+        const at = a.updated_at ? Date.parse(a.updated_at) : 0;
+        const bt = b.updated_at ? Date.parse(b.updated_at) : 0;
+        return bt - at;
+      });
       setContacts(all);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

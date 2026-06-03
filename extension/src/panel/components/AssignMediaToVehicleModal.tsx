@@ -40,15 +40,22 @@ export function AssignMediaToVehicleModal({ orgId, items, onClose }: Props) {
   const cloudinaryReady = isCloudinaryConfigured();
 
   useEffect(() => {
-    // 分页拉全集——之前没分页，>1000 车源的 org 选择不到后面的
+    // 分页拉全集——order 用不可变 id 保 page 间稳定，客户端再按 updated_at 排
     void fetchAllPaged<VehicleRow>((from, to) =>
       supabase
         .from('vehicles')
         .select('*')
         .eq('org_id', orgId)
-        .order('updated_at', { ascending: false })
+        .order('id', { ascending: true })
         .range(from, to),
-    ).then((rows) => setVehicles(rows));
+    ).then((rows) => {
+      rows.sort((a, b) => {
+        const at = a.updated_at ? Date.parse(a.updated_at) : 0;
+        const bt = b.updated_at ? Date.parse(b.updated_at) : 0;
+        return bt - at;
+      });
+      setVehicles(rows);
+    });
   }, [orgId]);
 
   // 取所有 vehicle_interests.model（客户咨询过的车型）+ 已有 vehicles

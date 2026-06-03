@@ -39,7 +39,8 @@ export function VehiclesPage({ orgId }: Props) {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
-    // 分页拉全集
+    // 分页拉全集——order 用不可变列 id 保证 page 间稳定
+    // （updated_at 会被编辑/媒体上传 bump → page 边界漂 → 漏行）
     let rows: VehicleRow[];
     try {
       rows = await fetchAllPaged<VehicleRow>((from, to) =>
@@ -47,7 +48,7 @@ export function VehiclesPage({ orgId }: Props) {
           .from('vehicles')
           .select('*')
           .eq('org_id', orgId)
-          .order('updated_at', { ascending: false })
+          .order('id', { ascending: true })
           .range(from, to),
       );
     } catch (e) {
@@ -55,6 +56,12 @@ export function VehiclesPage({ orgId }: Props) {
       setLoading(false);
       return;
     }
+    // 客户端按 updated_at DESC 排序，保留旧 UX
+    rows.sort((a, b) => {
+      const at = a.updated_at ? Date.parse(a.updated_at) : 0;
+      const bt = b.updated_at ? Date.parse(b.updated_at) : 0;
+      return bt - at;
+    });
     setItems(rows);
     setLoading(false);
 

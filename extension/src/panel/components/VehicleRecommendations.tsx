@@ -68,7 +68,8 @@ export function VehicleRecommendations({ orgId, contactId }: Props) {
           .select('*')
           .eq('org_id', orgId)
           .eq('sale_status', 'available')
-          .order('updated_at', { ascending: false })
+          // 不可变 id 排序保 page 间稳定，updated_at 客户端再排
+          .order('id', { ascending: true })
           .range(from, to),
       ),
       fetchAllPaged<{ model: string }>((from, to) =>
@@ -79,6 +80,11 @@ export function VehicleRecommendations({ orgId, contactId }: Props) {
           .range(from, to),
       ),
     ]);
+    vehicleRows.sort((a, b) => {
+      const at = a.updated_at ? Date.parse(a.updated_at) : 0;
+      const bt = b.updated_at ? Date.parse(b.updated_at) : 0;
+      return bt - at;
+    });
     setVehicles(vehicleRows);
     setInterestModels(interestRows.map((r) => r.model));
 

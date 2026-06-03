@@ -85,7 +85,8 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
       return;
     }
 
-    // 分页拉全集——任务多的 org 可能 1000+ 待处理
+    // 分页拉全集——任务多的 org 可能 1000+ 待处理。
+    // order 用不可变 id（due_at 可变，会导致 page 间漏行），客户端再按 due_at 排
     let taskList: TaskRow[];
     try {
       taskList = await fetchAllPaged<TaskRow>((from, to) => {
@@ -98,7 +99,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
           )
           .eq('org_id', orgId)
           .eq('status', statusFilter)
-          .order('due_at', { ascending: true, nullsFirst: false })
+          .order('id', { ascending: true })
           .range(from, to);
         if (filterMine) {
           q = q.eq('contacts.contact_handlers.user_id', myUserId);
@@ -107,6 +108,12 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
           data: TaskRow[] | null;
           error: unknown;
         }>;
+      });
+      // 客户端按 due_at 升序（null 末尾），保留原 UX
+      taskList.sort((a, b) => {
+        const at = a.due_at ? Date.parse(a.due_at) : Number.MAX_SAFE_INTEGER;
+        const bt = b.due_at ? Date.parse(b.due_at) : Number.MAX_SAFE_INTEGER;
+        return at - bt;
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
