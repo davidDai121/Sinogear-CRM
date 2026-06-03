@@ -408,7 +408,22 @@ export function readCurrentChat(): CurrentChat {
 
   // 1. IDB 缓存（按 header 显示名查 JID）—— fiber 拿不到时的兜底
   const normalizedName = normalizeName(name);
-  const cached = nameToPhoneCache.get(normalizedName);
+  let cached = nameToPhoneCache.get(normalizedName);
+  // 1a. 精确 miss → 模糊匹配（contains 双向）。WA Web 偶尔 header 显示的
+  //     名字跟 IDB chat.name 不完全一致（少/多空格、加 emoji、加状态标签等）
+  if (!cached) {
+    const lowered = normalizedName.toLowerCase();
+    for (const [key, entry] of nameToPhoneCache) {
+      const loweredKey = key.toLowerCase();
+      if (
+        loweredKey.includes(lowered) ||
+        (lowered.length >= 6 && lowered.includes(loweredKey))
+      ) {
+        cached = entry;
+        break;
+      }
+    }
+  }
   if (cached?.groupJid) {
     return { name, phone: null, rawJid: cached.jid, groupJid: cached.groupJid };
   }
@@ -634,6 +649,23 @@ function buildInspectReport(): Record<string, unknown> {
   const groupJid = readGroupJidFromScope(main);
   const jidInfo = readJidFromScope(main);
   const cacheKeys = Object.keys(getJidPhoneCacheSync()).slice(0, 10);
+  // nameToPhoneCache 诊断：总数 + 前 10 key + 含 headerName 关键词的近匹配
+  const ntpSize = nameToPhoneCache.size;
+  const ntpSample = Array.from(nameToPhoneCache.keys()).slice(0, 10);
+  let ntpNearMatches: string[] = [];
+  if (headerName) {
+    const tokens = headerName
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((t) => t.length >= 3);
+    for (const [key] of nameToPhoneCache) {
+      const k = key.toLowerCase();
+      if (tokens.some((t) => k.includes(t))) {
+        ntpNearMatches.push(key);
+        if (ntpNearMatches.length >= 8) break;
+      }
+    }
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let foundChat: any = null;
   if (fiberRoot) {
@@ -668,6 +700,9 @@ function buildInspectReport(): Record<string, unknown> {
     groupJid,
     jidInfoFromDataId: jidInfo,
     jidPhoneCacheKeys: cacheKeys,
+    nameToPhoneCacheSize: ntpSize,
+    nameToPhoneCacheSample: ntpSample,
+    nameToPhoneCacheNearMatches: ntpNearMatches,
     fromFiber,
     foundChatRaw: foundChat ? summarize(foundChat, 3) : null,
     foundChatContact: foundChat
