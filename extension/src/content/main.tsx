@@ -3,6 +3,7 @@ import { AppShell } from '@/panel/AppShell';
 import {
   observeCurrentChat,
   refreshChatNameCache,
+  maybeLogChatInspect,
   type CurrentChat,
 } from './whatsapp-dom';
 import { ensureJidPhoneCacheLoaded } from '@/lib/jid-phone-cache';
@@ -43,6 +44,9 @@ function mount() {
     window.dispatchEvent(
       new CustomEvent('sgc:chat-changed', { detail: chat }),
     );
+    // 自动诊断：phone+groupJid 都解析失败时把 fiber/cache 各路径中间值
+    // 打到 console，方便 boss 复制发我定位
+    maybeLogChatInspect(chat);
   });
 
   initAutoTranslate();

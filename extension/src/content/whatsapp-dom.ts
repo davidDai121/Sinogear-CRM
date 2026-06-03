@@ -481,80 +481,97 @@ export function observeCurrentChat(
 }
 
 /**
- * 调试用：在 console 跑 `__sgcInspectChat()` 看 readCurrentChat 各路径
- * 的解析结果，定位"右 panel 报请选择聊天但 WA 明明开着聊天"这种 case。
+ * 调试用：内部 inspect 函数，返回 readCurrentChat 各路径的中间值。
  *
- * 这个不影响生产逻辑，只是给 boss 帮我快速排查 fiber/cache miss 用。
+ * ⚠️ Content script 跑在 isolated world，所以 window.X 在 page console 里
+ * 看不见（CLAUDE.md 2026-05-11 也踩过同样的坑）。这里改成"满足触发条件时
+ * 自动 console.log" —— 用户直接在 console 复制 `[sgc/inspect-chat]` 输出
+ * 就行，不用手动调函数。
+ *
+ * 触发条件：readCurrentChat 返回 name 但 phone+groupJid 都 null（即典型的
+ * "右 panel 报请选聊天但 WA 明明开着聊天" 失败状态）
  */
-declare global {
-  interface Window {
-    __sgcInspectChat?: () => Record<string, unknown>;
-  }
-}
-if (typeof window !== 'undefined') {
-  window.__sgcInspectChat = () => {
-    const main = findMainPane();
-    if (!main) return { error: 'no main pane' };
-    const fiberKey = Object.keys(main).find((k) =>
-      k.startsWith('__reactFiber'),
-    );
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const fiberRoot: any = fiberKey ? (main as any)[fiberKey] : null;
-    const summarize = (
-      o: unknown,
-      maxDepth = 3,
-      curDepth = 0,
-    ): unknown => {
-      if (o === null || o === undefined) return o;
-      if (typeof o !== 'object') return typeof o;
-      if (Array.isArray(o)) return `Array(${o.length})`;
-      if (curDepth >= maxDepth) return Object.keys(o).slice(0, 30);
-      const out: Record<string, unknown> = {};
-      for (const k of Object.keys(o).slice(0, 30)) {
-        try {
-          out[k] = summarize(
-            (o as Record<string, unknown>)[k],
-            maxDepth,
-            curDepth + 1,
-          );
-        } catch {
-          out[k] = '<err>';
-        }
-      }
-      return out;
-    };
-    const fromFiber = readChatFromMainFiber(main);
-    const headerName = readNameFromHeader(main);
-    const groupJid = readGroupJidFromScope(main);
-    const jidInfo = readJidFromScope(main);
-    const cacheKeys = Object.keys(getJidPhoneCacheSync()).slice(0, 10);
-    // 找 fiber 里 chat 模型实际是啥
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let foundChat: any = null;
-    if (fiberRoot) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let cur: any = fiberRoot;
-      for (let i = 0; cur && i < 30; i++) {
-        const c = extractChatFromFiberProps(cur.memoizedProps);
-        if (c) {
-          foundChat = c;
-          break;
-        }
-        cur = cur.return;
+function buildInspectReport(): Record<string, unknown> {
+  const main = findMainPane();
+  if (!main) return { error: 'no main pane' };
+  const fiberKey = Object.keys(main).find((k) =>
+    k.startsWith('__reactFiber'),
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fiberRoot: any = fiberKey ? (main as any)[fiberKey] : null;
+  const summarize = (
+    o: unknown,
+    maxDepth = 3,
+    curDepth = 0,
+  ): unknown => {
+    if (o === null || o === undefined) return o;
+    if (typeof o !== 'object') return typeof o;
+    if (Array.isArray(o)) return `Array(${o.length})`;
+    if (curDepth >= maxDepth) return Object.keys(o).slice(0, 30);
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(o).slice(0, 30)) {
+      try {
+        out[k] = summarize(
+          (o as Record<string, unknown>)[k],
+          maxDepth,
+          curDepth + 1,
+        );
+      } catch {
+        out[k] = '<err>';
       }
     }
-    return {
-      hasMain: !!main,
-      hasFiber: !!fiberRoot,
-      headerName,
-      groupJid,
-      jidInfoFromDataId: jidInfo,
-      jidPhoneCacheKeys: cacheKeys,
-      fromFiber,
-      foundChatRaw: foundChat ? summarize(foundChat, 3) : null,
-      foundChatContact: foundChat
-        ? summarize(getXProp(foundChat, 'contact'), 4)
-        : null,
-    };
+    return out;
   };
+  const fromFiber = readChatFromMainFiber(main);
+  const headerName = readNameFromHeader(main);
+  const groupJid = readGroupJidFromScope(main);
+  const jidInfo = readJidFromScope(main);
+  const cacheKeys = Object.keys(getJidPhoneCacheSync()).slice(0, 10);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let foundChat: any = null;
+  if (fiberRoot) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let cur: any = fiberRoot;
+    for (let i = 0; cur && i < 30; i++) {
+      const c = extractChatFromFiberProps(cur.memoizedProps);
+      if (c) {
+        foundChat = c;
+        break;
+      }
+      cur = cur.return;
+    }
+  }
+  return {
+    hasMain: !!main,
+    hasFiber: !!fiberRoot,
+    headerName,
+    groupJid,
+    jidInfoFromDataId: jidInfo,
+    jidPhoneCacheKeys: cacheKeys,
+    fromFiber,
+    foundChatRaw: foundChat ? summarize(foundChat, 3) : null,
+    foundChatContact: foundChat
+      ? summarize(getXProp(foundChat, 'contact'), 4)
+      : null,
+  };
+}
+
+// 自动诊断：observeCurrentChat 每次拿到"有 name 但 phone+groupJid 都空"
+// 的 chat 时，打一行 [sgc/inspect-chat] 到 console。throttle 5 秒避免刷屏
+let lastInspectAt = 0;
+export function maybeLogChatInspect(chat: CurrentChat): void {
+  if (!chat.name) return;
+  if (chat.phone || chat.groupJid) return;
+  const now = Date.now();
+  if (now - lastInspectAt < 5000) return;
+  lastInspectAt = now;
+  try {
+    const report = buildInspectReport();
+    console.log(
+      '[sgc/inspect-chat] phone+groupJid 都没解析到，下面是 fiber/cache/DOM 各路径中间值：',
+    );
+    console.log(JSON.stringify(report, null, 2));
+  } catch (err) {
+    console.warn('[sgc/inspect-chat] failed:', err);
+  }
 }
