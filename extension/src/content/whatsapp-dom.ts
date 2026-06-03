@@ -125,6 +125,28 @@ interface FiberChatModel {
   __x_contact?: unknown;
 }
 
+// 候选 prop 名：WA Web 不同组件层用不同名字挂 chat 模型
+const FIBER_CHAT_PROP_NAMES = [
+  'chat',
+  'model',
+  'conversation',
+  'chatModel',
+  'peer',
+  'wid',
+];
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractChatFromFiberProps(mp: any): FiberChatModel | null {
+  if (!mp || typeof mp !== 'object') return null;
+  for (const propName of FIBER_CHAT_PROP_NAMES) {
+    const candidate = mp[propName] as FiberChatModel | undefined;
+    if (!candidate) continue;
+    const idStr = asJidString(getXProp(candidate, 'id'));
+    if (idStr) return candidate;
+  }
+  return null;
+}
+
 function readChatFromMainFiber(main: Element): {
   name: string | null;
   phone: string | null;
@@ -137,18 +159,34 @@ function readChatFromMainFiber(main: Element): {
   let cur: any = (main as any)[fiberKey];
   let depth = 0;
   let chat: FiberChatModel | null = null;
-  while (cur && depth < 15) {
-    const mp = cur.memoizedProps;
-    if (mp && typeof mp === 'object') {
-      const candidate = mp.chat as FiberChatModel | undefined;
-      const idStr = asJidString(getXProp(candidate, 'id'));
-      if (candidate && idStr) {
-        chat = candidate;
-        break;
-      }
-    }
+  // 上行（祖先）搜索：深度 15 → 30，应对 WA Web 偶尔加深的组件树
+  while (cur && depth < 30) {
+    chat = extractChatFromFiberProps(cur.memoizedProps);
+    if (chat) break;
+    chat = extractChatFromFiberProps(cur.stateNode?.props);
+    if (chat) break;
     cur = cur.return;
     depth++;
+  }
+  // 上行没找到 → 试下行（后代）：BFS 最多 200 节点，覆盖 chat 模型挂在
+  // div#main 子组件里的情形（用户搜索后新打开的聊天偶尔走这条路）
+  if (!chat) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const root: any = (main as any)[fiberKey];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const queue: any[] = [root.child];
+    let visited = 0;
+    while (queue.length && visited < 200) {
+      const node = queue.shift();
+      if (!node) continue;
+      visited++;
+      chat = extractChatFromFiberProps(node.memoizedProps);
+      if (chat) break;
+      chat = extractChatFromFiberProps(node.stateNode?.props);
+      if (chat) break;
+      if (node.child) queue.push(node.child);
+      if (node.sibling) queue.push(node.sibling);
+    }
   }
   if (!chat) return null;
 
@@ -439,5 +477,84 @@ export function observeCurrentChat(
   return () => {
     observer.disconnect();
     if (raf) cancelAnimationFrame(raf);
+  };
+}
+
+/**
+ * 调试用：在 console 跑 `__sgcInspectChat()` 看 readCurrentChat 各路径
+ * 的解析结果，定位"右 panel 报请选择聊天但 WA 明明开着聊天"这种 case。
+ *
+ * 这个不影响生产逻辑，只是给 boss 帮我快速排查 fiber/cache miss 用。
+ */
+declare global {
+  interface Window {
+    __sgcInspectChat?: () => Record<string, unknown>;
+  }
+}
+if (typeof window !== 'undefined') {
+  window.__sgcInspectChat = () => {
+    const main = findMainPane();
+    if (!main) return { error: 'no main pane' };
+    const fiberKey = Object.keys(main).find((k) =>
+      k.startsWith('__reactFiber'),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fiberRoot: any = fiberKey ? (main as any)[fiberKey] : null;
+    const summarize = (
+      o: unknown,
+      maxDepth = 3,
+      curDepth = 0,
+    ): unknown => {
+      if (o === null || o === undefined) return o;
+      if (typeof o !== 'object') return typeof o;
+      if (Array.isArray(o)) return `Array(${o.length})`;
+      if (curDepth >= maxDepth) return Object.keys(o).slice(0, 30);
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(o).slice(0, 30)) {
+        try {
+          out[k] = summarize(
+            (o as Record<string, unknown>)[k],
+            maxDepth,
+            curDepth + 1,
+          );
+        } catch {
+          out[k] = '<err>';
+        }
+      }
+      return out;
+    };
+    const fromFiber = readChatFromMainFiber(main);
+    const headerName = readNameFromHeader(main);
+    const groupJid = readGroupJidFromScope(main);
+    const jidInfo = readJidFromScope(main);
+    const cacheKeys = Object.keys(getJidPhoneCacheSync()).slice(0, 10);
+    // 找 fiber 里 chat 模型实际是啥
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let foundChat: any = null;
+    if (fiberRoot) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let cur: any = fiberRoot;
+      for (let i = 0; cur && i < 30; i++) {
+        const c = extractChatFromFiberProps(cur.memoizedProps);
+        if (c) {
+          foundChat = c;
+          break;
+        }
+        cur = cur.return;
+      }
+    }
+    return {
+      hasMain: !!main,
+      hasFiber: !!fiberRoot,
+      headerName,
+      groupJid,
+      jidInfoFromDataId: jidInfo,
+      jidPhoneCacheKeys: cacheKeys,
+      fromFiber,
+      foundChatRaw: foundChat ? summarize(foundChat, 3) : null,
+      foundChatContact: foundChat
+        ? summarize(getXProp(foundChat, 'contact'), 4)
+        : null,
+    };
   };
 }
