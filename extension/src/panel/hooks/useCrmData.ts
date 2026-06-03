@@ -704,6 +704,35 @@ export function useCrmData(orgId: string | null): CrmData {
       });
     }
 
+    // 第 3 路：补"我置顶了但没匹配到 WA chat"的客户。痛点（boss 2026-06
+    // 反馈"置顶数量绝对不对"）：上面第 1 路 filter 要求 contact.phone 非
+    // null 且 chatByPhone 命中——这会把导入的客户（加密备份 / .txt 导入，
+    // IDB chat 表里没有）、群聊（phone=null）、@lid 业务号 phone 解析不到
+    // 的客户全过滤掉。置顶 count 因此严重偏低。
+    const alreadyMergedIds = new Set(
+      mergedList.filter((m) => m.contact).map((m) => m.contact!.id),
+    );
+    for (const c of contacts) {
+      if (!pinnedIds.has(c.id)) continue;
+      if (alreadyMergedIds.has(c.id)) continue;
+      // 这条 push 没 chat → classification 也置 null（matchTodoBucket /
+      // todoCounts 对 'pinned' 的判定都在 classification 之前，不影响）
+      mergedList.push({
+        contact: c,
+        chat: null,
+        jid: null,
+        phone: c.phone ?? '',
+        displayName:
+          c.name || c.wa_name || c.phone || (c.group_jid ? '(群聊)' : '(无 WA 会话)'),
+        labels: [],
+        vehicleInterests: vehicleInterestsByContactId.get(c.id) ?? [],
+        tags: tagsByContactId.get(c.id) ?? [],
+        region: countryToRegion(c.country),
+        pinned: true,
+        classification: null,
+      });
+    }
+
     return {
       contacts: mergedList,
       labels: labels.filter((l) => l.isActive),
