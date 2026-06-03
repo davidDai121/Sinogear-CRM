@@ -156,7 +156,13 @@ const FIBER_KEY_PREFIXES = [
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function findFiberOnElement(el: Element): any | null {
-  for (const k of Object.keys(el)) {
+  // 同时查 enumerable (Object.keys) 和 non-enumerable (getOwnPropertyNames)
+  // 内部 React 版本偶尔把 fiber 挂成 non-enumerable
+  const allKeys = new Set([
+    ...Object.keys(el),
+    ...Object.getOwnPropertyNames(el),
+  ]);
+  for (const k of allKeys) {
     for (const prefix of FIBER_KEY_PREFIXES) {
       if (k.startsWith(prefix)) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -167,18 +173,40 @@ function findFiberOnElement(el: Element): any | null {
   return null;
 }
 
-// #main 本身没 fiber 时，扫子树找一个有 fiber 的元素（限制 500 节点）。
-// WA Web 偶尔把 React app 挂在 #main 内部的子 div 上而不是 #main 本身。
+// #main 本身没 fiber 时，扫子树找一个有 fiber 的元素（限制 2000 节点——
+// WA 子树可能很深）。WA Web 偶尔把 React app 挂在 #main 内部子 div 上。
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function findFiberInSubtree(root: Element): any | null {
   const queue: Element[] = [root];
   let visited = 0;
-  while (queue.length && visited < 500) {
+  while (queue.length && visited < 2000) {
     const el = queue.shift()!;
     visited++;
     const fiber = findFiberOnElement(el);
     if (fiber) return fiber;
     for (const child of Array.from(el.children)) queue.push(child);
+  }
+  return null;
+}
+
+// 全页面扫 fiber——最后兜底。React 可能挂在 body 或别处不是 #main 的根
+// 上；找到任意一个 fiber 后从它爬整个 fiber 树搜 chat 模型。
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function findAnyFiberOnPage(): { fiber: any; hostTag: string } | null {
+  const all = document.querySelectorAll('*');
+  let visited = 0;
+  for (const el of Array.from(all)) {
+    if (visited++ > 5000) break;
+    const fiber = findFiberOnElement(el);
+    if (fiber) {
+      const hostTag =
+        el.tagName +
+        (el.id ? '#' + el.id : '') +
+        (typeof el.className === 'string'
+          ? '.' + el.className.slice(0, 40)
+          : '');
+      return { fiber, hostTag };
+    }
   }
   return null;
 }
@@ -189,12 +217,16 @@ function readChatFromMainFiber(main: Element): {
   rawJid: string | null;
   groupJid: string | null;
 } | null {
-  // 1. #main 自己上找 fiber
+  // 1. #main 自己上找 fiber（含 non-enumerable）
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let rootFiber: any = findFiberOnElement(main);
-  // 2. #main 没 fiber → BFS 子树（WA Web 2026-06 后某些版本会把 fiber 挂到
-  //    #main 内部第一个有 React 状态的 div 上而非 #main 自身）
+  // 2. #main 没 fiber → BFS 子树
   if (!rootFiber) rootFiber = findFiberInSubtree(main);
+  // 3. 子树也没 → 全页面扫（最贵兜底，5000 元素上限）
+  if (!rootFiber) {
+    const anyFiber = findAnyFiberOnPage();
+    if (anyFiber) rootFiber = anyFiber.fiber;
+  }
   if (!rootFiber) return null;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -533,19 +565,26 @@ export function observeCurrentChat(
 function buildInspectReport(): Record<string, unknown> {
   const main = findMainPane();
   if (!main) return { error: 'no main pane' };
-  // 列出 #main 元素上所有 react 相关 key（看 WA 用哪种前缀）+ 数量统计
-  const mainReactKeys = Object.keys(main).filter(
+  // 同时拿 enumerable + non-enumerable 上所有 key
+  const mainAllOwnKeys = [
+    ...Object.keys(main),
+    ...Object.getOwnPropertyNames(main),
+  ];
+  const mainReactKeys = mainAllOwnKeys.filter(
     (k) => k.startsWith('__react') || k.includes('react') || k.startsWith('_react'),
   );
-  // 子树里第一个有 fiber 的元素的标签（如果 #main 自己没 fiber）
+  // 子树里第一个有 fiber 的元素
   let subtreeFiberHostTag: string | null = null;
   if (mainReactKeys.length === 0) {
     const queue: Element[] = [main];
     let visited = 0;
-    while (queue.length && visited < 200) {
+    while (queue.length && visited < 500) {
       const el = queue.shift()!;
       visited++;
-      const reactKeys = Object.keys(el).filter(
+      const reactKeys = [
+        ...Object.keys(el),
+        ...Object.getOwnPropertyNames(el),
+      ].filter(
         (k) => k.startsWith('__react') || k.startsWith('_react'),
       );
       if (reactKeys.length > 0) {
@@ -559,6 +598,12 @@ function buildInspectReport(): Record<string, unknown> {
       for (const child of Array.from(el.children)) queue.push(child);
     }
   }
+  // 全页面扫 fiber（找到任意一个，看 WA 把 React 挂在哪个根上）
+  const anyFiberOnPage = findAnyFiberOnPage();
+  // #main 子树里所有 [data-id] 的实际值（前 5 个），看格式是否匹配 JID_RE
+  const dataIdSamples = Array.from(main.querySelectorAll('[data-id]'))
+    .slice(0, 5)
+    .map((el) => el.getAttribute('data-id'));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fiberRoot: any = findFiberOnElement(main) ?? findFiberInSubtree(main);
   const summarize = (
@@ -606,9 +651,13 @@ function buildInspectReport(): Record<string, unknown> {
   return {
     hasMain: !!main,
     hasFiber: !!fiberRoot,
-    mainReactKeys, // 实际在 #main 上的 react 相关 key 列表
-    mainAllKeysSample: Object.keys(main).slice(0, 20), // 前 20 个 own key
-    subtreeFiberHostTag, // 如 #main 自己没 fiber，子树第一个有 fiber 的元素 tag
+    mainReactKeys,
+    mainAllOwnKeysCount: mainAllOwnKeys.length,
+    mainAllOwnKeysSample: mainAllOwnKeys.slice(0, 30), // 前 30 own key (含 non-enumerable)
+    subtreeFiberHostTag,
+    anyFiberOnPageHost: anyFiberOnPage?.hostTag ?? null, // 全页扫到的第一个 fiber 元素
+    dataIdSamples, // #main 子树前 5 个 [data-id] 的实际值
+    dataIdCount: main.querySelectorAll('[data-id]').length,
     mainTagInfo:
       main.tagName +
       (main.id ? '#' + main.id : '') +
