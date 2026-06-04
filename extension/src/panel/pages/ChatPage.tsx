@@ -6,7 +6,6 @@ import { FilterSidebar } from '../components/FilterSidebar';
 import { FilteredChatList } from '../components/FilteredChatList';
 import { LocalTimeBadge } from '../components/LocalTimeBadge';
 import { useCollisionTag, useScope } from '../contexts/ScopeContext';
-import { batchBumpHandlers } from '@/lib/contact-handlers';
 
 interface Props {
   orgId: string;
@@ -18,37 +17,23 @@ const SIDE_PANEL_COLLAPSED_KEY = 'sgc:side-panel-collapsed';
 export function ChatPage({ orgId }: Props) {
   const chat = useCurrentChat();
   const crm = useCrmData(orgId);
-  const { scope, myContactIds, myUserId, refresh: refreshScope } = useScope();
+  const { scope, myContactIds } = useScope();
   const [filtered, setFiltered] = useState<CrmContact[] | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
   const [clearSignal, setClearSignal] = useState(0);
   const [selectAllSignal, setSelectAllSignal] = useState(0);
-  const autoAttributedRef = useRef(false);
   // 记住"上次为哪个 chat 自动 fallback 过"，避免对同 chat 反复触发
   const lastFallbackKeyRef = useRef<string | null>(null);
 
-  // 自动归属：扩展加载时，把当前用户 WA 聊天里的所有联系人一次性登记到我名下
-  // 这样老客户（created_by=null 没被 migration 回填的）也能被识别为"我的"
-  // 只跑一次（每次 reload extension 一次），避免 20s 轮询时反复 upsert
-  useEffect(() => {
-    if (autoAttributedRef.current) return;
-    if (!myUserId || crm.loading || crm.contacts.length === 0) return;
-    const toBump = crm.contacts
-      .filter((c) => c.contact && !myContactIds.has(c.contact.id))
-      .map((c) => c.contact!.id);
-    if (toBump.length === 0) {
-      autoAttributedRef.current = true;
-      return;
-    }
-    autoAttributedRef.current = true;
-    void batchBumpHandlers(toBump, myUserId).then((n) => {
-      if (n > 0) {
-        console.log(`[scope] 自动归属 ${n} 个客户到当前用户`);
-        refreshScope();
-      }
-    });
-  }, [myUserId, crm.loading, crm.contacts, myContactIds, refreshScope]);
+  // ⚠️ 已移除（2026-06 撞单大爆雷）：原代码会把"WA Web 里能看到 + 我不是
+  // handler"的所有客户全部 bumpHandler 自己——但只校验"我不是 handler"，没
+  // 校验"别人是不是已经在 handle"。每位销售扩展加载都跑一遍 → 共同客户
+  // （早期共享号 / 偶发重叠）必撞单。
+  //
+  // 老客户 created_by=null 的回填工作改由 ScopeContext 的 orphan-claim
+  // 负责（那里正确校验"无人 handle 才认领"）。打开聊天时 useMessageSync
+  // 的 bumpHandler 会处理真实交互场景。
 
   // 视图过滤：scope=mine 时只保留 myContactIds 里的客户
   // 当前打开的客户始终显示（即使不是我的，方便接同事单时对照）
