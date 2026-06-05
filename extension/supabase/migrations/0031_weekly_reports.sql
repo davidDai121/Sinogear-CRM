@@ -1,4 +1,4 @@
--- 0003_weekly_reports.sql
+-- 0031_weekly_reports.sql
 -- 每周/每月分析报告存储。由本地脚本 / 后端用 service_role 写入(绕过 RLS);
 -- 组织成员经 RLS 只读自己组织的报告,供扩展「周报」标签展示(可切换 周报/月报)。
 
