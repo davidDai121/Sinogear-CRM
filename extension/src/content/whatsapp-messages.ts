@@ -449,7 +449,23 @@ export function readChatMessages(limit = 30): ChatMessage[] {
   // 一次性收集 bubble + 候选 date header span，按 DOM 顺序合并遍历。
   // 维护 currentDate：每次遇到日期分隔栏（"2026年5月18日" / "星期四" / "今天" / "昨天"）就更新。
   // bubble 用最近的 currentDate 推断 sent_at（仅 fallback，pre-plain-text 优先）。
-  const bubbles = Array.from(panel.querySelectorAll<Element>('.message-in, .message-out'));
+  let bubbles = Array.from(panel.querySelectorAll<Element>('.message-in, .message-out'));
+  // 兜底：FB ad-originated chats / WA Web 某些版本里 message-in/out class 命名
+  // 可能不同。conv-msg- wrapper 是消息级 testid，命中后用 querySelector 反查
+  // 子树里的 .message-in / .message-out 子层（如果有）来判方向；没有就根据
+  // wrapper 自身 class 判（少数 case fromMe 可能不准但不丢消息）
+  if (bubbles.length === 0) {
+    const wrappers = Array.from(
+      panel.querySelectorAll<Element>('[data-testid^="conv-msg-"]'),
+    );
+    if (wrappers.length > 0) {
+      bubbles = wrappers.map((w) => {
+        const innerOut = w.querySelector('.message-out');
+        const innerIn = w.querySelector('.message-in');
+        return innerOut || innerIn || w; // 子层有就用子层（带 class），没有就 wrapper 本身
+      });
+    }
+  }
 
   // Date header span：dir="auto" + 文本长度短 + 匹配日期格式
   const today = new Date();
@@ -518,6 +534,52 @@ export function readChatMessages(limit = 30): ChatMessage[] {
   }
 
   return messages.slice(-limit);
+}
+
+/**
+ * 自动诊断：cold-start "没有可读消息" 场景下打到 console 让 boss 复制发我。
+ * 调用方在抛 cold-start 错前调一下。throttled 5s 避免刷屏。
+ */
+let lastReadFailureLogAt = 0;
+export function maybeLogReadFailure(reason: string): void {
+  const now = Date.now();
+  if (now - lastReadFailureLogAt < 5000) return;
+  lastReadFailureLogAt = now;
+  try {
+    const main = findMainPane();
+    if (!main) {
+      console.log('[sgc/read-failure]', reason, { hasMain: false });
+      return;
+    }
+    const panel =
+      main.querySelector('[data-testid="conversation-panel-messages"]') ?? main;
+    const inOutCount = panel.querySelectorAll('.message-in, .message-out')
+      .length;
+    const convMsgCount = panel.querySelectorAll('[data-testid^="conv-msg-"]')
+      .length;
+    const allDataIdCount = panel.querySelectorAll('[data-id]').length;
+    const roleRowCount = panel.querySelectorAll('[role="row"]').length;
+    const firstDataIds = Array.from(panel.querySelectorAll('[data-id]'))
+      .slice(0, 5)
+      .map((el) => el.getAttribute('data-id'));
+    console.log('[sgc/read-failure]', reason, {
+      hasMain: true,
+      panelTestId: !!main.querySelector(
+        '[data-testid="conversation-panel-messages"]',
+      ),
+      inOutCount,
+      convMsgCount,
+      allDataIdCount,
+      roleRowCount,
+      firstDataIds,
+      panelClass:
+        typeof (panel as HTMLElement).className === 'string'
+          ? (panel as HTMLElement).className.slice(0, 100)
+          : null,
+    });
+  } catch (err) {
+    console.warn('[sgc/read-failure] inspect failed:', err);
+  }
 }
 
 export function chatFingerprint(messages: ChatMessage[]): string {

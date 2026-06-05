@@ -6,6 +6,7 @@ import { stringifyError } from '@/lib/errors';
 import { jumpToChat, verifyHeaderMatches, type RequireMatch } from '@/lib/jump-to-chat';
 import {
   waitForChatMessages,
+  maybeLogReadFailure,
   type ChatMessage,
 } from '@/content/whatsapp-messages';
 import { loadMessages, mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
@@ -262,6 +263,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
       if (guidance.trim()) {
         return { messages: [], source: 'guidance' };
       }
+      maybeLogReadFailure('GPTReplySection.generate cold-start');
       throw new Error(
         '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，「客户」tab 用「📥 导入手机聊天」导入 .txt 历史，或在下方"销售指令"里写明意图来冷启动。',
       );

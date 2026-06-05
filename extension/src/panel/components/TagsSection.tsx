@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import { jumpToChat } from '@/lib/jump-to-chat';
 import {
   waitForChatMessages,
+  maybeLogReadFailure,
   type ChatMessage,
 } from '@/content/whatsapp-messages';
 import { loadMessages, mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
@@ -112,6 +113,7 @@ export function TagsSection({ contactId, contactPhone }: Props) {
         // 3. DOM 空 → fallback 到数据库（导入的历史 + 之前 useMessageSync 同步过的）
         const rows = await loadMessages(contactId, 50);
         if (!rows.length) {
+          maybeLogReadFailure('TagsSection AI suggest cold-start');
           throw new Error(
             '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，或在「客户」tab 用「📥 导入手机聊天」导入 .txt 历史。',
           );
