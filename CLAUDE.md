@@ -271,6 +271,7 @@ contacts                id, org_id, phone (unique per org), wa_name, name,
                         reminder_ack_at, reminder_disabled,
                         destination_port, notes,
                         google_resource_name, google_synced_at,
+                        fb_lead_id, ctwa_clid, fb_ad_id,
                         created_by, *_at
 contact_tags            contact_id, tag
 vehicle_interests       id, contact_id, model, year, condition, steering,
@@ -283,7 +284,7 @@ vehicles                id, org_id, brand, model, year, version,
 vehicle_tags            vehicle_id, tag
 vehicle_media           id, vehicle_id, media_type(image/video/spec),
                         url, public_id, caption, mime_type, file_size_bytes,
-                        sort_order, created_by, created_at
+                        file_name, sort_order, created_by, created_at
 tasks                   id, org_id, contact_id, title, due_at,
                         status(open/done/cancelled), created_by, created_at
 quotes                  id, contact_id, vehicle_model, price_usd,
@@ -306,24 +307,35 @@ gem_conversations       id, contact_id, template_id, gem_chat_url,
                         UNIQUE(contact_id, template_id)
 claude_conversations    contact_id (PK), chat_url, last_used_at, created_at
                         Claude.ai per-contact chat URL（单一 Miles persona，无 template）
-gpt_conversations       contact_id (PK), chat_url, last_used_at, created_at
-                        ChatGPT per-contact chat URL（单一 Miles persona，无 template）
+gpt_templates           id, org_id, name, gpt_url, description, is_default,
+                        created_by, *_at
+                        per-user RLS（同 gem_templates）：只读写 created_by=auth.uid()
+gpt_conversations       id, contact_id, template_id, chat_url,
+                        last_used_at, created_at
+                        UNIQUE(contact_id, template_id)
+                        0026 起改 per-(contact, template)，对齐 gem_conversations
 messages                id, contact_id, wa_message_id, direction(inbound/outbound),
                         text, sent_at, synced_at, ai_source
                         UNIQUE(contact_id, wa_message_id)
                         ai_source: claude/gem/gem_auto/gpt（出站消息 AI 归因，NULL=manual）
 contact_pins            contact_id, user_id (PK 复合) — per-user 置顶客户
+weekly_reports          id, org_id, period(week/month/snapshot), week_of,
+                        summary jsonb, html, created_at
+                        UNIQUE(org_id, period, week_of)
+                        service_role 写（绕 RLS）；org 成员 RLS 只读；
+                        前端「📊周报」tab 读 period='snapshot' 那行
 app_config              key (PK), value — required_version 公开可读，写入 service_role only
 _keepalive              singleton (id=1, last_ping) — pg_cron 每日心跳
                         防 Supabase 免费层 7 日无活动自动暂停
 ```
 
 **RLS：** 所有表的 SELECT/INSERT/UPDATE/DELETE 都要求 `auth.uid()` 是 `org_id` 成员（通过 `is_org_member(org_id)` SECURITY DEFINER 函数）。
-- quotes / contact_events / gem_conversations / messages / contact_handlers 通过 contact 反查 org_id（无 org_id 列）
+- quotes / contact_events / gem_conversations / claude_conversations / gpt_conversations / messages / contact_handlers 通过 contact 反查 org_id（无 org_id 列）
 - vehicle_media 通过 vehicle 反查 org_id
 - contact_events 只有 SELECT/INSERT policy（append-only）
 - contact_handlers：读取要求同 org，写入只能 user_id=auth.uid()
-- gem_templates：0014 起改 per-user，只能 created_by=auth.uid()
+- gem_templates / gpt_templates：per-user，只能 created_by=auth.uid()（gem 0014 起，gpt 0026 起）
+- weekly_reports：service_role 写入（绕 RLS），org 成员只读自己 org 的报告
 - _keepalive 全部 deny，仅 pg_cron 内部 postgres role 可写
 
 **Helpers：**
