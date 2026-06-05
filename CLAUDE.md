@@ -226,18 +226,35 @@ Supabase（托管 Postgres + Auth）
 │       │                                公开可读、写入 service_role only（强制版本闸门）
 │       ├── 0018_fix_group_jid_unique.sql 0016 的 partial unique INDEX 换成普通
 │       │                                UNIQUE CONSTRAINT（避免 onConflict 报 42P10）
-│       ├── 0019_message_directions_rpc.sql last_message_direction_per_contact RPC
+│       ├── 0019_last_message_direction.sql last_message_direction_per_contact RPC
 │       │                                给每个 contact 算最后入站/出站消息时间
-│       ├── 0020_contact_pins.sql        contact_pins (contact_id, user_id) per-user 置顶
-│       ├── 0021_auto_reply_logs.sql     ai_reply_logs（早期想入库，后改 chrome.storage）
-│       ├── 0022_message_directions_counts.sql 0019 RPC 扩展回 inbound_count/outbound_count
+│       ├── 0020_claude_conversations.sql claude_conversations(contact_id, chat_url)
+│       │                                Claude.ai per-contact chat URL 缓存（无 template）
+│       ├── 0021_contact_pins.sql        contact_pins (contact_id, user_id) per-user 置顶
+│       ├── 0022_message_counts_for_classifier.sql 0019 RPC 扩展回 inbound_count/
+│       │                                outbound_count（chat-classifier 有历史保护用）
 │       ├── 0023_gpt_conversations.sql   gpt_conversations(contact_id, chat_url)
 │       │                                ChatGPT per-contact chat URL 缓存（无 template）
 │       ├── 0024_message_ai_source.sql   messages 加 ai_source 列：claude/gem/gem_auto/gpt
 │       │                                标记出站消息的 AI 归因来源（NULL = manual）
-│       └── 0025_enable_realtime.sql     启用 contacts/vehicle_interests/contact_tags/
-│                                        contact_handlers Realtime；REPLICA IDENTITY FULL
-│                                        让 DELETE/UPDATE payload.old 含完整旧行
+│       ├── 0025_enable_realtime.sql     启用 contacts/vehicle_interests/contact_tags/
+│       │                                contact_handlers Realtime；REPLICA IDENTITY FULL
+│       │                                让 DELETE/UPDATE payload.old 含完整旧行
+│       ├── 0026_gpt_templates.sql       gpt_templates（per-user Custom GPT 模板，对齐
+│       │                                gem_templates）+ 重建 gpt_conversations 改 PK 为
+│       │                                (contact_id, template_id)；per-user RLS
+│       ├── 0027_contacts_org_id_id_idx.sql contacts (org_id, id) 复合索引：分页 range
+│       │                                scan 免 sort（国内访问新加坡每页 7s → ~100ms）
+│       ├── 0028_vehicle_media_file_name.sql vehicle_media 加 file_name 列（保留原文件名，
+│       │                                发 WA 时显示更专业；老数据 NULL 回退 brand_model）
+│       ├── 0029_fb_integration.sql      contacts 加 fb_lead_id/ctwa_clid/fb_ad_id（Meta
+│       │                                CAPI 归因）+ org+fb_lead_id UNIQUE + 事件类型
+│       │                                fb_conversion_sent
+│       ├── 0030_fb_lead_received_event.sql contact_event_type 加 fb_lead_received
+│       │                                （fb-lead-webhook 收到 Lead 表单时写时间轴）
+│       └── 0031_weekly_reports.sql      weekly_reports(org_id, period, week_of, summary
+│                                        jsonb, html) 周报/月报；service_role 写 + org
+│                                        成员 RLS 只读；前端「📊周报」tab 读 period=snapshot
 └── （仅此一个目录；旧 backend/ frontend/ docs/ 已删）
 ```
 
@@ -314,7 +331,7 @@ _keepalive              singleton (id=1, last_ping) — pg_cron 每日心跳
 - `is_org_member(org_id)` — RLS 用
 - `touch_updated_at()` trigger — contacts/vehicles/quotes/gem_templates 自动更新 updated_at
 
-**所有 25 个 migration（0001–0025）都已应用到生产 Supabase。**
+**所有 31 个 migration（0001–0031）都已应用到生产 Supabase。**
 
 ## 启动
 
@@ -610,8 +627,8 @@ npm run package
 - [x] **isPhotoRequest 关键词识别**：续聊里客户要图（"more photos / 再发几张 / 多发图"等）→ 本轮再发一次图
 
 **其他**
-- [x] **`lib/contact-pins.ts` + per-user 置顶**（migration `0020`）：(contact_id, user_id) PK，乐观更新写 DB
-- [x] **`lib/ai-reply-log.ts` 改 chrome.storage.local 存储**（之前考虑过入库 `0021_auto_reply_logs.sql`，最终改本地存）：FIFO LRU，800 条上限，AIReplyLogModal 列表 + markdown 导出给 Claude review 质量
+- [x] **`lib/contact-pins.ts` + per-user 置顶**（migration `0021`）：(contact_id, user_id) PK，乐观更新写 DB
+- [x] **`lib/ai-reply-log.ts` 改 chrome.storage.local 存储**（早期考虑过建 ai_reply_logs 表入库，对应 migration 未纳入仓库，最终改本地存）：FIFO LRU，800 条上限，AIReplyLogModal 列表 + markdown 导出给 Claude review 质量
 - [x] **`MessagesHistoryModal` 加完整出站统计**：source × count 标签，让 boss 一眼看哪个 AI 用得多
 - [x] **强制版本闸门 → 0017 已上线**（前文 2026-05-10 已记，沿用至今）
 - [x] **`useCrmData` 分页全面铺开**：`fetchAllContacts` / `fetchAllVehicleInterests` / `fetchAllContactTags` 全走 PAGE=1000 分页，**`.order(...)` 必须加**（PostgREST 不保证 range 跨页稳定，并发写入时同行可能跨页重复）
