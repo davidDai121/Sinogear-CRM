@@ -18,3 +18,6 @@ baileys-version.json
 .claude/
 auth_info_baileys/
 extension/supabase/.temp/
+reports/
+extension/.preview/
+.git.backup-*/

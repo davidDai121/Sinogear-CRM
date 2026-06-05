@@ -84,11 +84,19 @@ if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
 
 console.log(`📦 打包 ${zipName}…`);
 try {
-  execSync(`cd "${distDir}" && zip -rqX "${zipPath}" .`, {
-    stdio: ['ignore', 'inherit', 'inherit'],
-  });
+  if (process.platform === 'win32') {
+    // Windows 用内置 PowerShell Compress-Archive,免装 zip 工具
+    const psCmd = `Compress-Archive -Path '${distDir}\\*' -DestinationPath '${zipPath}' -Force`;
+    execSync(`powershell -NoProfile -Command "${psCmd}"`, {
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+  } else {
+    execSync(`cd "${distDir}" && zip -rqX "${zipPath}" .`, {
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+  }
 } catch {
-  console.error('✗ zip 命令失败。Windows 用户请装 zip 工具或用 7-Zip 手动打包 dist/');
+  console.error('✗ 打包失败。Windows: 检查 PowerShell Compress-Archive 是否可用;Mac/Linux: 装 zip 工具');
   process.exit(1);
 }
 

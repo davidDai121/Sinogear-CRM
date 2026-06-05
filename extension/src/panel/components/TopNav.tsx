@@ -11,6 +11,7 @@ import { supabase } from '@/lib/supabase';
 
 export type TabKey =
   | 'dashboard'
+  | 'report'
   | 'chat'
   | 'contacts'
   | 'vehicles'
@@ -56,6 +57,7 @@ function useAutoTranslateToggle() {
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'dashboard', label: '看板' },
+  { key: 'report', label: '📊周报' },
   { key: 'chat', label: '聊天' },
   { key: 'contacts', label: '客户' },
   { key: 'vehicles', label: '车源' },

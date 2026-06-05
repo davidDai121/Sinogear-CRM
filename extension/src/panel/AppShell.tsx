@@ -10,6 +10,7 @@ import { VehiclesPage } from './pages/VehiclesPage';
 import { TasksPage } from './pages/TasksPage';
 import { TagsPage } from './pages/TagsPage';
 import { DashboardPage } from './pages/DashboardPage';
+import { WeeklyReportPage } from './pages/WeeklyReportPage';
 import { MediaStagingTray } from './components/MediaStagingTray';
 import { ScopeProvider } from './contexts/ScopeContext';
 import { VersionGate } from './components/VersionGate';
@@ -96,6 +97,7 @@ function AppShellInner() {
         {tab !== 'chat' && (
           <div className="sgc-page-overlay">
             {tab === 'dashboard' && <DashboardPage orgId={org.orgId} />}
+            {tab === 'report' && <WeeklyReportPage orgId={org.orgId} />}
             {tab === 'contacts' && (
               <ContactsPage
                 orgId={org.orgId}
