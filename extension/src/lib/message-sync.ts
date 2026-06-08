@@ -88,7 +88,52 @@ export async function syncMessages(
   // PATCH 把 DB 的 text 也改成 [已删除]。否则 prompt 还是会把销售已撤回的话喂给 AI。
   void overwriteDeletedMessages(contactId, rows);
 
+  // 方向自愈：早期 build（WA Web 删了 .message-in/.message-out class 后、方向判定还用
+  // el.classList.contains('message-out') 时）把**所有**消息写成了 inbound（"我发的图片被
+  // 识别成客户发的"）。ignoreDuplicates:true 让这些错行永远改不掉。现在 DOM 方向判定修对了，
+  // 用本次重新读到的 direction 把 DB 里方向不符的行 UPDATE 回来。
+  void fixDirectionMismatch(contactId, rows);
+
   return { inserted: count ?? 0 };
+}
+
+/**
+ * 方向自愈：用本次 DOM 重新判定的 direction 纠正 DB 里方向写反的历史行。
+ *
+ * 2 条批量 UPDATE（出站一批 / 入站一批）+ `.neq` 只动方向不符的行 → 幂等、省请求
+ * （纠正过一次后再 sync 这 2 条更新 0 行）。每批 wa_message_id ≤ readChatMessages 的
+ * limit（默认 30）个进 `.in()`，URL 长度安全。
+ */
+async function fixDirectionMismatch(
+  contactId: string,
+  rows: Array<{ wa_message_id: string; direction: 'inbound' | 'outbound' }>,
+): Promise<void> {
+  const outIds = rows
+    .filter((r) => r.direction === 'outbound')
+    .map((r) => r.wa_message_id);
+  const inIds = rows
+    .filter((r) => r.direction === 'inbound')
+    .map((r) => r.wa_message_id);
+  try {
+    if (outIds.length > 0) {
+      await supabase
+        .from('messages')
+        .update({ direction: 'outbound' })
+        .eq('contact_id', contactId)
+        .in('wa_message_id', outIds)
+        .neq('direction', 'outbound');
+    }
+    if (inIds.length > 0) {
+      await supabase
+        .from('messages')
+        .update({ direction: 'inbound' })
+        .eq('contact_id', contactId)
+        .in('wa_message_id', inIds)
+        .neq('direction', 'inbound');
+    }
+  } catch (e) {
+    console.warn('[fixDirectionMismatch]', e);
+  }
 }
 
 /** WA Web 已删除消息占位的内部统一标记，跟 content/whatsapp-messages.ts 同步 */

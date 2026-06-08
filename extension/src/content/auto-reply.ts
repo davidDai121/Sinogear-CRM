@@ -40,6 +40,7 @@ import {
 import { mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
 import { formatNewCustomer, formatUpdate } from '@/lib/gem-prompt';
 import { parseGemResponse } from '@/lib/gem-parser';
+import { getGemModelPreset, GEM_MODEL_STORAGE_KEY } from '@/lib/gem-models';
 import { sanitizeReplyForCustomer } from '@/lib/reply-sanitize';
 import { recordFill } from '@/lib/ai-reply-attribution';
 import { logContactEvent } from '@/lib/events-log';
@@ -156,13 +157,19 @@ async function executeAutoReply(contactId: string): Promise<void> {
     const prompt = await buildPrompt(contact, state, isFollowup, shouldSendImages);
     promptForLog = prompt;
 
+    // 自动回复用跟手动 AI 回复区同一个模型设置（默认 3.5 Flash）
+    const modelStore = await chrome.storage.local.get(GEM_MODEL_STORAGE_KEY);
+    const modelPreset = getGemModelPreset(
+      modelStore[GEM_MODEL_STORAGE_KEY] as string | undefined,
+    );
     const response = (await chrome.runtime.sendMessage({
       type: 'GEM_RUN',
       url: gemUrl,
       prompt,
       // 用户选了"切到新 tab 抢焦点"——满足 Gemini 的"页面活跃"判定
       active: true,
-      preferModel: ['Pro', '专业', '高级', 'Advanced'],
+      preferModel: modelPreset.prefer,
+      avoidModel: modelPreset.avoid,
     })) as
       | {
           ok: true;

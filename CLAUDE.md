@@ -747,6 +747,25 @@ npm run package
 
 **教训**：`created_by` 这种"FK 早建好但插入代码从没写"的列很坑——做依赖它的排序/过滤功能前先 SQL 确认列**真有数据**，别假设 FK 存在 = 有值。email→user_id 走 GoTrue admin API（`GET /auth/v1/admin/users?page=&per_page=`），注意拼写：用户给的 `wanglingcheng23` 实际是 `wanglincheng23`（少一个 g），差一字母查空，要跟现有 org members 交叉核对再下手。
 
+### 近期补完（2026-06-08）— WA Web 删 .message-in/.message-out：翻译全挂 + 消息方向判反 + Gemini 选模型
+
+**起点**：用户报"现在翻译开也不翻译了"，要修；同时要 Gemini 加"可以选模型，自动选 3.5 Flash"。修完后用户又报"明明我发的图片，你非得说客户发给我的，你把我发的消息都识别成客户给我发的了"（消息历史 modal 里出站图片+回复全标成 inbound）。
+
+**根因（Chrome MCP 实测）**：新版 WhatsApp Web（2026-06）**彻底删掉了 `.message-in` / `.message-out` class**——`document.querySelector('div#main').querySelectorAll('.message-in,.message-out').length === 0`。`.selectable-text` 也早已弃用（正文直接挂 `.copyable-text` 自身 textContent）。消息级元素现在只剩 `[data-testid^="conv-msg-"]` wrapper（class 是混淆的 `x1n2onr6 xscbp6u`，无语义方向）。连环挂三处：
+1. `auto-translate.ts` 全部查 `.message-in,.message-out` → 找到 0 个气泡 → 翻译开关开着也永不翻译、不注入 🌐 按钮（翻译无 DB 兜底所以彻底瞎）
+2. `readChatMessages` 的 `fromMe = el.classList.contains('message-out')` → 永远 false → **所有消息当成入站**（commit 32ca5bb 加了 conv-msg 兜底保住了消息内容，但方向判定还用死掉的 class，等于把出站全写成 inbound）。AI 有 DB 兜底所以没立刻露馅，但消息历史 + useMessageSync 写 DB 全反
+3. 图片气泡没有 `.copyable-text`，几何兜底量整个满宽 wrapper（center≈panelCenter）→ 出站图判不出靠右 → 也成入站
+
+**修法**：
+- `auto-translate.ts`：新增 `getBubbles()` 走 `[data-testid^="conv-msg-"]`（旧 class 在则兼容）；`readBubbleText` 改读 `.copyable-text`（`.selectable-text` 没了）；气泡标记类换成 `.sgc-bubble`（CSS 同步加，旧 message-in/out 保留兼容）
+- `whatsapp-messages.ts` 新增 `isOutboundBubble(el, panelCenter)` 多信号判方向：① 旧 class ② `[data-icon="tail-out"]`/`tail-in`（每段连续消息只有第一条带尾巴）③ 送达状态 `[aria-label*="已读/送达/已发送/待发送"]`（出站独有，入站绝无）④ 几何兜底量 `.copyable-text` 或最大 img/video（**绝不量满宽 wrapper**）。`findDataId` 的 FB-pair `::out/::in` + 主循环 fromMe 都改用它
+- `message-sync.ts` 新增 `fixDirectionMismatch`（方向自愈）：`syncMessages` 用 `ignoreDuplicates:true`，旧错行重新 sync 改不掉 → 2 条批量 UPDATE（出站一批/入站一批）+ `.neq` 只动方向不符的行，用户重开聊天时把 DB 老错行纠回。`database.types.ts` 给 messages Update 类型补 `direction?`（本来当不可变没列）
+- **Gemini 选模型**：新增 `lib/gem-models.ts` 预设（flash 默认 / pro / flash-lite，关键词 prefer+avoid 匹配，升版本号不坏）；`gem-automation.ts` `selectModel` 重写成按 prefer 命中 + avoid 排除选**指定**模型（之前写死强制 Pro 还排除 Flash），已是目标模型就跳过开菜单；`GemReplySection` 加模型下拉存 chrome.storage（`gemModel`，默认 flash）；手动 + 自动回复（`auto-reply.ts`）共用；service-worker 透传 `avoidModel`
+
+**验证（Chrome MCP 实测）**：翻译——`getBubbles` 从返回 0 变成正常找到气泡 + 读出英文正文 + shouldTranslate=true。方向——真实客户 Reza 混合聊天 `isOutboundBubble` 对照 prePlain sender ground truth **18/18 全对**；图片几何左对齐图(中心659)→入站、右对齐图(中心826)→出站，数学对称正确。Gemini——真实菜单 flash→「3.5 Flash」、pro→「3.1 Pro」、触发器识别 + 已选则跳过全过。typecheck + build 通过。
+
+**教训**：① 任何"扫 WA 消息气泡"的代码一律走 `[data-testid^="conv-msg-"]`，别再依赖 `.message-in/.message-out` 或 `.selectable-text`——它们已被 WA Web 删除。② 判方向别只看 class，用 tail-out + 已读状态 + 几何三重兜底；图片几何**只能量 img/copyable-text，不能量满宽 wrapper**。③ `syncMessages` 是 `ignoreDuplicates`，改了 DOM 解析逻辑后老错行不会自动改，要专门写 UPDATE 自愈。④ 翻译跟 readChatMessages 是同一套 DOM 依赖，以后改一个记得另一个也过一遍。
+
 ### 还可以做的（不急）
 
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
@@ -779,6 +798,10 @@ WhatsApp 绿色主题：
 - **`findDataId` 永远别再写固定层数父链**（`whatsapp-messages.ts`）：反复因 WA Web DOM 漂移坏过（6 → 3 → 2026-05-22 改 closest + testid → 2026-05-27 再加方向后缀防 FB ad pair data-id 复用）。新版 data-id 在 `.message-in/.message-out` 的 3 层祖父之上的 `[data-testid^="conv-msg-"]` wrapper 上。任何"从 message-in 元素往上爬找 data-id"的逻辑一律用 `el.closest('[data-testid^="conv-msg-"]')`，不要 `for i < N`。一旦这块再坏：**客户所有 inbound 消息从 DOM / DB / AI prompt 同时消失**，销售完全感知不到（DB 表面有消息 = 销售 outbound 占位，但客户回复 0 条），AI 续聊永远只看到销售自己发图
 - **WA Web 给 FB ad-reply pair 复用 data-id**（2026-05-27 修，`findDataId`）：销售那条 FB ad reply card (outbound) + 客户对 ad 的第一条 reply (inbound) **各自有独立的 conv-msg- wrapper**（兄弟节点不嵌套），但 **data-id 完全相同**。`closest('[data-testid^="conv-msg-"]')` 两条 bubble 拿到各自不同 wrapper element 但 data-id 一样 → `seen.has(id)` 把客户 inbound 当 dup 跳过 → AI 永远不知道客户对 ad 说了什么车。修法：`findDataId` 检测同 data-id 是否被 ≥ 2 个 conv-msg- wrapper 共享（`document.querySelectorAll('[data-testid^="conv-msg-"][data-id="..."]')`），是的话加 `::out` / `::in` 方向后缀（FB pair 必然一外一内）。单 wrapper 保留原 id 不带后缀（兼容历史 DB 数据，~99.5% 消息 id 不变）。**Lead-from-FB-ad 的客户每次踩这个 bug 第一句话就丢**，而那通常是客户唯一明确说出"想买什么车"的话，AI 全瞎猜
 - **WA Web 已放弃 `.selectable-text` class**（2026-05-27 修，`getMessageText`）：新版 bubble 文本直接挂在 `.copyable-text` 自身的 textContent / innerText 上，不再有 `.selectable-text` 子层。原来 `getMessageText` 的 3 条 fallback 全部依赖 `.selectable-text` 找最长 → 全返回空 → 走"任意 `.copyable-text`"兜底拿到第一个（FB 卡片的"Facebook 广告"4 字 header）→ 正文丢。修法：新增"挑最长 `.copyable-text` 自身 textContent"分支，放在 `.copyable-text .selectable-text` 之后兜底
+- **WA Web 已删 `.message-in` / `.message-out` class**（2026-06-08 修，实测 `querySelectorAll` 返回 0）：消息级元素只剩 `[data-testid^="conv-msg-"]` wrapper（class 混淆无语义方向）。任何"扫消息气泡"的代码（`auto-translate.ts` / `readChatMessages`）一律走 `getBubbles()` → `[data-testid^="conv-msg-"]`，旧 class 仅做兼容兜底。**这块坏会同时干掉翻译（找不到气泡 → 开关开着也不翻）+ AI 消息读取**，两者同一套 DOM 依赖，改一个记得另一个也过一遍
+- **判消息方向别只看 class**（2026-06-08 修，`isOutboundBubble`）：`.message-out` class 没了，`el.classList.contains('message-out')` 永远 false → **所有消息当成入站**（"我发的图被识别成客户发的"）。多信号判定：① 旧 class ② `[data-icon="tail-out"]`/`tail-in`（每段连续消息只有第一条带尾巴）③ 送达状态 `[aria-label*="已读/送达/已发送/待发送"]`（出站独有）④ 几何兜底量 `.copyable-text` 或最大 img/video。**图片气泡没有 `.copyable-text`，几何绝不能量满宽的 conv-msg wrapper**（center≈panelCenter，出站图永远判不出靠右）—— 要量 img 本身
+- **`syncMessages` 是 `ignoreDuplicates:true`，方向写错后要专门自愈**（2026-06-08，`fixDirectionMismatch`）：老错行（早期 build 把出站全写成 inbound）重新 sync 不会被 upsert 更新 → 永久卡住。修了方向判定后还要加批量 UPDATE（出站一批/入站一批 + `.neq` 只动方向不符的行），用户重开聊天时纠回。注意 `messages` 的 Update 类型本来没列 `direction`（当不可变），自愈要在 `database.types.ts` 补 `direction?`。**改了 DOM 解析逻辑后，光改解析不够，DB 里旧错行也要想办法自愈**
+- **Gemini 选模型**（2026-06-08，`lib/gem-models.ts`）：默认 3.5 Flash（比 Pro 快很多），AI 回复区下拉可切 Pro / Flash-Lite，存 chrome.storage `gemModel`，手动 + 自动回复共用。`selectModel` 按 prefer 命中 + avoid 排除选指定模型（avoid 用来区分 Flash vs Flash-Lite）；用关键词不写死版本号，Gemini 升版本（3.5→3.6）不坏。改 Gem 模型逻辑别再写死强制 Pro
 - WhatsApp 搜索框已从 `contenteditable` 改成原生 `<input>`，跳转用 **search + Enter** 而非模拟点击（React 上的 click 事件不触发）
 - AI API 限流：`service-worker.ts` 已加 3 次指数退避（3s/8s/15s）；bulk extract 默认 4/min；auto-translate 顺序队列 + 200ms 间隔（因为换 Google Translate 后无配额限制）
 - `auto-translate.ts` 早期版本有 drop bug（MAX_CONCURRENT=2 超出直接丢，长聊天后面消息翻不出），已改为顺序 Promise 队列

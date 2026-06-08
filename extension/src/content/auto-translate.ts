@@ -47,14 +47,64 @@ function shouldTranslate(text: string): boolean {
   return true;
 }
 
+/**
+ * 找出 #main 里所有消息气泡元素。
+ *
+ * ⚠️ 新版 WA Web（2026-06 实测）已经彻底删掉 `.message-in` / `.message-out` class，
+ * 所有依赖它们的查询返回 0 → 翻译找不到任何气泡，开关打开也不翻译。
+ * 改成：先试旧 class（向后兼容），返回 0 时退到消息级 wrapper `[data-testid^="conv-msg-"]`。
+ * 跟 whatsapp-messages.ts 的 readChatMessages 同源（那边已经加过 conv-msg- 兜底）。
+ */
+function getBubbles(root: ParentNode): Element[] {
+  const legacy = root.querySelectorAll('.message-in, .message-out');
+  if (legacy.length > 0) return Array.from(legacy);
+  return Array.from(root.querySelectorAll('[data-testid^="conv-msg-"]'));
+}
+
+/** 读元素文本，先剥掉我们自己注入的翻译行 / 翻译按钮，避免再翻译被污染 */
+function cleanText(el: HTMLElement): string {
+  const clone = el.cloneNode(true) as HTMLElement;
+  clone
+    .querySelectorAll(`.${TRANSLATION_CLASS}, .${TRANSLATE_BTN_CLASS}`)
+    .forEach((n) => n.remove());
+  return (clone.innerText || clone.textContent || '').trim();
+}
+
 function readBubbleText(bubble: Element): string {
-  const cop = bubble.querySelector('.copyable-text .selectable-text');
-  if (cop instanceof HTMLElement) return cop.innerText.trim();
+  // 优先：带 data-pre-plain-text 的 .copyable-text（真正的消息正文 wrapper）
+  const realWrap = bubble.querySelector('.copyable-text[data-pre-plain-text]');
+  if (realWrap instanceof HTMLElement) {
+    const sel = realWrap.querySelector('.selectable-text');
+    if (sel instanceof HTMLElement) {
+      const t = cleanText(sel);
+      if (t) return t;
+    }
+    const t = cleanText(realWrap);
+    if (t) return t;
+  }
+  // ⚠️ 新版 WA Web 已弃用 `.selectable-text`，正文直接挂在 `.copyable-text` 自身。
+  // 一个 wrapper 可能有多个 .copyable-text（引用气泡 / FB 广告 header），挑最长的当正文。
+  let longest = '';
+  bubble.querySelectorAll('.copyable-text').forEach((el) => {
+    if (el instanceof HTMLElement) {
+      const t = cleanText(el);
+      if (t.length > longest.length) longest = t;
+    }
+  });
+  if (longest) return longest;
+  // 兜底：老结构 .selectable-text
   const sel = bubble.querySelector('.selectable-text');
-  if (sel instanceof HTMLElement) return sel.innerText.trim();
-  const any = bubble.querySelector('.copyable-text');
-  if (any instanceof HTMLElement) return any.innerText.trim();
+  if (sel instanceof HTMLElement) return cleanText(sel);
   return '';
+}
+
+/** 翻译行注入到哪个容器：优先消息正文 wrapper，让译文出现在气泡内文字下方 */
+function injectionContainer(bubble: Element): Element {
+  return (
+    bubble.querySelector('.copyable-text[data-pre-plain-text]') ??
+    bubble.querySelector('.copyable-text') ??
+    bubble
+  );
 }
 
 function injectTranslation(bubble: Element, translation: string) {
@@ -63,14 +113,15 @@ function injectTranslation(bubble: Element, translation: string) {
   div.className = TRANSLATION_CLASS;
   div.textContent = `🌐 ${translation}`;
 
-  const container = bubble.querySelector('.copyable-text') ?? bubble;
-  container.appendChild(div);
+  injectionContainer(bubble).appendChild(div);
   bubble.setAttribute(TRANSLATED_ATTR, '1');
 }
 
 function injectManualButton(bubble: Element) {
   if (bubble.hasAttribute(BUTTON_ATTR)) return;
   bubble.setAttribute(BUTTON_ATTR, '1');
+  // 标记类：新版 WA Web 没有 .message-in/.message-out 了，CSS 的 hover 规则改挂在这个类上
+  bubble.classList.add('sgc-bubble');
 
   // 确保气泡可作为绝对定位锚点
   if (bubble instanceof HTMLElement && getComputedStyle(bubble).position === 'static') {
@@ -164,11 +215,8 @@ async function runTranslate(bubble: Element, text: string): Promise<void> {
 function injectButtons() {
   const main = document.querySelector('div#main');
   if (!main) return;
-  const bubbles = main.querySelectorAll(
-    `.message-in:not([${BUTTON_ATTR}]),.message-out:not([${BUTTON_ATTR}])`,
-  );
-  for (const b of bubbles) {
-    injectManualButton(b);
+  for (const b of getBubbles(main)) {
+    if (!b.hasAttribute(BUTTON_ATTR)) injectManualButton(b);
   }
 }
 
@@ -179,12 +227,10 @@ function processVisible() {
   if (!enabled) return;
   const main = document.querySelector('div#main');
   if (!main) return;
-  const bubbles = main.querySelectorAll(
-    `.message-in:not([${TRANSLATED_ATTR}]):not([${PROCESSING_ATTR}]),` +
-      `.message-out:not([${TRANSLATED_ATTR}]):not([${PROCESSING_ATTR}])`,
-  );
-  for (const b of bubbles) {
-    void enqueue(b);
+  for (const b of getBubbles(main)) {
+    if (!b.hasAttribute(TRANSLATED_ATTR) && !b.hasAttribute(PROCESSING_ATTR)) {
+      void enqueue(b);
+    }
   }
 }
 
@@ -234,7 +280,7 @@ export function manualRetranslate(): number {
 
   const main = document.querySelector('div#main');
   if (!main) return 0;
-  const bubbles = main.querySelectorAll('.message-in, .message-out');
+  const bubbles = getBubbles(main);
   for (const b of bubbles) {
     void enqueue(b);
   }

@@ -25,6 +25,12 @@ import { sanitizeReplyForCustomer, wasReplyDirty } from '@/lib/reply-sanitize';
 import { ReplyCard } from './ReplyCard';
 import { GemTemplatesModal } from './GemTemplatesModal';
 import { GeneratedAtBadge } from './GeneratedAtBadge';
+import {
+  GEM_MODELS,
+  DEFAULT_GEM_MODEL,
+  GEM_MODEL_STORAGE_KEY,
+  getGemModelPreset,
+} from '@/lib/gem-models';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type GemTemplateRow = Database['public']['Tables']['gem_templates']['Row'];
@@ -68,16 +74,22 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
   const [conversations, setConversations] = useState<GemConversationRow[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [foreground, setForeground] = useState(false);
+  const [gemModel, setGemModel] = useState<string>(DEFAULT_GEM_MODEL);
   const [status, setStatus] = usePersistedReplyStatus<Status>('gem', contact.id, { kind: 'idle' });
   const [showTemplates, setShowTemplates] = useState(false);
   const [followup, setFollowup] = useState('');
   const [followupLoaded, setFollowupLoaded] = useState(false);
 
-  // Load foreground preference
+  // Load foreground + model preference（全局，不按 contact 隔离）
   useEffect(() => {
-    void chrome.storage.local.get('gemForeground').then((s) => {
-      setForeground(Boolean(s.gemForeground));
-    });
+    void chrome.storage.local
+      .get(['gemForeground', GEM_MODEL_STORAGE_KEY])
+      .then((s) => {
+        setForeground(Boolean(s.gemForeground));
+        if (typeof s[GEM_MODEL_STORAGE_KEY] === 'string') {
+          setGemModel(s[GEM_MODEL_STORAGE_KEY] as string);
+        }
+      });
   }, []);
 
   // 每个客户独立存草稿；切 tab / 失败 / 切客户回来都能拿回输入
@@ -143,6 +155,11 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
   const toggleForeground = (next: boolean) => {
     setForeground(next);
     void chrome.storage.local.set({ gemForeground: next });
+  };
+
+  const changeModel = (next: string) => {
+    setGemModel(next);
+    void chrome.storage.local.set({ [GEM_MODEL_STORAGE_KEY]: next });
   };
 
   const generate = async () => {
@@ -297,12 +314,14 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         source: messageSource,
         count: messages.length,
       });
+      const modelPreset = getGemModelPreset(gemModel);
       const response = await chrome.runtime.sendMessage({
         type: 'GEM_RUN',
         url,
         prompt,
         active: foreground,
-        preferModel: ['Pro', '专业', '高级', 'Advanced'],
+        preferModel: modelPreset.prefer,
+        avoidModel: modelPreset.avoid,
       });
 
       if (!response?.ok) {
@@ -490,6 +509,18 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
                 <option key={t.id} value={t.id}>
                   {t.name}
                   {t.is_default ? ' · 默认' : ''}
+                </option>
+              ))}
+            </select>
+            <select
+              value={gemModel}
+              onChange={(e) => changeModel(e.target.value)}
+              disabled={busy}
+              title="Gemini 模型：Flash 快、Pro 最强但慢、Flash-Lite 最快"
+            >
+              {GEM_MODELS.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
                 </option>
               ))}
             </select>

@@ -511,6 +511,8 @@ export interface Database {
           text?: string;
           sent_at?: string | null;
           ai_source?: string | null;
+          // 方向自愈用：早期 build 把出站消息写成 inbound，需要事后纠正（见 message-sync fixDirectionMismatch）
+          direction?: MessageDirection;
         };
         Relationships: [];
       };

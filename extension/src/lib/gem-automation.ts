@@ -17,10 +17,15 @@ export interface GemRunOptions {
   active?: boolean;
   responseTimeoutMs?: number;
   /**
-   * 想要切换到的模型名关键词列表。匹配任一即可。
-   * 例如 ['Pro', '专业', '高级', 'Advanced'] 在中英文界面都能找到 Pro 模型。
+   * 想要切换到的模型名关键词列表。菜单项命中任一即匹配。
+   * 例如 ['Flash'] 找 3.5 Flash，['Pro','专业'] 找 Pro。
    */
   preferModel?: string[];
+  /**
+   * 排除关键词。菜单项命中任一即排除 —— 用来区分 Flash vs Flash-Lite。
+   * 例如选 Flash 时 avoidModel=['Lite','极速'] 避免误选 Flash-Lite。
+   */
+  avoidModel?: string[];
 }
 
 export interface GemRunResult {
@@ -51,7 +56,7 @@ export async function runGem(opts: GemRunOptions): Promise<GemRunResult> {
     await waitForInput(tabId);
     const modelSelected =
       opts.preferModel && opts.preferModel.length
-        ? await selectModel(tabId, opts.preferModel)
+        ? await selectModel(tabId, opts.preferModel, opts.avoidModel ?? [])
         : null;
     await typeAndSend(tabId, opts.prompt);
     const responseText = await waitForResponse(
@@ -132,27 +137,40 @@ async function waitForInput(tabId: number, timeoutMs = 30000): Promise<void> {
 }
 
 /**
- * 尝试在 Gemini 页面切换模型（如 "Pro"）。
+ * 在 Gemini 页面切换到指定模型（如 "3.5 Flash" / "Pro"）。
  * Best-effort：找不到下拉就 silent skip，返回选中的模型名（或 null）。
  *
  * 流程：
- *   1. 找模型触发器按钮（中文显示"快速 v"，英文显示"Flash"等；文字短）
- *   2. 点开，等菜单出现
- *   3. 在菜单 ([role=menuitem|option]) 里找匹配 prefer 任一关键词、且不含 Flash/快速 的项 → 点击
+ *   1. 找模型触发器按钮（输入框旁，中文 "3.5 Flash" / "智能 v"，文字短）。
+ *      如果触发器当前 label 已经是目标模型 → 直接跳过（省一次开菜单 ~1s）。
+ *   2. 点开，等菜单出现。
+ *   3. 在菜单 ([role=menuitem|option]) 里找命中 prefer 任一关键词、且不含 avoid
+ *      任一关键词的项 → 点击。avoid 用来区分 "3.5 Flash" vs "3.1 Flash-Lite"。
  *
- * 适配 Gemini 3：菜单项有 快速 / 思考 / Pro / Google AI Ultra
+ * 适配 Gemini（2026-06 实测菜单）：3.1 Flash-Lite / 3.5 Flash / 3.1 Pro + 思考 / 写代码。
  */
 async function selectModel(
   tabId: number,
   prefer: string[],
+  avoid: string[],
 ): Promise<string | null> {
-  // Step 1: open the dropdown
-  const opened = await execute<{
+  // Step 1: 找触发器；若已是目标模型直接跳过，否则点开下拉
+  const step1 = await execute<{
     ok: boolean;
     currentLabel: string | null;
+    alreadyDesired: boolean;
   }>(
     tabId,
-    () => {
+    (prefers: string[], avoids: string[]) => {
+      const matchesAny = (text: string, kws: string[]) =>
+        kws.some((k) => {
+          const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          // 中文关键词不需要 word boundary（\b 对 CJK 不工作）
+          const pattern = /[一-龥]/.test(k)
+            ? new RegExp(escaped, 'i')
+            : new RegExp(`\\b${escaped}\\b`, 'i');
+          return pattern.test(text);
+        });
       const buttons = Array.from(
         document.querySelectorAll('button'),
       ) as HTMLButtonElement[];
@@ -162,37 +180,50 @@ async function selectModel(
         const both = `${text} ${label}`;
         // 触发器文字短，且包含模型相关字眼（中英双语）
         const isModelTrigger =
-          /(Flash|Pro|Advanced|快速|思考|高级|专业|Ultra|Gemini\s*[23])/i.test(
+          /(Flash|Pro|Advanced|快速|思考|高级|专业|Ultra|Lite|智能|Gemini\s*[23])/i.test(
             both,
           );
         return isModelTrigger && text.length > 0 && text.length < 30;
       });
       if (candidates.length === 0) {
-        return { ok: false, currentLabel: null };
+        return { ok: false, currentLabel: null, alreadyDesired: false };
       }
-      // 触发器通常在输入框旁边（DOM 后段），且 viewport 内可见。
-      // 取最后一个可见的：
+      // 触发器通常在输入框旁边（DOM 后段），且 viewport 内可见。取最后一个可见的：
       const visible = candidates.filter((b) => {
         const r = b.getBoundingClientRect();
         return r.width > 0 && r.height > 0 && r.top >= 0;
       });
-      const trigger = visible[visible.length - 1] ?? candidates[candidates.length - 1];
+      const trigger =
+        visible[visible.length - 1] ?? candidates[candidates.length - 1];
       const currentLabel = (trigger.textContent ?? '').trim();
+      // 已经是目标模型（label 命中 prefer 且不含 avoid）→ 不用开菜单
+      if (matchesAny(currentLabel, prefers) && !matchesAny(currentLabel, avoids)) {
+        return { ok: true, currentLabel, alreadyDesired: true };
+      }
       trigger.click();
-      return { ok: true, currentLabel };
+      return { ok: true, currentLabel, alreadyDesired: false };
     },
-    [],
+    [prefer, avoid],
   );
 
-  if (!opened.ok) return null;
+  if (!step1.ok) return null;
+  if (step1.alreadyDesired) return step1.currentLabel;
 
   // Wait for the menu to render
   await sleep(500);
 
-  // Step 2: click the option matching any `prefer` keyword
+  // Step 2: 点命中 prefer 且不含 avoid 的菜单项
   const picked = await execute<string | null>(
     tabId,
-    (prefers: string[]) => {
+    (prefers: string[], avoids: string[]) => {
+      const matchesAny = (text: string, kws: string[]) =>
+        kws.some((k) => {
+          const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const pattern = /[一-龥]/.test(k)
+            ? new RegExp(escaped, 'i')
+            : new RegExp(`\\b${escaped}\\b`, 'i');
+          return pattern.test(text);
+        });
       const items = Array.from(
         document.querySelectorAll('[role="menuitem"], [role="option"]'),
       ) as HTMLElement[];
@@ -203,17 +234,8 @@ async function selectModel(
       const target = items.find((el) => {
         if (!isVisible(el)) return false;
         const text = (el.textContent ?? '').trim();
-        // 排除 Flash / 快速（当前选中的或不想要的）
-        if (/(Flash|快速)/i.test(text)) return false;
-        // 必须匹配任一 prefer 关键词
-        return prefers.some((p) => {
-          const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          // 中文关键词不需要 word boundary（\b 对 CJK 不工作）
-          const pattern = /[一-龥]/.test(p)
-            ? new RegExp(escaped, 'i')
-            : new RegExp(`\\b${escaped}\\b`, 'i');
-          return pattern.test(text);
-        });
+        if (matchesAny(text, avoids)) return false; // 排除（如 Flash-Lite）
+        return matchesAny(text, prefers); // 命中目标
       });
       if (target) {
         target.click();
@@ -222,7 +244,7 @@ async function selectModel(
       }
       return null;
     },
-    [prefer],
+    [prefer, avoid],
   );
 
   // Wait for the UI to settle on the new model
@@ -235,7 +257,7 @@ async function selectModel(
     );
   });
 
-  return picked;
+  return picked ?? step1.currentLabel;
 }
 
 async function typeAndSend(tabId: number, text: string): Promise<void> {

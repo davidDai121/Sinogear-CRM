@@ -126,6 +126,65 @@ function getMessageText(scope: Element): string {
   return anyCopyable ? readStrippingInjections(anyCopyable) : '';
 }
 
+/**
+ * 判断气泡/消息 wrapper 是出站（我发的，fromMe=true）还是入站（客户发的）。
+ *
+ * ⚠️ 新版 WA Web（2026-06 实测）已经彻底删掉 `.message-in` / `.message-out` class
+ * （`main.querySelectorAll('.message-in,.message-out').length === 0`）。单靠
+ * `el.classList.contains('message-out')` 判方向会把**所有**消息当成入站 → AI prompt
+ * 把销售自己发的话也归给客户，回复彻底跑偏；useMessageSync 也会把出站写成 inbound 污染 DB。
+ *
+ * 多信号判定（可靠度从高到低）：
+ *   1. 旧 class（向后兼容老 WA Web / 仍有 message-out/in 的实例）
+ *   2. 气泡尾巴 icon `tail-out` / `tail-in`（每段连续消息只有第一条带尾巴）
+ *   3. 送达状态 icon（aria-label 已读/送达/已发送/待发送 / Read/Delivered/Sent / data-icon msg-*）
+ *      —— 只有出站消息才显示送达回执，入站绝不会有
+ *   4. 几何兜底：气泡靠右 = 出站（传入 panelCenter 时启用）
+ * 都不命中默认入站 —— 连续入站消息没有任何出站信号，正好落到默认值。
+ */
+function isOutboundBubble(el: Element, panelCenter?: number): boolean {
+  // 1. 旧 class（兼容）
+  if (el.classList.contains('message-out') || el.querySelector('.message-out'))
+    return true;
+  if (el.classList.contains('message-in') || el.querySelector('.message-in'))
+    return false;
+  // 2. 气泡尾巴
+  if (el.querySelector('[data-icon="tail-out"]')) return true;
+  if (el.querySelector('[data-icon="tail-in"]')) return false;
+  // 3. 送达状态 icon（出站独有）
+  const STATUS_SEL =
+    '[aria-label*="已读"],[aria-label*="送达"],[aria-label*="已发送"],[aria-label*="待发送"],' +
+    '[aria-label*="Read" i],[aria-label*="Delivered" i],[aria-label*="Sent" i],[aria-label*="Pending" i],' +
+    '[data-icon^="msg-"]';
+  if (el.querySelector(STATUS_SEL)) return true;
+  // 4. 几何兜底（上面都没命中时）：量真正的气泡内容盒子水平中心 vs 面板中心，靠右=出站。
+  // ⚠️ 纯图片/视频 bubble 没有 .copyable-text，绝不能拿整个 conv-msg wrapper 来量——
+  // wrapper 是整行满宽，center ≈ panelCenter，出站图永远判不出"靠右" → 错判成入站
+  // （这正是"我发的图片被识别成客户发的"的根因之一）。改量 .copyable-text，没有就量
+  // 最大的 img/video（排除 emoji/小 icon）。
+  if (panelCenter != null) {
+    let box: DOMRect | null = null;
+    const cop = el.querySelector('.copyable-text') as HTMLElement | null;
+    if (cop) {
+      const r = cop.getBoundingClientRect();
+      if (r.width > 0) box = r;
+    }
+    if (!box) {
+      let bestArea = 0;
+      el.querySelectorAll('img, video').forEach((m) => {
+        const r = (m as HTMLElement).getBoundingClientRect();
+        const area = r.width * r.height;
+        if (r.width > 48 && r.height > 48 && area > bestArea) {
+          bestArea = area;
+          box = r;
+        }
+      });
+    }
+    if (box && box.width > 0) return box.left + box.width / 2 > panelCenter;
+  }
+  return false;
+}
+
 function findDataId(el: Element): string | null {
   // 优先：用 [data-testid^="conv-msg-"] 这个 message-group 标记的 closest()，不限层数。
   // 新版 WA Web (2026-05+) 把 data-id 挪到了 .message-in/out 的 3 层祖父之上的 wrapper。
@@ -152,7 +211,7 @@ function findDataId(el: Element): string | null {
       `[data-testid^="conv-msg-"][data-id="${CSS.escape(wrapId)}"]`,
     );
     if (allSameId.length <= 1) return wrapId;
-    const dir = el.classList.contains('message-out') ? 'out' : 'in';
+    const dir = isOutboundBubble(el) ? 'out' : 'in';
     return `${wrapId}::${dir}`;
   }
 
@@ -488,6 +547,13 @@ export function readChatMessages(limit = 30): ChatMessage[] {
   const seen = new Set<string>();
   let currentDate: { y: number; m: number; d: number } | null = null;
 
+  // 几何兜底用的消息面板水平中心（isOutboundBubble 的最后一档信号）
+  const panelRect = (panel as HTMLElement).getBoundingClientRect?.();
+  const panelCenter =
+    panelRect && panelRect.width > 0
+      ? panelRect.left + panelRect.width / 2
+      : undefined;
+
   for (const el of all) {
     // Date header span
     if (el.tagName === 'SPAN') {
@@ -523,7 +589,7 @@ export function readChatMessages(limit = 30): ChatMessage[] {
     if (isDeletedPlaceholderText(text)) text = DELETED_TEXT_MARKER;
 
     seen.add(id);
-    const fromMe = el.classList.contains('message-out');
+    const fromMe = isOutboundBubble(el, panelCenter);
     messages.push({
       id,
       fromMe,

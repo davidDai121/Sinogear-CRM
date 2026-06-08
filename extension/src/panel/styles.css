@@ -2822,9 +2822,12 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
   font-style: italic;
 }
 
-/* Per-bubble manual translate button */
+/* Per-bubble manual translate button.
+   新版 WA Web 删了 .message-in/.message-out，气泡标记类改用 .sgc-bubble（auto-translate.ts 注入）。
+   旧 class 保留向后兼容。 */
 .message-in .sgc-translate-btn,
-.message-out .sgc-translate-btn {
+.message-out .sgc-translate-btn,
+.sgc-bubble .sgc-translate-btn {
   position: absolute;
   top: 4px;
   right: 4px;
@@ -2844,7 +2847,8 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
 }
 
 .message-in:hover .sgc-translate-btn,
-.message-out:hover .sgc-translate-btn {
+.message-out:hover .sgc-translate-btn,
+.sgc-bubble:hover .sgc-translate-btn {
   opacity: 0.85;
 }
 

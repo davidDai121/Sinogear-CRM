@@ -304,6 +304,7 @@ interface GemRunRequest {
   active?: boolean;
   responseTimeoutMs?: number;
   preferModel?: string[];
+  avoidModel?: string[];
 }
 
 async function handleGemRun(req: GemRunRequest) {
@@ -316,6 +317,7 @@ async function handleGemRun(req: GemRunRequest) {
       active: req.active,
       responseTimeoutMs: req.responseTimeoutMs,
       preferModel: req.preferModel,
+      avoidModel: req.avoidModel,
     });
     return {
       ok: true,
