@@ -195,8 +195,21 @@ export function formatGuidance(guidance: string): string {
  * 强制 Gem 把 [WhatsApp Reply] 分段输出，避免一大坨墙文字客户读不下去。
  * 顺带塞了 AD COPY 规则 —— Gem 的 system prompt 在用户 Gem builder 里改不动，
  * 但这段 FORMAT_CONSTRAINT 每次都会拼到对话末尾，作为兜底说明。
+ *
+ * ⚠️ 2026-06：Flash 模型续聊时偶尔只输出 [Translation & Strategy] 不出
+ * [WhatsApp Reply]（认为已经给过），导致 boss 拿不到英文文本要去 Gemini
+ * 自取。新增 [Required Sections] 段明确强制每轮都必须输出两段。
  */
-const FORMAT_CONSTRAINT = `[Format Constraint]
+const FORMAT_CONSTRAINT = `[Required Sections — EVERY turn, including followup]
+Every response MUST contain BOTH of these sections in this order:
+1. [WhatsApp Reply]
+   The reply to send the customer, in the customer's language (English / French / Spanish / Arabic etc).
+   Even in followup / continuation turns where you already gave a reply earlier, you must STILL output a fresh [WhatsApp Reply] for THIS turn. Do not skip it just because you've replied before — Miles needs the English/foreign-language text to copy-paste into WhatsApp.
+2. [Translation & Strategy]
+   Chinese translation of the [WhatsApp Reply] + brief strategy notes for Miles (in 中文).
+[Client Record] is optional and only when customer info changed.
+
+[Format Constraint]
 The [WhatsApp Reply] section MUST be split into 2-4 short paragraphs.
 Separate paragraphs with a single blank line (i.e. \\n\\n).
 Each paragraph: max 2-3 sentences. No single paragraph longer than ~50 words.

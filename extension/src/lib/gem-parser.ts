@@ -67,12 +67,12 @@ export function parseGemResponse(rawText: string): ParsedGemResponse {
     clientRecord = parseClientRecord(text);
   }
 
-  const reply: string | null =
+  let reply: string | null =
     sections['whatsapp reply'] ||
     sections['whatsapp 回复'] ||
     null;
 
-  const translation: string | null =
+  let translation: string | null =
     sections['full translation & strategy'] ||
     sections['full translation and strategy'] ||
     sections['translation & strategy'] ||
@@ -84,7 +84,7 @@ export function parseGemResponse(rawText: string): ParsedGemResponse {
     sections['策略'] ||
     null;
 
-  // Fallback：没明确 reply/translation section 但有 [Client Record] →
+  // Fallback A：没明确 reply/translation section 但有 [Client Record] →
   // 把 [Client Record] 之后的内容按语言拆开
   if (!reply && !translation && clientRecord) {
     const after = extractAfterSection(rawText, [
@@ -99,6 +99,18 @@ export function parseGemResponse(rawText: string): ParsedGemResponse {
       translation: split.chinese || null,
       raw: rawText,
     };
+  }
+
+  // Fallback B：Gem (尤其 Flash 模型续聊时) 偶尔把整段输出全打包在
+  // [Translation & Strategy] 里——既包含中文翻译又包含英文回复，
+  // [WhatsApp Reply] section 干脆没单独输出。
+  // 此时把 translation 按段落语言拆开：非中文段落 → reply，中文段落 → translation
+  if (!reply && translation) {
+    const split = splitByLanguage(translation);
+    if (split.nonChinese.length >= 30) {
+      reply = split.nonChinese;
+      translation = split.chinese || translation;
+    }
   }
 
   return { clientRecord, reply, translation, raw: rawText };
