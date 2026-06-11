@@ -766,6 +766,20 @@ npm run package
 
 **教训**：① 任何"扫 WA 消息气泡"的代码一律走 `[data-testid^="conv-msg-"]`，别再依赖 `.message-in/.message-out` 或 `.selectable-text`——它们已被 WA Web 删除。② 判方向别只看 class，用 tail-out + 已读状态 + 几何三重兜底；图片几何**只能量 img/copyable-text，不能量满宽 wrapper**。③ `syncMessages` 是 `ignoreDuplicates`，改了 DOM 解析逻辑后老错行不会自动改，要专门写 UPDATE 自愈。④ 翻译跟 readChatMessages 是同一套 DOM 依赖，以后改一个记得另一个也过一遍。
 
+### 近期补完（2026-06-11）— last_message_direction RPC 全表扫超时（57014 + Thread killed）
+
+**起点**：用户在 Supabase 后台 PostgREST Logs 看到满屏 `Warp server error: Thread killed by timeout manager` + 一条 `POST /rpc/last_message_direction_per_contact … 500` + `{"code":"57014" … canceling statement due to statement timeout}`，问"这个会有问题吗"。
+
+**根因（实测拿数据，不靠猜）**：`last_message_direction_per_contact` RPC（0019 建、0022 扩）对**整张 messages 表做聚合**（每 contact 的 max(sent_at) filter + count(\*) filter，group by contact_id）。service_role REST 实测 `messages` **38,625 行**、`contacts` 6,177 行。现有索引 `(contact_id, sent_at desc)`（0011）**不含 `direction`**，帮不上这个查询 → 走顺序扫描，把每行的肥 `text` 正文都从堆里读出来。叠加 3 销售每 5min 各并发跑一次 + `useMessageSync` 一直 upsert / 方向自愈 UPDATE 造成的表膨胀 → 38k 行也能撑爆 authenticated 角色 8s `statement_timeout`。`is_org_member` 查过是 `stable`（不是逐行求值，排除嫌疑）。
+
+**影响（不崩，所以静默）**：`fetchMessageDirections`（`useCrmData.ts`）把 500 catch 成空 map → 两层退化：① 「我该回」少了 `lastInbound > lastOutbound` 回填信号（"昨天点开过但没回"的老 case 不进桶，0019 当初要解决的 Antoine 案例复发）；② chat-classifier「有历史保护」拿不到 inbound/outbound count → 火热但近期沉默的客户被 stage-sync 又一次自动 negotiating→lost（2026-05-19 Aca/DON/Grant Wang 那批根因）。外加每次失败前都白跑一个 8s 全表扫 × 3 人 × 每 5min，连接线程堆积拖慢**整库其他查询**，不是孤立的。
+
+**修法**（migration `0032_messages_direction_covering_index.sql`，纯 DB，不动扩展代码）：建一个正好覆盖该查询 3 列的索引 `(contact_id, direction, sent_at) WHERE sent_at IS NOT NULL` → 聚合走 **index-only scan**，完全不碰肥 `text` 堆，38k 行窄索引扫描几十毫秒级。`CONCURRENTLY` 不锁表实时建（但不能在事务块里跑，SQL Editor 里单独执行）。配 `vacuum (analyze) public.messages` 清一次 upsert/UPDATE 攒下的死元组膨胀 + 让 planner 立刻用新索引。
+
+**验证**：根因由实测行数（38,625 messages）+ RPC/索引定义审查确认；修复 SQL + migration 文件已写好。⚠️ **建索引这一步要用户在 Supabase SQL Editor 手动跑**（`.env` 只有 PostgREST service_role key，连不了 DDL；`pg` 依赖连的是旧 localhost 库）——跑完后看 Logs 里 500/57014/Thread-killed 几分钟内停止即确认。
+
+**教训**：① 任何"对整表做聚合"的 RPC，被聚合表有大字段（这里是 `text` 正文）时，要给查询建**只含所需列的覆盖索引**让它走 index-only scan，别让顺序扫描读肥行。② migration 不一定要走 `npm run package`——纯 DB 改动（加索引/RPC）不影响扩展 dist，不用重新打包强制升级，直接 SQL Editor 跑 + 提交 migration 文件即可。③ 长期：messages 涨到几十万行后 index-only scan 也会线性变慢，到时改用 trigger 维护 per-contact 汇总表（last_inbound/outbound + counts），RPC 只读 N 行。
+
 ### 还可以做的（不急）
 
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
@@ -838,6 +852,7 @@ WhatsApp 绿色主题：
 - **Realtime + REPLICA IDENTITY FULL 教训**（migration 0025）：默认 REPLICA IDENTITY 只发 PK，但 `vehicle_interests` / `contact_tags` PK 不含 contact_id，前端 reducer 收到 DELETE / UPDATE 事件时无法定位 state 里属于哪个 contact 的归属。**新加 Realtime-订阅表时如果 PK 不含外键归属列，必须 `ALTER TABLE … REPLICA IDENTITY FULL`**。FULL 把整行旧值都写进 WAL，万级以下行数 overhead 可忽略
 - **Realtime filter 不支持 join**：`postgres_changes` filter 只能单列 equality（如 `org_id=eq.<uuid>`），关联表（`vehicle_interests` / `contact_handlers` 等无 org_id 列）只能 listen all-rows，RLS 在服务端确保只下发本 org 可见行。订阅时要清楚 filter 不够细就靠 RLS 兜底
 - **slim select 别 select \***：1700 contacts 一次拉全场景下，`select('*')` 每行多 KB（含 notes / google_* / created_at 这些大字段），egress 翻几倍。`CONTACT_LIST_COLS` 只 11 列够列表 / 撞单 / autoStage 用；详情卡（notes 等）走 useContact 单查。**加新列到 list 渲染前问自己：能不能单查？**
+- **对整表聚合的 RPC 要建覆盖索引，否则随表增长必超时**（2026-06-11 修，migration 0032）：`last_message_direction_per_contact` 对整张 `messages`（38k 行 + 大 `text` 字段）做 group-by 聚合，原 `(contact_id, sent_at desc)` 索引不含 `direction` → 顺序扫描读全部肥行 → 8s `statement_timeout` 掐断（57014）+ PostgREST `Thread killed by timeout manager` + RPC 500。客户端 `fetchMessageDirections` 把 500 catch 成空 map → 「我该回」回填 + chat-classifier「lost 保护」**静默失效**（不崩，销售只觉得分类不准）。修法：建只含查询所需列的覆盖索引 `(contact_id, direction, sent_at) WHERE sent_at IS NOT NULL` 走 index-only scan，不碰 `text` 堆。**任何新写"对整表聚合"的 RPC**（count/max/group-by 全表）都要：① 给查询建覆盖索引；② 警惕被聚合表有大字段时顺序扫描读肥行；③ 表会持续增长的话，到几十万行就改 trigger 维护汇总表，别再全表扫
 - **`.in('id', [...])` URL 长度炸弹依然有效**（前文 2026-05-08 已记）。Realtime 改造后已经全部换 `contact_handlers!inner(user_id)` 服务端 join 路径
 - **AI source attribution 是启发式不是真理**（`lib/ai-reply-attribution.ts`）：5 分钟窗口 + 60% 公共前缀阈值。销售改太多字（前缀 60% 不命中）→ 归 null；fill 后超 5 分钟才发 → 归 null。这些都是预期行为不是 bug。`messages.ai_source = null` ≠ "manual"，应理解为"未归因"
 - **GPT 不喂 reference data 是有意为之**（`gpt-prompt.ts`）：GPT-5 Thinking 自己联网查 + 推理报价效果更好，prompt 不要塞车型库 / Ghana playbook 等 reference。Claude 那边保留（Claude 默认不联网）。修改 prompt 时不要"对齐两个 AI"
