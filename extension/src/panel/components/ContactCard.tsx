@@ -139,6 +139,8 @@ export function ContactCard({ chat, orgId }: Props) {
           <MessagesHistorySection
             contactId={contact.id}
             contactName={contact.name || contact.wa_name || contact.phone || '群聊'}
+            contactPhone={contact.phone}
+            contactWaName={contact.wa_name}
           />
           <TimelineSection contactId={contact.id} />
         </>

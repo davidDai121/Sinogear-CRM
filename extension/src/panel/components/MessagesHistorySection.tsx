@@ -6,14 +6,23 @@ interface Props {
   contactId: string;
   contactName: string;
   needsJump?: boolean;
+  /** 给 useMessageSync 做 header 校验用，防 cross-contamination */
+  contactPhone?: string | null;
+  contactWaName?: string | null;
 }
 
 export function MessagesHistorySection({
   contactId,
   contactName,
   needsJump,
+  contactPhone,
+  contactWaName,
 }: Props) {
-  const sync = useMessageSync(contactId, needsJump);
+  const sync = useMessageSync(contactId, needsJump, {
+    phone: contactPhone,
+    name: contactName,
+    waName: contactWaName,
+  });
   const [showModal, setShowModal] = useState(false);
 
   return (
