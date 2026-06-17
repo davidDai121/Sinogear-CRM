@@ -647,6 +647,10 @@ async function waitForResponse(
       const stopBtn = document.querySelector(
         'button[data-testid="stop-button"], button[aria-label*="Stop streaming" i], button[aria-label*="Stop generating" i], button[aria-label*="Stop response" i], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
       );
+      // 在最后一条 assistant 消息附近找 copy 按钮（出现 = 该消息写完）
+      const copyBtn = document.querySelector(
+        'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy" i], button[aria-label*="复制" i]',
+      );
 
       // 提取最后一条 assistant 消息文本，跳过 thinking/reasoning 折叠面板
       const turnSelectors = [
@@ -656,14 +660,12 @@ async function waitForResponse(
         'div.prose',
       ];
       let content = '';
-      let lastTurn: HTMLElement | null = null;
       for (const sel of turnSelectors) {
         const els = Array.from(
           document.querySelectorAll(sel),
         ) as HTMLElement[];
         if (els.length === 0) continue;
         const last = els[els.length - 1];
-        lastTurn = last;
 
         // 克隆 + 移除 thinking 区块和按钮工具栏，只保留正文
         const clone = last.cloneNode(true) as HTMLElement;
@@ -679,15 +681,6 @@ async function waitForResponse(
         }
       }
 
-      // Copy 按钮**必须**限在最后一条 assistant turn 内部找——之前用全局
-      // querySelector 会找到历史消息的 Copy 按钮，导致 fallback 路径误判完成
-      let copyBtn: Element | null = null;
-      if (lastTurn) {
-        copyBtn = lastTurn.querySelector(
-          'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy" i], button[aria-label*="复制" i]',
-        );
-      }
-
       return {
         generating: !!stopBtn,
         hasCopyBtn: !!copyBtn,
@@ -698,66 +691,50 @@ async function waitForResponse(
     if (state.generating) sawGenerating = true;
 
     // 主路径：曾看到 Stop + 现在消失 → 候选完成。
-    // 阈值 100 字符 + 必须有 Copy 按钮（限定在 lastTurn 内）才进 final check：
-    //   GPT-5 Thinking "思考完→开始回复" 之间会短暂藏 Stop，content 可能只
-    //   有几十字符的 [Client Record] 前导，没 Copy 按钮 → 这条 if 不进 →
-    //   继续 loop 等真正完成。
-    if (
-      sawGenerating &&
-      !state.generating &&
-      state.content.length > 100 &&
-      state.hasCopyBtn
-    ) {
-      await sleep(3500);
-      const final = await execute<{
-        generating: boolean;
-        hasCopyBtn: boolean;
-        content: string;
-      }>(tabId, () => {
-        const stopBtn = document.querySelector(
-          'button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
-        );
-        const turnSelectors = [
-          '[data-message-author-role="assistant"]',
-          '[data-testid^="conversation-turn-"]',
-          '.markdown.prose',
-          'div.prose',
-        ];
-        let content = '';
-        let lastTurn: HTMLElement | null = null;
-        for (const sel of turnSelectors) {
-          const els = Array.from(
-            document.querySelectorAll(sel),
-          ) as HTMLElement[];
-          if (els.length === 0) continue;
-          const last = els[els.length - 1];
-          lastTurn = last;
-          const clone = last.cloneNode(true) as HTMLElement;
-          clone
-            .querySelectorAll(
-              '[data-testid*="thinking" i], [aria-label*="Thinking" i], [aria-label*="Reasoning" i], button, [role="toolbar"]',
-            )
-            .forEach((el) => el.remove());
-          const t = (clone.innerText ?? clone.textContent ?? '').trim();
-          if (t) {
-            content = t;
-            break;
-          }
-        }
-        let copyBtn: Element | null = null;
-        if (lastTurn) {
-          copyBtn = lastTurn.querySelector(
-            'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy" i], button[aria-label*="复制" i]',
+    //
+    // 阈值 100 字符（之前 30 太低）：GPT-5 Thinking "思考完→开始回复" 之间
+    // 短暂藏 Stop 按钮时，content 可能只有几十字符的 [Client Record] 前导
+    // (40-80 chars)，超 30 阈值就误判完成；提到 100 把这类 race 挡掉，
+    // 真实完整回复几乎都是 500+ chars，门槛绝不会卡住。
+    if (sawGenerating && !state.generating && state.content.length > 100) {
+      // sleep 4s（之前 2.5s）：给 Thinking→Reply 的过渡期足够时间让 Stop
+      // 按钮重新出现，避开把过渡期当完成的 race
+      await sleep(4000);
+      const final = await execute<{ generating: boolean; content: string }>(
+        tabId,
+        () => {
+          const stopBtn = document.querySelector(
+            'button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
           );
-        }
-        return { generating: !!stopBtn, hasCopyBtn: !!copyBtn, content };
-      });
-      // final check：仍无 Stop + 有 Copy + content 没缩水 = 真完成
-      if (
-        !final.generating &&
-        final.hasCopyBtn &&
-        final.content.length >= state.content.length
-      ) {
+          const turnSelectors = [
+            '[data-message-author-role="assistant"]',
+            '[data-testid^="conversation-turn-"]',
+            '.markdown.prose',
+            'div.prose',
+          ];
+          let content = '';
+          for (const sel of turnSelectors) {
+            const els = Array.from(
+              document.querySelectorAll(sel),
+            ) as HTMLElement[];
+            if (els.length === 0) continue;
+            const last = els[els.length - 1];
+            const clone = last.cloneNode(true) as HTMLElement;
+            clone
+              .querySelectorAll(
+                '[data-testid*="thinking" i], [aria-label*="Thinking" i], [aria-label*="Reasoning" i], button, [role="toolbar"]',
+              )
+              .forEach((el) => el.remove());
+            const t = (clone.innerText ?? clone.textContent ?? '').trim();
+            if (t) {
+              content = t;
+              break;
+            }
+          }
+          return { generating: !!stopBtn, content };
+        },
+      );
+      if (!final.generating && final.content.length >= state.content.length) {
         return final.content;
       }
       lastContent = final.content;
