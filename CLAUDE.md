@@ -780,6 +780,22 @@ npm run package
 
 **教训**：① 任何"对整表做聚合"的 RPC，被聚合表有大字段（这里是 `text` 正文）时，要给查询建**只含所需列的覆盖索引**让它走 index-only scan，别让顺序扫描读肥行。② migration 不一定要走 `npm run package`——纯 DB 改动（加索引/RPC）不影响扩展 dist，不用重新打包强制升级，直接 SQL Editor 跑 + 提交 migration 文件即可。③ 长期：messages 涨到几十万行后 index-only scan 也会线性变慢，到时改用 trigger 维护 per-contact 汇总表（last_inbound/outbound + counts），RPC 只读 N 行。
 
+### 近期补完（2026-06-18）— 引用回复读成"被引用原话" + 删除消息当成附件
+
+**起点**：用户看 GPT 给 D'AFRIC 客户（Benin，法语，租车行）的 prompt，报"喂给 AI 的内容不对、全是法语看不懂"。深挖出两个独立的 DOM 解析 bug，都把垃圾喂给三个 AI（Gem/Claude/GPT 共用 `readChatMessages`）：(1) 客户的引用回复被读成"被引用的原话"；(2) 删除消息被当成附件。
+
+**根因（Chrome MCP 实测 live DOM，不靠猜）**：
+- **引用回复**：客户"回复"某条消息时，WA Web 把被引用的原消息塞进 `[data-testid="quoted-message"]` 预览框，跟真回复同在一个 bubble。实测 D'AFRIC 那条结构：外层 `.copyable-text[data-pre-plain-text="[3:11 PM,...] +229...:"]` 包住「引用原话(第 1 个 selectable-text) + 真回复(第 2 个 selectable-text)」。`getMessageText` 的 `realWrap.querySelector('.selectable-text')` 命中**第一个 = 引用原话** → 把销售自己之前发的话当成客户消息，真回复"Je préfères... une représentation ici a cotonou ?"（客户唯一明确的问题——科托努有没有代表处）整条丢失。AI 据此瞎答，还在策略里写"客户复制了我的消息"。引用回复在销售场景极常见 → 静默污染大量对话。
+- **删除消息**：`copyables: []`——"你已删除这条消息"是不可复制系统占位，不在 `.copyable-text` 里 → `getMessageText` 返回空 → 走 `detectMediaKind` → 没图/视频/文档就兜底 `[媒体]` → `collapseMediaRuns` 合并成 "sent N media items" 发给 AI。`isDeletedPlaceholderText` 跑在最后，但那时 text 已是 `[媒体]`，删除判定永远不触发。实测删除气泡带 `[data-icon="recalled"]` 撤回图标。
+
+**修法**（`content/whatsapp-messages.ts`）：
+- `getMessageText`：读文本前先把 `[data-testid="quoted-message"]` 子树整个剥掉（clone + remove），剩下的就只有真回复。剥完后所有原有路径（realWrap→selectable-text / longest / copyable 兜底）自然只读到真回复，跟 `.selectable-text` class 在不在都不影响。
+- `readChatMessages`：`getMessageText` 返回空时，走 `detectMediaKind` **之前**先判删除——`[data-icon="recalled"]`（语言无关最稳）或整气泡文字（`readStrippingInjections(el)` + `stripTrailingMeta`）命中删除占位 → 标 `[已删除]`，绝不当媒体。
+
+**验证（Chrome MCP live DOM）**：用户在 D'AFRIC 标签页 console 跑新逻辑——`引用回复_AI现在看到` = "Je préfères cette option, mais dite moi aviez vous une représentation ici a cotonou ?"（真回复）；`删除消息_AI现在看到` = "[已删除]"。两条都对。typecheck + build 通过。
+
+**教训**：① WA Web 引用回复的被引用原话在 `[data-testid="quoted-message"]` 里，任何读 bubble 文本的逻辑都要先剥它，否则读到的是"被引用的旧消息"（常是销售自己的话）而非真回复——这是 `findDataId` / FB ad-pair 之后**第 N 次** WA Web 多文本块结构坑。② 删除/撤回消息不在 `.copyable-text` 里（copyables 为空），带 `[data-icon="recalled"]`——空文本 bubble 走媒体探测前必须先判删除，否则被当附件。③ 任何"空文本 → 当媒体"的兜底前，都要先排除「删除占位 / 引用框被剥光后的空壳」等非媒体空文本。
+
 ### 还可以做的（不急）
 
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
@@ -813,6 +829,8 @@ WhatsApp 绿色主题：
 - **WA Web 给 FB ad-reply pair 复用 data-id**（2026-05-27 修，`findDataId`）：销售那条 FB ad reply card (outbound) + 客户对 ad 的第一条 reply (inbound) **各自有独立的 conv-msg- wrapper**（兄弟节点不嵌套），但 **data-id 完全相同**。`closest('[data-testid^="conv-msg-"]')` 两条 bubble 拿到各自不同 wrapper element 但 data-id 一样 → `seen.has(id)` 把客户 inbound 当 dup 跳过 → AI 永远不知道客户对 ad 说了什么车。修法：`findDataId` 检测同 data-id 是否被 ≥ 2 个 conv-msg- wrapper 共享（`document.querySelectorAll('[data-testid^="conv-msg-"][data-id="..."]')`），是的话加 `::out` / `::in` 方向后缀（FB pair 必然一外一内）。单 wrapper 保留原 id 不带后缀（兼容历史 DB 数据，~99.5% 消息 id 不变）。**Lead-from-FB-ad 的客户每次踩这个 bug 第一句话就丢**，而那通常是客户唯一明确说出"想买什么车"的话，AI 全瞎猜
 - **WA Web 已放弃 `.selectable-text` class**（2026-05-27 修，`getMessageText`）：新版 bubble 文本直接挂在 `.copyable-text` 自身的 textContent / innerText 上，不再有 `.selectable-text` 子层。原来 `getMessageText` 的 3 条 fallback 全部依赖 `.selectable-text` 找最长 → 全返回空 → 走"任意 `.copyable-text`"兜底拿到第一个（FB 卡片的"Facebook 广告"4 字 header）→ 正文丢。修法：新增"挑最长 `.copyable-text` 自身 textContent"分支，放在 `.copyable-text .selectable-text` 之后兜底
 - **WA Web 已删 `.message-in` / `.message-out` class**（2026-06-08 修，实测 `querySelectorAll` 返回 0）：消息级元素只剩 `[data-testid^="conv-msg-"]` wrapper（class 混淆无语义方向）。任何"扫消息气泡"的代码（`auto-translate.ts` / `readChatMessages`）一律走 `getBubbles()` → `[data-testid^="conv-msg-"]`，旧 class 仅做兼容兜底。**这块坏会同时干掉翻译（找不到气泡 → 开关开着也不翻）+ AI 消息读取**，两者同一套 DOM 依赖，改一个记得另一个也过一遍
+- **引用回复要先剥 `[data-testid="quoted-message"]`**（2026-06-18 修，`getMessageText`）：客户/销售"回复"某条消息时，被引用的原话塞在 `[data-testid="quoted-message"]` 预览框里，跟真回复同在一个 bubble。实测结构：外层 `.copyable-text[data-pre-plain-text]` 包住「引用原话(第 1 个 selectable-text) + 真回复(第 2 个)」。旧 `realWrap.querySelector('.selectable-text')` 命中**第一个 = 引用原话** → 把销售自己之前发的话当成客户消息发给 AI，**真回复整条丢失**（客户唯一明确的问题——如"科托努有没有代表处"——AI 永远看不到）。修法：`getMessageText` 开头 clone scope 后 remove `[data-testid="quoted-message"]` 再读。**Lead-from-引用 的客户极常见，这块坏 = AI 静默瞎答**。任何读 bubble 文本的逻辑都要先剥引用框
+- **删除/撤回消息不在 `.copyable-text` 里，空文本走媒体探测前先判删除**（2026-06-18 修，`readChatMessages`）：实测删除气泡 `copyables: []`、带 `[data-icon="recalled"]` 撤回图标。"你已删除这条消息"是不可复制系统占位 → `getMessageText` 返回空 → 旧逻辑直接 `detectMediaKind` → 兜底 `[媒体]` → `collapseMediaRuns` 当附件发给 AI（"客户发了 N 个附件"）。`isDeletedPlaceholderText` 跑在最后但 text 已被改成 `[媒体]`，永不触发。修法：空文本时走 `detectMediaKind` **之前**先判 `[data-icon="recalled"]`（语言无关最稳）或整气泡删除占位文字 → 标 `[已删除]`。**任何"空文本 bubble → 当媒体"的兜底，前面都要先排除删除占位 / 引用框剥光后的空壳**
 - **判消息方向别只看 class**（2026-06-08 修，`isOutboundBubble`）：`.message-out` class 没了，`el.classList.contains('message-out')` 永远 false → **所有消息当成入站**（"我发的图被识别成客户发的"）。多信号判定：① 旧 class ② `[data-icon="tail-out"]`/`tail-in`（每段连续消息只有第一条带尾巴）③ 送达状态 `[aria-label*="已读/送达/已发送/待发送"]`（出站独有）④ 几何兜底量 `.copyable-text` 或最大 img/video。**图片气泡没有 `.copyable-text`，几何绝不能量满宽的 conv-msg wrapper**（center≈panelCenter，出站图永远判不出靠右）—— 要量 img 本身
 - **`syncMessages` 是 `ignoreDuplicates:true`，方向写错后要专门自愈**（2026-06-08，`fixDirectionMismatch`）：老错行（早期 build 把出站全写成 inbound）重新 sync 不会被 upsert 更新 → 永久卡住。修了方向判定后还要加批量 UPDATE（出站一批/入站一批 + `.neq` 只动方向不符的行），用户重开聊天时纠回。注意 `messages` 的 Update 类型本来没列 `direction`（当不可变），自愈要在 `database.types.ts` 补 `direction?`。**改了 DOM 解析逻辑后，光改解析不够，DB 里旧错行也要想办法自愈**
 - **Gemini 选模型**（2026-06-08，`lib/gem-models.ts`）：默认 3.5 Flash（比 Pro 快很多），AI 回复区下拉可切 Pro / Flash-Lite，存 chrome.storage `gemModel`，手动 + 自动回复共用。`selectModel` 按 prefer 命中 + avoid 排除选指定模型（avoid 用来区分 Flash vs Flash-Lite）；用关键词不写死版本号，Gemini 升版本（3.5→3.6）不坏。改 Gem 模型逻辑别再写死强制 Pro

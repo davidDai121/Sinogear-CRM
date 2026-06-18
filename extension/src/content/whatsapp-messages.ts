@@ -74,6 +74,25 @@ function stripTrailingMeta(text: string): string {
 }
 
 function getMessageText(scope: Element): string {
+  // ⚠️ 引用回复（客户/销售"回复"某条消息）：WA Web 把被引用的原消息塞进
+  // [data-testid="quoted-message"] 预览框，跟真正的回复正文同在一个 bubble 里。
+  // 2026-06 实测 D'AFRIC 客户引用回复的真实结构：
+  //   msg-container
+  //     .copyable-text[data-pre-plain-text="[3:11 PM,...] +229...:"]  ← 外层 wrapper（含本条真实 meta）
+  //       [data-testid="quoted-message"] → 第 1 个 .selectable-text   ← 被引用的原话（常是销售自己之前发的）
+  //       [data-testid="selectable-text"]                              ← 真正的回复正文（第 2 个）
+  // 旧逻辑 querySelector('.copyable-text[data-pre-plain-text]') + 其内第一个 .selectable-text
+  // 命中的是引用框里的原话 → 把销售自己的话当成客户消息发给 AI，真回复（如"科托努有没有
+  // 代表处"）整条丢失。修法：读之前先把 quoted-message 子树整个剥掉，剩下的就只有真回复。
+  let work: Element = scope;
+  if (scope.querySelector('[data-testid="quoted-message"]')) {
+    const clone = scope.cloneNode(true) as HTMLElement;
+    clone
+      .querySelectorAll('[data-testid="quoted-message"]')
+      .forEach((n) => n.remove());
+    work = clone;
+  }
+
   // 优先抓真正的消息体（有 data-pre-plain-text 属性的 .copyable-text 才是消息正文 wrapper）。
   // 不带 data-pre-plain-text 的 .copyable-text 是引用气泡 / Facebook 广告 header 卡片
   // ("Facebook 广告" / "查看详情") — 直接抓第一个 .copyable-text 会拿到 header，把正文
@@ -82,7 +101,7 @@ function getMessageText(scope: Element): string {
   // ⚠️ 新版 WA Web (2026-05+) 已经放弃 `.selectable-text` class —— 所有依赖 `.selectable-text`
   // 的路径都返回空。现在 bubble 文本直接挂在 `.copyable-text` 自身的 textContent / innerText 上。
   // 改成：先试 .selectable-text（向后兼容老 WA Web），不行再退到 .copyable-text 整段读。
-  const realWrap = scope.querySelector(
+  const realWrap = work.querySelector(
     '.copyable-text[data-pre-plain-text]',
   ) as HTMLElement | null;
   if (realWrap) {
@@ -98,7 +117,7 @@ function getMessageText(scope: Element): string {
   // FB 广告气泡 / 引用回复等多 .copyable-text 的场景：data-pre-plain-text 缺失时，
   // 挑文本最长的 — header 短（"Facebook 广告" 4 字），正文长，取最长不会错。
   // 先在 .selectable-text 里找（老 WA Web），找不到退到 .copyable-text 自身。
-  const allSelectables = scope.querySelectorAll<HTMLElement>(
+  const allSelectables = work.querySelectorAll<HTMLElement>(
     '.copyable-text .selectable-text',
   );
   let longest = '';
@@ -109,20 +128,20 @@ function getMessageText(scope: Element): string {
   if (longest) return longest;
 
   // 新 WA Web：.copyable-text 自身就是文本节点（无 .selectable-text 子层），挑最长
-  const allCopyables = scope.querySelectorAll<HTMLElement>('.copyable-text');
+  const allCopyables = work.querySelectorAll<HTMLElement>('.copyable-text');
   for (const el of allCopyables) {
     const text = readStrippingInjections(el);
     if (text.length > longest.length) longest = text;
   }
   if (longest) return longest;
 
-  const fallback = scope.querySelector('.selectable-text') as HTMLElement | null;
+  const fallback = work.querySelector('.selectable-text') as HTMLElement | null;
   if (fallback) {
     const text = readStrippingInjections(fallback);
     if (text) return text;
   }
 
-  const anyCopyable = scope.querySelector('.copyable-text') as HTMLElement | null;
+  const anyCopyable = work.querySelector('.copyable-text') as HTMLElement | null;
   return anyCopyable ? readStrippingInjections(anyCopyable) : '';
 }
 
@@ -581,7 +600,23 @@ export function readChatMessages(limit = 30): ChatMessage[] {
     if (!id || seen.has(id)) continue;
 
     let text = getMessageText(el);
-    if (!text) text = detectMediaKind(el);
+    if (!text) {
+      // ⚠️ 删除/撤回消息（"你已删除这条消息" / "This message was deleted"）是不可复制的
+      // 系统占位，不在 .copyable-text 里 → getMessageText 返回空。旧逻辑直接走
+      // detectMediaKind → 没有图/视频/文档就兜底成 '[媒体]' → collapseMediaRuns 当附件
+      // 合并成 "sent N media items" 发给 AI（删除消息被当成"客户发了附件"）。
+      // 2026-06 实测删除气泡带 [data-icon="recalled"] 撤回图标、copyables 为空。
+      // 修法：走媒体探测之前先判删除——recalled 图标（语言无关，最稳）或整气泡文字
+      // 命中删除占位 → 标 [已删除]，绝不当媒体。
+      const recalled = el.querySelector('[data-icon="recalled"]');
+      const fullText = stripTrailingMeta(
+        readStrippingInjections(el as HTMLElement),
+      );
+      text =
+        recalled || isDeletedPlaceholderText(fullText)
+          ? DELETED_TEXT_MARKER
+          : detectMediaKind(el);
+    }
     // 剥末尾的 WA Web bubble meta（"下午2:32" / "已编辑" 等），避免跟前面结构化
     // [MM-DD HH:MM] 重复 + 矛盾。先剥再判删除占位（防 "你已删除这条消息中午11:31"
     // 因尾巴匹配不上而失败）
