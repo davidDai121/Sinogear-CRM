@@ -71,8 +71,21 @@ function cleanText(el: HTMLElement): string {
 }
 
 function readBubbleText(bubble: Element): string {
+  // ⚠️ 引用回复：被引用的原话在 [data-testid="quoted-message"] 预览框里，跟真回复同
+  // bubble。不剥掉的话，下面 querySelector('.selectable-text') / 取最长 会命中引用框里
+  // 的原话（常是销售自己之前发的消息），翻译出来的是"被引用的旧消息"而不是客户真回复
+  // （如客户问"科托努有没有代表处"被译成那条旧跟进消息）。跟 whatsapp-messages.ts
+  // getMessageText 同源 bug（2026-06-18），两处都要剥——翻译和读消息是两套独立 DOM 逻辑。
+  let scope: ParentNode = bubble;
+  if (bubble.querySelector('[data-testid="quoted-message"]')) {
+    const clone = bubble.cloneNode(true) as HTMLElement;
+    clone
+      .querySelectorAll('[data-testid="quoted-message"]')
+      .forEach((n) => n.remove());
+    scope = clone;
+  }
   // 优先：带 data-pre-plain-text 的 .copyable-text（真正的消息正文 wrapper）
-  const realWrap = bubble.querySelector('.copyable-text[data-pre-plain-text]');
+  const realWrap = scope.querySelector('.copyable-text[data-pre-plain-text]');
   if (realWrap instanceof HTMLElement) {
     const sel = realWrap.querySelector('.selectable-text');
     if (sel instanceof HTMLElement) {
@@ -85,7 +98,7 @@ function readBubbleText(bubble: Element): string {
   // ⚠️ 新版 WA Web 已弃用 `.selectable-text`，正文直接挂在 `.copyable-text` 自身。
   // 一个 wrapper 可能有多个 .copyable-text（引用气泡 / FB 广告 header），挑最长的当正文。
   let longest = '';
-  bubble.querySelectorAll('.copyable-text').forEach((el) => {
+  scope.querySelectorAll('.copyable-text').forEach((el) => {
     if (el instanceof HTMLElement) {
       const t = cleanText(el);
       if (t.length > longest.length) longest = t;
@@ -93,7 +106,7 @@ function readBubbleText(bubble: Element): string {
   });
   if (longest) return longest;
   // 兜底：老结构 .selectable-text
-  const sel = bubble.querySelector('.selectable-text');
+  const sel = scope.querySelector('.selectable-text');
   if (sel instanceof HTMLElement) return cleanText(sel);
   return '';
 }
