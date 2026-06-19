@@ -22,7 +22,7 @@
  */
 
 import { supabase } from '@/lib/supabase';
-import { jumpToChat } from '@/lib/jump-to-chat';
+import { jumpToChat, verifyHeaderMatches } from '@/lib/jump-to-chat';
 import {
   fillWhatsAppCompose,
   pasteFilesToWhatsApp,
@@ -126,7 +126,17 @@ async function executeAutoReply(contactId: string): Promise<void> {
 
     // 1. jumpToChat
     const query = contact.phone.replace(/^\+/, '');
-    const jumped = await jumpToChat(query, { allowDeepLink: true });
+    // 严格身份校验对象 —— 本函数所有 jump + 发送前校验复用，确保自动化全程锁定在
+    // 目标客户身上（无人值守路径，跳错 / 发错都是直接污染或发给错的真实客户）。
+    const requireMatch = {
+      phone: contact.phone,
+      name: contact.name,
+      waName: contact.wa_name,
+    };
+    const jumped = await jumpToChat(query, {
+      allowDeepLink: true,
+      requireMatch,
+    });
     if (!jumped) {
       throw new Error(`无法跳转到聊天 ${contact.phone}（号码可能未注册 WA）`);
     }
@@ -193,10 +203,19 @@ async function executeAutoReply(contactId: string): Promise<void> {
     }
 
     // Gem tab 关掉后焦点回 WA，但用户可能在等的过程切聊天了——保险起见再跳一次
-    await jumpToChat(query, { allowDeepLink: false });
+    await jumpToChat(query, { allowDeepLink: false, requireMatch });
     await sleep(800);
 
     if (await wasCancelled(contactId)) return;
+
+    // P0 防发错人：这是无人值守自动发，当前聊天必须确实是目标客户才发。WA 在等 Gem 的
+    // ~2min 里可能被切到别的聊天 / 上面那次 jump 没成功切回 —— 不校验就会把这条 AI 回复
+    // 直接发给另一个真实客户（系统最坏的失败）。不匹配立即中止，宁可不发也不发错。
+    if (!verifyHeaderMatches(requireMatch)) {
+      throw new Error(
+        '发送前校验失败：当前 WhatsApp 聊天不是目标客户，已中止自动发送（防发错人）',
+      );
+    }
 
     // 5. 发送：首轮 + 有车 → 两步发（图 → 文字）
     //    续聊 + 客户问图 + 有车 → 也发图
@@ -426,9 +445,27 @@ async function buildPrompt(
   let messages: ChatMessage[] = await waitForChatMessages(5000, 30, 1).catch(
     () => readChatMessages(30),
   );
-  if (messages.length > 0) {
+  // P0 防跨聊天污染：无人值守路径，写错的 wa_message_id 因 (contact_id, wa_message_id)
+  // UNIQUE 约束永久存在，且会让 AI 基于别人的对话生成回复。syncMessages / 使用 DOM 消息
+  // 前，严格校验当前打开的 chat header 确实是这个 contact —— 不匹配就丢弃 DOM 消息，只用
+  // DB 历史 / leadText（手动回复三件套早有这道校验，唯独自动回复一直漏了）。
+  const onRightChat = verifyHeaderMatches({
+    phone: contact.phone,
+    name: contact.name,
+    waName: contact.wa_name,
+  });
+  if (messages.length > 0 && onRightChat) {
     void syncMessages(contact.id, messages);
     messages = await mergeDomWithDbMessages(messages, contact.id, 50);
+  } else {
+    if (!onRightChat && messages.length > 0) {
+      console.warn(
+        '[auto-reply] 当前聊天 header 与目标客户不匹配，放弃 DOM 消息改用 DB 历史',
+        contact.id,
+      );
+    }
+    // 退回纯 DB 历史（聊天没切对时绝不碰 DOM）；DB 也空则下面 leadText 兜底
+    messages = await mergeDomWithDbMessages([], contact.id, 50);
   }
 
   // DOM 读不到时兜底用 state.leadText

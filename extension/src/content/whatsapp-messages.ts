@@ -204,7 +204,7 @@ function isOutboundBubble(el: Element, panelCenter?: number): boolean {
   return false;
 }
 
-function findDataId(el: Element): string | null {
+function findDataId(el: Element, panelCenter?: number): string | null {
   // 优先：用 [data-testid^="conv-msg-"] 这个 message-group 标记的 closest()，不限层数。
   // 新版 WA Web (2026-05+) 把 data-id 挪到了 .message-in/out 的 3 层祖父之上的 wrapper。
   //
@@ -230,7 +230,11 @@ function findDataId(el: Element): string | null {
       `[data-testid^="conv-msg-"][data-id="${CSS.escape(wrapId)}"]`,
     );
     if (allSameId.length <= 1) return wrapId;
-    const dir = isOutboundBubble(el) ? 'out' : 'in';
+    // ⚠️ 必须把 panelCenter 透传进来：FB ad-reply pair 的纯媒体 bubble 没有 class /
+    // tail / 送达状态信号，isOutboundBubble 不给 panelCenter 时几何兜底被关掉 → 一外
+    // 一内的两条 bubble 都默认判 in → 都拿到 ::in 后缀 → wa_message_id 撞车互相覆盖，
+    // 客户对广告说的第一句话（通常正是"我要哪款车"）整条丢失。
+    const dir = isOutboundBubble(el, panelCenter) ? 'out' : 'in';
     return `${wrapId}::${dir}`;
   }
 
@@ -545,6 +549,21 @@ export function readChatMessages(limit = 30): ChatMessage[] {
     }
   }
 
+  // 自检：聊天确实打开了（main 在 → 上面已 return），但消息选择器一个 bubble 都没
+  // 命中，而面板里却有 [data-id] / [role=row] 这类行元素 —— 强烈暗示 WA Web 又改了
+  // DOM 把消息选择器整坏了（"读不到消息"，不是"没消息"）。这正是"客户 inbound 静默
+  // 消失、销售毫无察觉"的灾难模式。打到 console（throttled 5s）让 boss 能截图发我诊断。
+  if (bubbles.length === 0) {
+    const looksNonEmpty =
+      panel.querySelectorAll('[data-id]').length > 0 ||
+      panel.querySelectorAll('[role="row"]').length > 0;
+    if (looksNonEmpty) {
+      maybeLogReadFailure(
+        'readChatMessages: 有行元素但 0 bubble 命中（消息选择器疑似失效）',
+      );
+    }
+  }
+
   // Date header span：dir="auto" + 文本长度短 + 匹配日期格式
   const today = new Date();
   const dateHeaders = Array.from(
@@ -596,7 +615,7 @@ export function readChatMessages(limit = 30): ChatMessage[] {
     }
     if (isNested) continue;
 
-    const id = findDataId(el);
+    const id = findDataId(el, panelCenter);
     if (!id || seen.has(id)) continue;
 
     let text = getMessageText(el);

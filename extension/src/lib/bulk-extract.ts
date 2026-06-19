@@ -108,14 +108,29 @@ async function markExtracted(contactId: string, applied: SuggestedField[]) {
 }
 
 export async function findExtractTargets(orgId: string): Promise<ContactRow[]> {
-  const { data, error } = await supabase
-    .from('contacts')
-    .select('*')
-    .eq('org_id', orgId);
-  if (error) throw new Error(stringifyError(error));
+  // ⚠️ 1000 行陷阱：PostgREST 单次 select 默认上限 1000 行，超了静默截断。这个 org
+  // 已 1700+ 客户，不分页会让 >1000 的那部分永远不进批量抽取（销售看到"抽取完成"，
+  // 实际有一半客户从没被处理 —— 而这正是 AI 回复质量所依赖的数据）。分页拉全集，写法
+  // 跟 loadAllMessages / useCrmData 一致。.order 必须加：PostgREST 不保证 range 跨页稳定。
+  const PAGE = 1000;
+  const all: ContactRow[] = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('contacts')
+      .select('*')
+      .eq('org_id', orgId)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(stringifyError(error));
+    const rows = (data ?? []) as ContactRow[];
+    all.push(...rows);
+    if (rows.length < PAGE) break;
+    from += PAGE;
+  }
 
   const targets: ContactRow[] = [];
-  for (const c of (data ?? []) as ContactRow[]) {
+  for (const c of all) {
     const alreadyExtracted = await isAlreadyExtracted(c.id);
     if (alreadyExtracted) continue;
     const allFilled =

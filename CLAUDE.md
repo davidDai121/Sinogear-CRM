@@ -797,8 +797,29 @@ npm run package
 
 **教训**：① WA Web 引用回复的被引用原话在 `[data-testid="quoted-message"]` 里，任何读 bubble 文本的逻辑都要先剥它，否则读到的是"被引用的旧消息"（常是销售自己的话）而非真回复——这是 `findDataId` / FB ad-pair 之后**第 N 次** WA Web 多文本块结构坑。**读正文有两处独立路径：`getMessageText`（喂 AI）+ `auto-translate.ts readBubbleText`（消息气泡翻译），改一个必须同步改另一个**（CLAUDE.md 早有"翻译跟 readChatMessages 同源"警告，这次还是先漏了翻译那处，被用户抓到）。② 删除/撤回消息不在 `.copyable-text` 里（copyables 为空），带 `[data-icon="recalled"]`——空文本 bubble 走媒体探测前必须先判删除，否则被当附件。③ 任何"空文本 → 当媒体"的兜底前，都要先排除「删除占位 / 引用框被剥光后的空壳」等非媒体空文本。
 
+### 近期补完（2026-06-20）— 多代理代码评审：堵 4 个静默数据污染/丢失洞
+
+**起点**：用户问"这个项目逻辑上或代码上有什么问题"。跑了个多代理评审（5 维度并行读真实代码 + 对每条 P0/P1 做对抗性核实），核实出 3 个 confirmed P0 + 若干 P1。用户选了"改，但不增加任何发版/团队工作量"——全部纯扩展代码改动，`npm run package` 流程不变，团队装新 zip 即生效。
+
+**根因 + 修法（4 处，都是核实过的真洞，不是猜）**：
+
+1. **auto-reply 防发错人 + 防跨聊天污染**（P0，`content/auto-reply.ts`）：这条**唯一无人值守**路径有两处裸奔——三个手动 ReplySection + bulk-extract 都有 `verifyHeaderMatches`/`waitForActiveChatPhone` 身份校验，唯独自动回复一直漏了。① `buildPrompt` 里 `syncMessages(contact.id, messages)` 前没校验当前 chat 是不是目标客户 → WA 在等 Gem 的 ~2min 里被切到别的聊天时，会把别人的消息按 `(contact_id, wa_message_id)` UNIQUE **永久**写进这个 contact，且 AI 基于别人对话生成回复。② 发送前（line 196 jump 后）也没校验 → 直接把 AI 回复**发给另一个真实客户**（系统最坏失败）。修法：导入 `verifyHeaderMatches`，定义复用的 `requireMatch={phone,name,waName}`；两处 `jumpToChat` 都传 `requireMatch`；`buildPrompt` 里 `onRightChat` 为 false 时丢弃 DOM 消息、退回纯 DB 历史（`mergeDomWithDbMessages([], id, 50)`），绝不 sync；发送前 `verifyHeaderMatches` 不过就 `throw`（phase=error，banner 报错，宁可不发也不发错）。失败模式安全：正常情况行为不变，只有"聊天没切对"异常分支才介入。
+
+2. **bulk-extract 1000 行陷阱**（P0，`lib/bulk-extract.ts:110` `findExtractTargets`）：`.select('*').eq('org_id', orgId)` 没分页 → PostgREST 静默 1000 行截断。org 已 1700+ 客户，>1000 的那半**永远不进批量抽取**（销售看到"抽取完成"，实际一半客户从没被处理，而这正是 AI 回复质量依赖的数据）。同一陷阱本仓库已害过 3 次。修法：改 PAGE=1000 分页拉全集 + `.order('id')`（PostgREST 不保证 range 跨页稳定），写法对齐 `loadAllMessages`。注：这里的 `syncMessages` 其实已被 `waitForActiveChatPhone`（line 164）挡住污染，所以**只动分页**，不碰 jump 逻辑。
+
+3. **FB 广告配对方向判定漏传 panelCenter**（P1，`content/whatsapp-messages.ts:233` `findDataId`）：`isOutboundBubble(el)` 调用时没传 `panelCenter` → 几何兜底（信号 #4）被关掉。FB ad-reply pair 的纯媒体 bubble 没有 class/tail/送达状态信号 → 一外一内的两条都默认判 `in` → 都拿 `::in` 后缀 → `wa_message_id` 撞车互相覆盖，**客户对广告说的第一句话（通常正是"我要哪款车"）整条丢失**。修法：`findDataId(el, panelCenter?)` 透传，主循环 line 599 调用处把已算好的 `panelCenter` 传进去。
+
+4. **静默失败告警**（P2，`content/whatsapp-messages.ts` `readChatMessages`）：聊天开着（main 在）但 0 条 bubble 解析出来、而面板里有 `[data-id]`/`[role=row]` 行元素 → 选择器疑似被 WA Web 改坏（"读不到消息"不是"没消息"，正是客户 inbound 静默消失的灾难模式）。修法：复用 `maybeLogReadFailure`（throttled 5s）打到 console 让 boss 截图。纯 console，对用户/流程零影响。
+
+**验证**：`npm run typecheck` 0 错 + `npm run build` 通过。逻辑由核实代理对照真实代码确认；auto-reply 的两处 jump 已有 `requireMatch` 基建（jump-to-chat.ts 早支持），FB pair 几何对称、bulk-extract 分页写法均与现有同型代码一致。⚠️ auto-reply 防护要真实 FB lead 才触发，靠装新包后实战观察；DOM 读取回归可用测试号 13552592187 只读验证。
+
+**教训**：① **任何写 `messages` 表的 AI 自动化路径都必须 `verifyHeaderMatches`/`waitForActiveChatPhone` 身份校验** —— 加新自动化路径时对照"三个 ReplySection + bulk-extract 都有、auto-reply 曾漏"这个清单，别漏。无人值守路径尤其要在**发送前**再校验一次（防发错人）。② **`isOutboundBubble` 在任何判方向的地方都要传 `panelCenter`**，否则纯媒体 bubble 几何兜底失效 → FB pair 方向判反 → 消息撞 id 丢失。③ 评审驱动的修复也走完整核实（对抗性 re-read 真实代码），评审代理会夸大（这次驳回了"删除当附件/版本闸门锁死/auto-reply 无限挂起"等几条），别照单全收。
+
 ### 还可以做的（不急）
 
+- [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板
+- [ ] **三个 ReplySection 抽共享模块 + 起测试**（代码评审 P1）：ClaudeReplySection(1440)/GPTReplySection(1035)/GemReplySection(928) 真重复约 450–500 行（消息加载 + 身份校验 + fillReply），三套各打一遍 DOM fix 易漂移。抽成一个**带单测**的工具模块，顺带给 parser（claude/gem-parser）+ prompt 分段边界起第一批测试（全仓库目前零自动化测试）
+- [ ] **`database.types.ts` 改 CI 自动生成**（代码评审 P1）：手维护，enum/列一改就跟真库漂移（`stalled` 那次就是），直接把过时 `customer_stage` 喂给 AI prompt
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
 - [ ] Chrome Web Store 私有发布（$5 + 1-3 天审核 → 全员自动更新，告别 zip 分发）
 - [ ] `ai_reply_logs` 真正入库（目前 chrome.storage.local 单人单机，团队没法 review 别人的 prompt 质量）
@@ -877,6 +898,9 @@ WhatsApp 绿色主题：
 - **GPT 不喂 reference data 是有意为之**（`gpt-prompt.ts`）：GPT-5 Thinking 自己联网查 + 推理报价效果更好，prompt 不要塞车型库 / Ghana playbook 等 reference。Claude 那边保留（Claude 默认不联网）。修改 prompt 时不要"对齐两个 AI"
 - **Claude `[Sales Guidance — TOP PRIORITY]` 段是 override 不是 hint**：销售在 textarea 里写"用阿拉伯语回复 + 强硬一点"，prompt 顶部注入这段，Claude 必须严格执行覆盖默认行为。改 prompt 模板时不要把这段降级成普通指令
 - **自动回复 P0 安全：reply 必须先 `sanitizeReplyForCustomer` 再 paste**（`content/auto-reply.ts`）：自动发=没人 review，Gem 偶尔会把 [INTERNAL] EXW 价或 floor 拼到回复里，泄漏 = 灾难。手动 fillReply 路径可以放过（销售自己看到才发），但 auto-send 路径绝对不能省 sanitize
+- **自动回复 P0：写 DB 前 + 发送前都必须 `verifyHeaderMatches`**（2026-06-20 修，`content/auto-reply.ts`）：这条**唯一无人值守**路径曾两处裸奔——① `buildPrompt` 里 `syncMessages` 前没校验当前 chat 是不是目标客户 → WA 在等 Gem 的 ~2min 里被切到别的聊天时，把别人的消息按 `(contact_id, wa_message_id)` UNIQUE **永久**写进这个 contact，AI 还基于别人对话生成回复；② 发送前（line 196 jump 后）没校验 → 直接把回复**发给另一个真实客户**。修法：两处 `jumpToChat` 传 `requireMatch={phone,name,waName}`；`buildPrompt` 里 `onRightChat` 为 false 时丢 DOM 消息退回纯 DB（`mergeDomWithDbMessages([], id, 50)`）绝不 sync；发送前 `verifyHeaderMatches` 不过就 `throw`（宁可不发也不发错）。**任何新加的写 `messages` 表的 AI 自动化路径都要对照"三个 ReplySection + bulk-extract 都有身份校验、auto-reply 曾漏"这个清单**，无人值守的尤其要在发送前再校验一次
+- **`findExtractTargets` 必须分页（1000 行陷阱第 4 次）**（2026-06-20 修，`lib/bulk-extract.ts:110`）：`.select('*').eq('org_id')` 没分页 → org 1700+ 客户里 >1000 的那半永远不进批量抽取（销售看到"抽取完成"实际半数没处理）。已改 PAGE 分页 + `.order('id')`。又一次印证"任何客户端 `.select('*').eq('org_id', orgId)` 形态、表行数可能 >1000 的查询，必须 fetchAll-pattern 分页"
+- **`isOutboundBubble` 判方向处一律传 `panelCenter`**（2026-06-20 修，`whatsapp-messages.ts:233` `findDataId`）：不传则几何兜底（信号 #4）失效，FB ad-reply pair 的纯媒体 bubble（无 class/tail/送达状态）一外一内都默认判 `in` → 都拿 `::in` 后缀 → `wa_message_id` 撞车互相覆盖，客户对广告的第一句话（往往正是"我要哪款车"）整条丢失。`findDataId` 现接 `panelCenter?` 透传。**新写任何判方向逻辑别忘了把面板中心传进去**
 - **MV3 SW + chrome.alarms 调度自动回复**（`background/service-worker.ts` SCHEDULE_AUTO_REPLY）：用 alarm 不用 setTimeout—— alarm 能唤醒休眠的 SW，setTimeout 跟着 SW 一起死。alarm 触发后找 WA Web tab 发 AUTO_REPLY_FIRE；用户重开 WA 时 `recoverStuckSchedules` 扫一遍 scheduled 状态延误的就立即触发
 - **`ai-reply-log.ts` 改本地存储不上 Supabase**：单人主用，单条 ~10 KB × MAX_ENTRIES=800 ≈ 8MB 在 chrome.storage.local 10MB 配额内。FIFO LRU evict。**团队场景将来要 review 别人的 prompt 质量再考虑入库**——目前 `ai_reply_logs` migration 0021 已建但代码不用
 - **`parsePrePlainText` 必须识别中文时段**（`whatsapp-messages.ts`）：WA Web 中文界面 `data-pre-plain-text="[下午5:18, ...]"` 用中文时段标记（凌晨/清晨/早上/上午/中午/下午/晚上）不是英文 AM/PM。Long-standing bug：之前只匹配 AM/PM → 所有 PM 时间偏 12 小时（"下午5:18" 错成 5:18，相对顺序对所以没被发现）。**任何"看 WA Web 时间字串"的逻辑都要兼容中文时段 + 英文 AM/PM 两种**。中午 / 下午 / 晚上 = PM 走 < 12 → +12；上午 / 凌晨 / 清晨 / 早上 = AM 走 12 → 0
