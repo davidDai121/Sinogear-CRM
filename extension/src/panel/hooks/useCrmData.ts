@@ -109,12 +109,14 @@ function buildLabelAssocMap(
 }
 
 // ============================================================================
-// Realtime + slim select 替代了 20s 轮询。Egress 模型：
-//   - 初次加载：~1.4 MB（contacts + 关联表分页拉一遍）
+// Realtime + slim select 替代了 20s 轮询。Egress 模型（2026-07 按 7,652
+// contacts / 7,881 interests 重算；旧模型按 1,700 contacts 算已失效）：
+//   - 初次加载：~4 MB（contacts 2MB + interests slim 1.3MB + tags）
 //   - Realtime 事件：每条变更几 KB，正常使用 < 1 MB/天/销售
-//   - 30 分钟兜底 refetch：~1.4 MB × 12 次/天（断网恢复 / 漏事件兜底）
-//   - msg_directions：5 分钟 RPC ~50KB × 72 次 = ~3.6 MB/天
-//   - 总计：~20-30 MB/天/销售，月度 3 销售 × 25 天 = ~1.5 GB，远低于 5GB
+//   - 60 分钟兜底 refetch + visibilitychange 60min 节流：~4 MB × 10 次/天
+//   - msg_directions：15 分钟 RPC ~300KB × 32 次 = ~10 MB/天
+//   - 总计：~50-60 MB/天/销售。⚠️ 数据继续涨时这里要重新核（2026-07 曾因
+//     15min visibility 节流 + 5min RPC 在 21 天烧掉 4.11GB/5GB 免费额度）
 //
 // WA 数据从 IDB 本地读取，不走 Supabase，所以可以保持 30 秒高频。
 // ============================================================================
@@ -125,11 +127,14 @@ const WA_POLL_MS = 30 * 1000;
  *  国内访问 Supabase 新加坡区域单次 fetchAllContacts ~7-10s，60min 一次能
  *  把后台 fetch 总成本压到几乎可忽略。Realtime 在线时基本不靠这个 */
 const DB_REFETCH_INTERVAL_MS = 60 * 60 * 1000;
-/** visibilitychange 触发 refetch 的最短间隔。15min 内切回不再触发，避免日常
- *  切 tab 的几秒卡顿 */
-const VISIBILITY_REFRESH_THROTTLE_MS = 15 * 60 * 1000;
-/** msg_directions RPC 刷新间隔。比 DB refetch 频繁（新消息影响"我该回"判定） */
-const MSG_DIRECTIONS_REFRESH_MS = 5 * 60 * 1000;
+/** visibilitychange 触发 refetch 的最短间隔。销售整天在 WA 和别的 tab 之间切，
+ *  15min 节流时代实测 3 销售一天能打出 100+ 次全量拉取（数据涨到 7600+ contacts
+ *  后单次 ~5MB，2026-07 账期 21 天烧掉 4.11GB egress 的主力）。Realtime 已经
+ *  推增量，这条纯属断线兜底，放宽到 60min */
+const VISIBILITY_REFRESH_THROTTLE_MS = 60 * 60 * 1000;
+/** msg_directions RPC 刷新间隔。比 DB refetch 频繁（新消息影响"我该回"判定）。
+ *  返回行数随"有消息的 contact 数"增长（2026-07 已 ~300KB/次），5min → 15min */
+const MSG_DIRECTIONS_REFRESH_MS = 15 * 60 * 1000;
 /** Persist the local WhatsApp label catalog/associations without writing every poll. */
 const WA_LABEL_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -256,9 +261,12 @@ async function fetchAllVehicleInterests(
   const PAGE = 1000;
   const out: VehicleInterestRow[] = [];
   for (let from = 0; ; from += PAGE) {
+    // slim select：列表路径只用 model / condition / target_price_usd（筛选 +
+    // FilteredChatList 展示）。contacts!inner() 空 embed 只做 join 过滤不回传
+    // org_id，7900+ 行时省 ~35% egress。详情卡走 useContact 单查全列。
     const { data, error } = await supabase
       .from('vehicle_interests')
-      .select('*, contacts!inner(org_id)')
+      .select('id, contact_id, model, condition, target_price_usd, contacts!inner()')
       .eq('contacts.org_id', org)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -276,9 +284,10 @@ async function fetchAllContactTags(org: string): Promise<ContactTagRow[]> {
   for (let from = 0; ; from += PAGE) {
     // contact_tags PK 是 (contact_id, tag) 复合主键，没单列 id；
     // 用复合 order 保证完全稳定
+    // slim select：created_at 列表路径不用；contacts!inner() 空 embed 只过滤不回传
     const { data, error } = await supabase
       .from('contact_tags')
-      .select('*, contacts!inner(org_id)')
+      .select('contact_id, tag, contacts!inner()')
       .eq('contacts.org_id', org)
       .order('contact_id', { ascending: true })
       .order('tag', { ascending: true })

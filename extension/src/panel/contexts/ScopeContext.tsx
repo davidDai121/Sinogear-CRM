@@ -46,9 +46,9 @@ const SCOPE_STORAGE_KEY = 'sgc:viewScope';
 /** Realtime + 60min 兜底 refetch。撞单 tag 不需要秒级新鲜，handlers 表写入
  *  全走 Realtime 推送，定时 refetch 只是 websocket 漏事件兜底 */
 const DB_REFETCH_INTERVAL_MS = 60 * 60 * 1000;
-/** visibilitychange 触发 refetch 的最短间隔。15min 内切回不重拉，对齐
+/** visibilitychange 触发 refetch 的最短间隔。60min 内切回不重拉，对齐
  *  useCrmData 同款节流，避免日常切 tab 卡几秒 */
-const VISIBILITY_REFRESH_THROTTLE_MS = 15 * 60 * 1000;
+const VISIBILITY_REFRESH_THROTTLE_MS = 60 * 60 * 1000;
 const AUTO_CLAIM_MAX_ORPHANS = 100;
 const AUTO_CLAIM_MAX_ORPHAN_RATIO = 0.05;
 

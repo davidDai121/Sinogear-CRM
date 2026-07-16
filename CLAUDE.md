@@ -853,6 +853,18 @@ npm run package
 
 **教训**：① **migration 文件写完 ≠ 已应用**——0034 的客户端代码（SalesSignalBanner）都挂上 UI 了表还没建，靠优雅降级才没崩。发版前用 REST 探测新表（`GET /rest/v1/<table>?limit=1` 看 200/404）确认。② **DDL 现在可以自动跑了**：boss 机器 supabase CLI 已登录，token 在 macOS keychain（`security find-generic-password -s "Supabase CLI" -w`，值带 `go-keyring-base64:` 前缀要先 strip + base64 -d，得到 `sbp_` token），`POST https://api.supabase.com/v1/projects/hgkjmmvotpakcetcwpoy/database/query` 可跑任意 SQL 含 DDL——0032 时代"连不了 DDL 只能 SQL Editor 手跑"已不成立。整个 migration 文件一次 POST = 单个隐式事务，all-or-nothing。③ 长期不 commit 的风险这次真实出现：25 天工作只在一台机器上，含已上线的 DB schema（0033）——**schema 已应用但 migration 文件没入库**是最危险的漂移形态
 
+### 近期补完（2026-07-16）— Supabase egress 失控：21 天烧掉 4.11GB/5GB
+
+**起点**：用户在 Supabase Usage 页看到 egress 4.11GB / 5GB（账期 2026-06-24 ~ 07-24 才过 21 天，日均 ~195MB，照节奏账期结束前必破额度），问 "why my egress are so high"。
+
+**根因（全部实测，不靠猜）**：三件事叠加，不是泄漏。① **数据涨了 4.5 倍**：useCrmData 头部的 egress 模型按 1,700 contacts / 单次全量 ~1.4MB 算，实测现在 contacts 7,652 / vehicle_interests 7,881 / messages 51,447，一次全量 refetch（contacts slim 2.0MB + interests select\* 2.0MB + tags）≈ **4.5-5MB 未压缩**。② **全量刷新触发频率偏高**：visibilitychange 15min 节流——销售整天在 WA 和别的 tab 之间切，3 人一天能打出 100+ 次全量；msg_directions RPC 每 5min 一次，响应已随"有消息的 contact 数"涨到 ~300KB/次。两项合计 ~150MB/天基线，跟 Usage 图日柱吻合。③ **尖峰日 = 分析脚本日**：`extension/scripts/` 那批客户分析脚本每次跑全量拉 messages 表（实测 1000 行 420KB → 全表 ~21MB 未压缩）+ contacts 全列；7/8-7/15 做佳佳/wanglincheng 客户分析报告（`分析导出/` 产物日期完全吻合），迭代跑十几次就是几百 MB；7/2 那根 577MB 尖峰同理。
+
+**修法**（`useCrmData.ts` + `ScopeContext.tsx`，纯客户端）：① `VISIBILITY_REFRESH_THROTTLE_MS` 15min → **60min**（两个文件都改；Realtime 在线时增量已实时推，切 tab 重拉纯属断线兜底）；② `MSG_DIRECTIONS_REFRESH_MS` 5min → **15min**；③ `fetchAllVehicleInterests` / `fetchAllContactTags` 改 slim select——只拉列表路径真正用的列（`id, contact_id, model, condition, target_price_usd` / `contact_id, tag`），join 过滤改 **`contacts!inner()` 空 embed**（PostgREST 支持空 embed 只过滤不回传，实测 interests 单页 256KB → 167KB，-35%）；④ 头部 egress 模型注释按新数据重写。预期：单次全量 ~5MB → ~4MB，触发次数砍大半，基线 ~195MB/天 → **~60-80MB/天**。
+
+**验证**：slim + 空 embed 查询形态用 service_role curl 实测（返回行正确、体积 -35%）；列使用面 grep 过全部消费方（filters.ts / FilterSidebar / FilteredChatList 只用 model/condition/target_price_usd；tags 的 created_at 无人用；三个 ReplySection 是自己按 contact 单查全列不走这条路）；`npm run typecheck` 0 错 + `npm run build` 通过。间隔改动是常量，无运行时风险。
+
+**教训**：① egress 模型是按当时数据量写死的快照，**数据涨了模型就失效**——contacts 再翻倍时要回头重算 useCrmData 头部注释里的数字；② visibilitychange 这类"用户行为触发"的 refetch 是隐形放大器，节流窗口按"Realtime 断线兜底"定位放宽，别按"数据新鲜度"定位收紧；③ 分析脚本每轮全量拉 messages 表很贵（~21MB/次），**做报告类任务先 dump 一次缓存到本地文件，迭代复用**；④ PostgREST `contacts!inner()` 空 embed 可以只做 join 过滤不回传字段，所有"借关联表过滤 org"的查询都该用这个形态。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -959,6 +971,7 @@ WhatsApp 绿色主题：
 - **DB DDL 可以从这台机器自动跑**（2026-07-15 确认）：supabase CLI 已登录，`security find-generic-password -s "Supabase CLI" -w` 取 keychain 值 → strip `go-keyring-base64:` 前缀 + `base64 -d` → `sbp_` token → `POST https://api.supabase.com/v1/projects/hgkjmmvotpakcetcwpoy/database/query` 跑任意 SQL（整个 migration 文件一次 POST = 单个隐式事务）。不用再让用户去 SQL Editor 手跑；但 `CREATE INDEX CONCURRENTLY` 这类不能进事务的语句要单独 POST
 - **ai-proxy 是网络容错 fallback 不是 key 安全方案**（`service-worker.ts` + `functions/ai-proxy/`）：直连 open.bigmodel.cn 优先，只有 fetch 抛**网络错**（非 4xx/5xx 响应）才走代理。改 AI 调用逻辑时保持这个顺序——代理有冷启动延迟且吃 Supabase 免费额度。key 仍打进 dist（backlog"搬代理 + 轮换"未完成）
 - **WA 标签目录按 (org, user) 作用域存储**（`whatsapp_labels` 表）：wa_label_id 是 WhatsApp 账号级 id，不同销售的同名标签是不同行；TagsPage 展示时按 `name.trim().toLowerCase()` 分组合并并显示来源销售数。新查询这张表记得带 user_id 或明确按 name 聚合
+- **Egress 预算意识：数据涨、周期性拉取、分析脚本三个都会烧免费额度**（2026-07-16 修，21 天烧掉 4.11GB/5GB）：① useCrmData 头部 egress 模型是数据量快照，contacts 明显增长后要重算；② 新加"周期性 / 用户行为触发"的 DB 拉取（interval、visibilitychange、focus 等）先算"次数 × 单次体积 × 3 销售 × 25 天"，visibility 类节流对齐 60min；③ 全量拉大表的查询一律 slim select + `contacts!inner()` 空 embed（只 join 过滤不回传字段）；④ 一次性分析脚本别每轮迭代重拉 messages 全表（~21MB/次），dump 一次存本地文件复用
 
 ## 用户偏好
 
