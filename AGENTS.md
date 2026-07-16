@@ -229,13 +229,13 @@ Supabase（托管 Postgres + Auth）
 │       ├── 0019_last_message_direction.sql last_message_direction_per_contact RPC
 │       │                                给每个 contact 算最后入站/出站消息时间
 │       ├── 0020_claude_conversations.sql claude_conversations(contact_id, chat_url)
-│       │                                Claude.ai per-contact chat URL 缓存（无 template）
+│       │                                Codex.ai per-contact chat URL 缓存（无 template）
 │       ├── 0021_contact_pins.sql        contact_pins (contact_id, user_id) per-user 置顶
 │       ├── 0022_message_counts_for_classifier.sql 0019 RPC 扩展回 inbound_count/
 │       │                                outbound_count（chat-classifier 有历史保护用）
 │       ├── 0023_gpt_conversations.sql   gpt_conversations(contact_id, chat_url)
 │       │                                ChatGPT per-contact chat URL 缓存（无 template）
-│       ├── 0024_message_ai_source.sql   messages 加 ai_source 列：claude/gem/gem_auto/gpt
+│       ├── 0024_message_ai_source.sql   messages 加 ai_source 列：Codex/gem/gem_auto/gpt
 │       │                                标记出站消息的 AI 归因来源（NULL = manual）
 │       ├── 0025_enable_realtime.sql     启用 contacts/vehicle_interests/contact_tags/
 │       │                                contact_handlers Realtime；REPLICA IDENTITY FULL
@@ -306,7 +306,7 @@ gem_conversations       id, contact_id, template_id, gem_chat_url,
                         last_used_at, created_at
                         UNIQUE(contact_id, template_id)
 claude_conversations    contact_id (PK), chat_url, last_used_at, created_at
-                        Claude.ai per-contact chat URL（单一 Miles persona，无 template）
+                        Codex.ai per-contact chat URL（单一 Miles persona，无 template）
 gpt_templates           id, org_id, name, gpt_url, description, is_default,
                         created_by, *_at
                         per-user RLS（同 gem_templates）：只读写 created_by=auth.uid()
@@ -317,7 +317,7 @@ gpt_conversations       id, contact_id, template_id, chat_url,
 messages                id, contact_id, wa_message_id, direction(inbound/outbound),
                         text, sent_at, synced_at, ai_source
                         UNIQUE(contact_id, wa_message_id)
-                        ai_source: claude/gem/gem_auto/gpt（出站消息 AI 归因，NULL=manual）
+                        ai_source: Codex/gem/gem_auto/gpt（出站消息 AI 归因，NULL=manual）
 contact_pins            contact_id, user_id (PK 复合) — per-user 置顶客户
 weekly_reports          id, org_id, period(week/month/snapshot), week_of,
                         summary jsonb, html, created_at
@@ -387,7 +387,7 @@ npm run package
 - **只能用测试号 13552592187 测试 WhatsApp 功能**，绝不能在真实客户聊天上操作
 - WhatsApp Web 的 DOM 经常变。`whatsapp-dom.ts` 已经用 testid + span[title] + dir=auto 三重 fallback；`whatsapp-idb.ts` 直接读 IndexedDB 更稳定
 - 修改 UI 后要在真实 WhatsApp Web 上观察行为，不能只看 API 返回
-- 验证 UI 用 Chrome MCP（claude-in-chrome），扩展只能在用户已登录的 Chrome 里测，MCP tab 共享同一 profile
+- 验证 UI 用 Chrome MCP（Codex-in-chrome），扩展只能在用户已登录的 Chrome 里测，MCP tab 共享同一 profile
 
 ## 已完成功能
 
@@ -589,7 +589,7 @@ npm run package
 **拒绝了**：用户提出"给每个客户发'1'再删除让 WA Web 写 IDB"——拒绝。理由：
 - WA 反 spam 系统典型 spam 模式（1000 个 outbound 新会话 + 短间隔）→ 封号高风险
 - 客户手机会收到 push 通知，撤回也来不及→ 销售形象受损
-- CLAUDE.md "绝不能在真实客户聊天上操作" 红线
+- AGENTS.md "绝不能在真实客户聊天上操作" 红线
 - **任何"让 WA Web 自动学会更多客户"的需求都要走"导入聊天 .txt"路径**（合法+不打扰客户）
 
 **未做的可选项**（用户决定要不要）：
@@ -597,23 +597,23 @@ npm run package
 
 ### 近期补完（2026-05-13 ~ 2026-05-20）— 多 AI 整合 + Realtime + 自动回复 + AI 归因
 
-**AI 回复三足鼎立：Gem / Claude / GPT 同 UI 共存**
-- [x] **Claude AI 回复**（`lib/claude-automation.ts` + `lib/claude-prompt.ts` + `panel/components/ClaudeReplySection.tsx`）：
-  - 网页端自动化 claude.ai（chrome.tabs + 注入脚本）；首次开新对话拿 chat URL → `claude_conversations` 表 per-contact 缓存；下次续聊
-  - **prompt 体系升级**（`claude-prompt.ts`）：ROLE_PROMPT（Miles 第一人称 + 6 类买家自适应）+ VEHICLE_KNOWLEDGE（全场景注入，所有 SKU + EXW 价 + 卖点 + 目标买家）+ GHANA_MARKET_PLAYBOOK（isGhanaContext 命中时注入：CIF 价格 / 关税 / Stallion vs Zonda 竞品 / 6 节点漏斗）+ Color Stock Rule（hard rule，绝不问颜色）
+**AI 回复三足鼎立：Gem / Codex / GPT 同 UI 共存**
+- [x] **Codex AI 回复**（`lib/Codex-automation.ts` + `lib/Codex-prompt.ts` + `panel/components/ClaudeReplySection.tsx`）：
+  - 网页端自动化 Codex.ai（chrome.tabs + 注入脚本）；首次开新对话拿 chat URL → `claude_conversations` 表 per-contact 缓存；下次续聊
+  - **prompt 体系升级**（`Codex-prompt.ts`）：ROLE_PROMPT（Miles 第一人称 + 6 类买家自适应）+ VEHICLE_KNOWLEDGE（全场景注入，所有 SKU + EXW 价 + 卖点 + 目标买家）+ GHANA_MARKET_PLAYBOOK（isGhanaContext 命中时注入：CIF 价格 / 关税 / Stallion vs Zonda 竞品 / 6 节点漏斗）+ Color Stock Rule（hard rule，绝不问颜色）
   - **5 种 mode**：reply（默认，只出 reply + translation，可选 Customer Read / Client Record）/ analyze（深度分析 5 段）/ variants（3 个不同语气）/ quote（quote draft + 报价回复）/ discuss（自由对话）
   - **客户信号注入**（`lib/customer-signals.ts`）：英语水平 + 情绪 + 沉默天数 + Pricing Math 段 — 在 chat history 之前注入到 prompt
-  - **Pricing Math 段去重**（`claude-prompt.ts` 1 次注入 + signals 不重复）
+  - **Pricing Math 段去重**（`Codex-prompt.ts` 1 次注入 + signals 不重复）
 - [x] **GPT-5 Thinking 回复**（`lib/gpt-automation.ts` + `lib/gpt-prompt.ts` + `panel/components/GPTReplySection.tsx` + migration `0023`）：
   - 网页端自动化 chatgpt.com；首次开新对话拿 chat URL → `gpt_conversations` 表 per-contact 缓存
-  - **故意精简 prompt**：GPT-5 Thinking 自己联网查 + 推理报价效果更好，prompt 不喂 Vehicle Knowledge / Ghana playbook（Claude 那边保留，因为 Claude 默认不联网）
-  - 输出格式跟 Claude 一致（[WhatsApp Reply] + [Translation] + 可选 [Client Record]），共用 parser
-- [x] **AIReplyTab dropdown 切三档**：`🤖 Gem` / `🧠 GPT-5 Thinking` / `✨ Claude`，按钮选择持久化 chrome.storage
+  - **故意精简 prompt**：GPT-5 Thinking 自己联网查 + 推理报价效果更好，prompt 不喂 Vehicle Knowledge / Ghana playbook（Codex 那边保留，因为 Codex 默认不联网）
+  - 输出格式跟 Codex 一致（[WhatsApp Reply] + [Translation] + 可选 [Client Record]），共用 parser
+- [x] **AIReplyTab dropdown 切三档**：`🤖 Gem` / `🧠 GPT-5 Thinking` / `✨ Codex`，按钮选择持久化 chrome.storage
 
 **AI source attribution（出站消息 AI 归因）**
 - [x] **`lib/ai-reply-attribution.ts`**（183 行）：fillReply 时存 5 分钟 pending fill 窗口（chrome.storage.local），syncMessages 写出站消息时按 contactId + 时间窗口 + 文本相似度（公共前缀比例 ≥ 0.6）匹配，命中后写 `messages.ai_source`
-- [x] **migration `0024_message_ai_source.sql`**：messages 加 ai_source 列（claude/gem/gem_auto/gpt/null）
-- [x] **MessagesHistoryModal 来源 chip**：每条出站消息显示来源标签（✨Claude / 🤖Gem / ⚡自动 / 🧠GPT / 🌐翻译 / ⌨️手打）+ 顶部统计行"出站 N 条：claude × N，gem × M，manual × K"
+- [x] **migration `0024_message_ai_source.sql`**：messages 加 ai_source 列（Codex/gem/gem_auto/gpt/null）
+- [x] **MessagesHistoryModal 来源 chip**：每条出站消息显示来源标签（✨Codex / 🤖Gem / ⚡自动 / 🧠GPT / 🌐翻译 / ⌨️手打）+ 顶部统计行"出站 N 条：Codex × N，gem × M，manual × K"
 - [x] **AIReplyLogModal 加 GPT 分类**：source 枚举扩展支持 gpt
 - [x] **设计取舍**：相似度 60% 阈值容忍"改了 1-2 个字"，宽松匹配会误判 manual 为 AI；销售改太多就归 null 是预期行为
 
@@ -640,7 +640,7 @@ npm run package
 
 **其他**
 - [x] **`lib/contact-pins.ts` + per-user 置顶**（migration `0021`）：(contact_id, user_id) PK，乐观更新写 DB
-- [x] **`lib/ai-reply-log.ts` 改 chrome.storage.local 存储**（早期考虑过建 ai_reply_logs 表入库，对应 migration 未纳入仓库，最终改本地存）：FIFO LRU，800 条上限，AIReplyLogModal 列表 + markdown 导出给 Claude review 质量
+- [x] **`lib/ai-reply-log.ts` 改 chrome.storage.local 存储**（早期考虑过建 ai_reply_logs 表入库，对应 migration 未纳入仓库，最终改本地存）：FIFO LRU，800 条上限，AIReplyLogModal 列表 + markdown 导出给 Codex review 质量
 - [x] **`MessagesHistoryModal` 加完整出站统计**：source × count 标签，让 boss 一眼看哪个 AI 用得多
 - [x] **强制版本闸门 → 0017 已上线**（前文 2026-05-10 已记，沿用至今）
 - [x] **`useCrmData` 分页全面铺开**：`fetchAllContacts` / `fetchAllVehicleInterests` / `fetchAllContactTags` 全走 PAGE=1000 分页，**`.order(...)` 必须加**（PostgREST 不保证 range 跨页稳定，并发写入时同行可能跨页重复）
@@ -649,7 +649,7 @@ npm run package
 
 - [x] **`findDataId` 改用 closest + testid，不再固定 N 层父链爬**（`content/whatsapp-messages.ts:65-86`）
 
-**症状**：销售用 AI 续聊（Gem / Claude / GPT 三个都一样），prompt 里 `[New Messages Since Last Reply]` 段只剩销售自己发的 photo 占位（`[Sales sent 1 photo to customer]`），**客户最近发的所有文字 inbound（"9,000 Ghana / ??? / And location"）完全消失**；`messages` 表也只有销售 outbound 占位，客户文字 0 条入库（=> useMessageSync 跑过但每次都漏 inbound）。
+**症状**：销售用 AI 续聊（Gem / Codex / GPT 三个都一样），prompt 里 `[New Messages Since Last Reply]` 段只剩销售自己发的 photo 占位（`[Sales sent 1 photo to customer]`），**客户最近发的所有文字 inbound（"9,000 Ghana / ??? / And location"）完全消失**；`messages` 表也只有销售 outbound 占位，客户文字 0 条入库（=> useMessageSync 跑过但每次都漏 inbound）。
 
 **根因**：WA Web 这一版把消息 `data-id` 挪到了 `.message-in / .message-out` 的 **3 层祖父之上**（L11 = `[data-testid^="conv-msg-"]` wrapper）。`readChatMessages` → `findDataId` 之前 `for (i=0; i<3; i++)` 只看 L8/L9/L10，L11 永远查不到 → 所有 inbound bubble `id=null` 被 `continue` 静默跳过 → DOM 输出全空 → DB 同样空（useMessageSync 同链路）→ mergeDomWithDbMessages 也兜不住。
 
@@ -782,7 +782,7 @@ npm run package
 
 ### 近期补完（2026-06-18）— 引用回复读成"被引用原话" + 删除消息当成附件
 
-**起点**：用户看 GPT 给 D'AFRIC 客户（Benin，法语，租车行）的 prompt，报"喂给 AI 的内容不对、全是法语看不懂"。深挖出两个独立的 DOM 解析 bug，都把垃圾喂给三个 AI（Gem/Claude/GPT 共用 `readChatMessages`）：(1) 客户的引用回复被读成"被引用的原话"；(2) 删除消息被当成附件。
+**起点**：用户看 GPT 给 D'AFRIC 客户（Benin，法语，租车行）的 prompt，报"喂给 AI 的内容不对、全是法语看不懂"。深挖出两个独立的 DOM 解析 bug，都把垃圾喂给三个 AI（Gem/Codex/GPT 共用 `readChatMessages`）：(1) 客户的引用回复被读成"被引用的原话"；(2) 删除消息被当成附件。
 
 **根因（Chrome MCP 实测 live DOM，不靠猜）**：
 - **引用回复**：客户"回复"某条消息时，WA Web 把被引用的原消息塞进 `[data-testid="quoted-message"]` 预览框，跟真回复同在一个 bubble。实测 D'AFRIC 那条结构：外层 `.copyable-text[data-pre-plain-text="[3:11 PM,...] +229...:"]` 包住「引用原话(第 1 个 selectable-text) + 真回复(第 2 个 selectable-text)」。`getMessageText` 的 `realWrap.querySelector('.selectable-text')` 命中**第一个 = 引用原话** → 把销售自己之前发的话当成客户消息，真回复"Je préfères... une représentation ici a cotonou ?"（客户唯一明确的问题——科托努有没有代表处）整条丢失。AI 据此瞎答，还在策略里写"客户复制了我的消息"。引用回复在销售场景极常见 → 静默污染大量对话。
@@ -795,7 +795,7 @@ npm run package
 
 **验证（Chrome MCP live DOM）**：用户在 D'AFRIC 标签页 console 跑新逻辑——`引用回复_AI现在看到` = "Je préfères cette option, mais dite moi aviez vous une représentation ici a cotonou ?"（真回复）；`删除消息_AI现在看到` = "[已删除]"。`readBubbleText` 修后逻辑跟它完全相同，同一证据覆盖。typecheck + build 通过。
 
-**教训**：① WA Web 引用回复的被引用原话在 `[data-testid="quoted-message"]` 里，任何读 bubble 文本的逻辑都要先剥它，否则读到的是"被引用的旧消息"（常是销售自己的话）而非真回复——这是 `findDataId` / FB ad-pair 之后**第 N 次** WA Web 多文本块结构坑。**读正文有两处独立路径：`getMessageText`（喂 AI）+ `auto-translate.ts readBubbleText`（消息气泡翻译），改一个必须同步改另一个**（CLAUDE.md 早有"翻译跟 readChatMessages 同源"警告，这次还是先漏了翻译那处，被用户抓到）。② 删除/撤回消息不在 `.copyable-text` 里（copyables 为空），带 `[data-icon="recalled"]`——空文本 bubble 走媒体探测前必须先判删除，否则被当附件。③ 任何"空文本 → 当媒体"的兜底前，都要先排除「删除占位 / 引用框被剥光后的空壳」等非媒体空文本。
+**教训**：① WA Web 引用回复的被引用原话在 `[data-testid="quoted-message"]` 里，任何读 bubble 文本的逻辑都要先剥它，否则读到的是"被引用的旧消息"（常是销售自己的话）而非真回复——这是 `findDataId` / FB ad-pair 之后**第 N 次** WA Web 多文本块结构坑。**读正文有两处独立路径：`getMessageText`（喂 AI）+ `auto-translate.ts readBubbleText`（消息气泡翻译），改一个必须同步改另一个**（AGENTS.md 早有"翻译跟 readChatMessages 同源"警告，这次还是先漏了翻译那处，被用户抓到）。② 删除/撤回消息不在 `.copyable-text` 里（copyables 为空），带 `[data-icon="recalled"]`——空文本 bubble 走媒体探测前必须先判删除，否则被当附件。③ 任何"空文本 → 当媒体"的兜底前，都要先排除「删除占位 / 引用框被剥光后的空壳」等非媒体空文本。
 
 ### 近期补完（2026-06-20）— 多代理代码评审：堵 4 个静默数据污染/丢失洞
 
@@ -815,48 +815,10 @@ npm run package
 
 **教训**：① **任何写 `messages` 表的 AI 自动化路径都必须 `verifyHeaderMatches`/`waitForActiveChatPhone` 身份校验** —— 加新自动化路径时对照"三个 ReplySection + bulk-extract 都有、auto-reply 曾漏"这个清单，别漏。无人值守路径尤其要在**发送前**再校验一次（防发错人）。② **`isOutboundBubble` 在任何判方向的地方都要传 `panelCenter`**，否则纯媒体 bubble 几何兜底失效 → FB pair 方向判反 → 消息撞 id 丢失。③ 评审驱动的修复也走完整核实（对抗性 re-read 真实代码），评审代理会夸大（这次驳回了"删除当附件/版本闸门锁死/auto-reply 无限挂起"等几条），别照单全收。
 
-### 近期补完（2026-06-21 ~ 2026-07-15）— WhatsApp 标签持久化 + 销售信号汇总表 + AI 代理 fallback + 阶段语义修正
-
-**起点**：约一个月的迭代积攒在工作区未提交（boss 机器本地开发），2026-07-15 用户要求"check this project"后统一收尾：应用缺失的 migration 0034、补 CLAUDE.md、走完整打包发布。这批工作包含四大块业务改动 + 一批客户分析脚本。
-
-**1. WhatsApp 标签持久化**（migration `0033_whatsapp_labels.sql` + `lib/label-sync.ts` +170 行 + `TagsPage.tsx` 大改 + `useCrmData` + `FilterMaintenancePanel`）：
-- 新表 `whatsapp_labels`（org_id + user_id + wa_label_id 唯一；存名称/颜色/类型/is_active）+ `contact_whatsapp_labels` 关联表。**wa_label_id 是 WhatsApp 账号级作用域**，所以唯一键带 user_id——多销售同 org 不撞
-- 旧同步只把标签名写进 contact_tags，丢失 WA 标签 id/颜色、无法对账改名/删除。现在 `persistWhatsAppLabels`：upsert 全量标签目录 → 把 WA 已删标签标 `is_active=false` → 关联表按 desired set 增删对账（分页拉全集 + 500/chunk 写入）
-- `useCrmData` 的 WA IDB 轮询里每 10 分钟顺带 `syncWhatsAppLabels`（数据来自本地 IDB，读零 egress），不用手动点同步
-- 标签 tab 分两个 section：「WhatsApp 标签」（色块 + 客户数 + 多销售来源数）+「CRM 标签」（原有 CRUD）
-
-**2. 阶段语义修正——自动逻辑不再写 won/lost**（`label-sync.ts` categorizeLabel + `stage-sync.ts`）：
-- WhatsApp 标签"成交/签约/订单"**不再直接写 stage=won**——WA 标签常年不清理，不是付款事实；改成打标签「WhatsApp 成交待核实」，真成交必须销售在 CRM 手动确认
-- `stage-sync.ts` 的 autoStage `lost`（>7 天沉默）**降级映射到 `stalled`**，`AUTO_MANAGED` 集合移除 `lost`——沉默是活跃度不是业务流失，lost 必须手动。报表不再把沉默客户统计成明确丢单
-
-**3. 销售信号汇总表**（migration `0034_contact_sales_signals.sql` + 新组件 `SalesSignalBanner.tsx`，挂进 ContactCard + ContactDetailDrawer）：
-- 每 contact 一行紧凑汇总：消息计数（总/进/出）、首末消息时间、最后进出站时间 + 500 字摘录、正则识别的 4 类销售信号（报价 quote / 客户接受 accepted / 付款进行中 payment_pending / 收款确认 payment_received，多语言正则含中英西法）
-- **由 messages 表上的 statement-level trigger（transition tables）维护**，只重算被触碰的 contact；一次性 backfill 在 DB 内跑（消息正文不出库，不耗 egress）
-- `last_message_direction_per_contact` RPC 重写成读这张表——0032 的"覆盖索引救全表聚合"方案被彻底取代，messages 涨到几十万行也不会再超时（0032 教训里预言的"汇总表"就是它）
-- `SalesSignalBanner` 展示证据型销售状态（如"已报价但 30 天无回复"），查询失败静默降级（只 console.warn，不崩）
-
-**4. AI 代理 fallback**（新 Edge Function `supabase/functions/ai-proxy/index.ts` + `service-worker.ts` callQwen/callQwenTranslate）：
-- 起因：部分销售机器间歇性解析不了 open.bigmodel.cn（DNS 污染/网络环境）。扩展仍**直连优先**，fetch 抛网络错时 fallback `supabase.functions.invoke('ai-proxy')` 带用户 JWT
-- Edge Function：校验 JWT + org 成员身份 → 100k 字符上限 → 从 Supabase 调 GLM；若 Supabase 侧也解析不了 bigmodel，还有 pinned-IPv4 直连 TLS 兜底（`Deno.connectTls` + 手写 HTTP/1.1 + chunked 解码）
-- Secrets `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL` 已配置，function ACTIVE。manifest 加 `https://open.bigmodel.cn/*` host permission
-- ⚠️ 这是**网络容错**不是安全改造：key 仍在 dist 包里（直连路径要用），backlog 里"key 搬代理 + 轮换"那条只完成了基建一半
-
-**5. 网络降级体验**（`useAutoExtract.ts`）：AI 网络类错误（failed to fetch/timeout/proxy 等）不再红字吓人——先套用手机区号→国家兜底填充，提示"AI 自动分析暂不可用，客户资料可正常使用"
-
-**6. ScopeContext 孤儿认领护栏**：孤儿数 >100 且占比 >5% 时跳过 auto-claim（防 handlers 拉取失败/冷库时把全 org 客户错认到自己名下）；新增 `handlersLoaded` flag，fetch 失败后绝不基于空 map 认领
-
-**7. 客户分析脚本 + 报告**（`scripts/`、`extension/scripts/analyze-whatsapp-label.mjs` 等 5 个、`分析导出/`、根目录 4 份中文报告 md）：客户再激活匹配/话术、有价值跟进清单、车型库存规范化等一次性分析。`分析导出/`（11MB）和 `outputs/` 已 gitignore，脚本和报告入库
-
-**8. `AGENTS.md`**：CLAUDE.md 的快照副本（2026-07-03），给其他 AI 工具读
-
-**验证**（2026-07-15 收尾时实测）：`npm run typecheck` 0 错 + `npm run build` 通过。migration 0033 早已在线（REST 探测 200）；**0034 通过 Supabase Management API 应用成功**——backfill 生成 3417 行信号（其中 2083 个有报价信号）、3 个 trigger 就位、RPC 替换后 service_role 探测行为与旧版一致（is_org_member 守卫）。ai-proxy function ACTIVE + 3 个 AI secrets 在位。生产库已涨到 51,447 messages / 7,652 contacts
-
-**教训**：① **migration 文件写完 ≠ 已应用**——0034 的客户端代码（SalesSignalBanner）都挂上 UI 了表还没建，靠优雅降级才没崩。发版前用 REST 探测新表（`GET /rest/v1/<table>?limit=1` 看 200/404）确认。② **DDL 现在可以自动跑了**：boss 机器 supabase CLI 已登录，token 在 macOS keychain（`security find-generic-password -s "Supabase CLI" -w`，值带 `go-keyring-base64:` 前缀要先 strip + base64 -d，得到 `sbp_` token），`POST https://api.supabase.com/v1/projects/hgkjmmvotpakcetcwpoy/database/query` 可跑任意 SQL 含 DDL——0032 时代"连不了 DDL 只能 SQL Editor 手跑"已不成立。整个 migration 文件一次 POST = 单个隐式事务，all-or-nothing。③ 长期不 commit 的风险这次真实出现：25 天工作只在一台机器上，含已上线的 DB schema（0033）——**schema 已应用但 migration 文件没入库**是最危险的漂移形态
-
 ### 还可以做的（不急）
 
-- [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
-- [ ] **三个 ReplySection 抽共享模块 + 起测试**（代码评审 P1）：ClaudeReplySection(1440)/GPTReplySection(1035)/GemReplySection(928) 真重复约 450–500 行（消息加载 + 身份校验 + fillReply），三套各打一遍 DOM fix 易漂移。抽成一个**带单测**的工具模块，顺带给 parser（claude/gem-parser）+ prompt 分段边界起第一批测试（全仓库目前零自动化测试）
+- [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板
+- [ ] **三个 ReplySection 抽共享模块 + 起测试**（代码评审 P1）：ClaudeReplySection(1440)/GPTReplySection(1035)/GemReplySection(928) 真重复约 450–500 行（消息加载 + 身份校验 + fillReply），三套各打一遍 DOM fix 易漂移。抽成一个**带单测**的工具模块，顺带给 parser（Codex/gem-parser）+ prompt 分段边界起第一批测试（全仓库目前零自动化测试）
 - [ ] **`database.types.ts` 改 CI 自动生成**（代码评审 P1）：手维护，enum/列一改就跟真库漂移（`stalled` 那次就是），直接把过时 `customer_stage` 喂给 AI prompt
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
 - [ ] Chrome Web Store 私有发布（$5 + 1-3 天审核 → 全员自动更新，告别 zip 分发）
@@ -933,8 +895,8 @@ WhatsApp 绿色主题：
 - **对整表聚合的 RPC 要建覆盖索引，否则随表增长必超时**（2026-06-11 修，migration 0032）：`last_message_direction_per_contact` 对整张 `messages`（38k 行 + 大 `text` 字段）做 group-by 聚合，原 `(contact_id, sent_at desc)` 索引不含 `direction` → 顺序扫描读全部肥行 → 8s `statement_timeout` 掐断（57014）+ PostgREST `Thread killed by timeout manager` + RPC 500。客户端 `fetchMessageDirections` 把 500 catch 成空 map → 「我该回」回填 + chat-classifier「lost 保护」**静默失效**（不崩，销售只觉得分类不准）。修法：建只含查询所需列的覆盖索引 `(contact_id, direction, sent_at) WHERE sent_at IS NOT NULL` 走 index-only scan，不碰 `text` 堆。**任何新写"对整表聚合"的 RPC**（count/max/group-by 全表）都要：① 给查询建覆盖索引；② 警惕被聚合表有大字段时顺序扫描读肥行；③ 表会持续增长的话，到几十万行就改 trigger 维护汇总表，别再全表扫
 - **`.in('id', [...])` URL 长度炸弹依然有效**（前文 2026-05-08 已记）。Realtime 改造后已经全部换 `contact_handlers!inner(user_id)` 服务端 join 路径
 - **AI source attribution 是启发式不是真理**（`lib/ai-reply-attribution.ts`）：5 分钟窗口 + 60% 公共前缀阈值。销售改太多字（前缀 60% 不命中）→ 归 null；fill 后超 5 分钟才发 → 归 null。这些都是预期行为不是 bug。`messages.ai_source = null` ≠ "manual"，应理解为"未归因"
-- **GPT 不喂 reference data 是有意为之**（`gpt-prompt.ts`）：GPT-5 Thinking 自己联网查 + 推理报价效果更好，prompt 不要塞车型库 / Ghana playbook 等 reference。Claude 那边保留（Claude 默认不联网）。修改 prompt 时不要"对齐两个 AI"
-- **Claude `[Sales Guidance — TOP PRIORITY]` 段是 override 不是 hint**：销售在 textarea 里写"用阿拉伯语回复 + 强硬一点"，prompt 顶部注入这段，Claude 必须严格执行覆盖默认行为。改 prompt 模板时不要把这段降级成普通指令
+- **GPT 不喂 reference data 是有意为之**（`gpt-prompt.ts`）：GPT-5 Thinking 自己联网查 + 推理报价效果更好，prompt 不要塞车型库 / Ghana playbook 等 reference。Codex 那边保留（Codex 默认不联网）。修改 prompt 时不要"对齐两个 AI"
+- **Codex `[Sales Guidance — TOP PRIORITY]` 段是 override 不是 hint**：销售在 textarea 里写"用阿拉伯语回复 + 强硬一点"，prompt 顶部注入这段，Codex 必须严格执行覆盖默认行为。改 prompt 模板时不要把这段降级成普通指令
 - **自动回复 P0 安全：reply 必须先 `sanitizeReplyForCustomer` 再 paste**（`content/auto-reply.ts`）：自动发=没人 review，Gem 偶尔会把 [INTERNAL] EXW 价或 floor 拼到回复里，泄漏 = 灾难。手动 fillReply 路径可以放过（销售自己看到才发），但 auto-send 路径绝对不能省 sanitize
 - **自动回复 P0：写 DB 前 + 发送前都必须 `verifyHeaderMatches`**（2026-06-20 修，`content/auto-reply.ts`）：这条**唯一无人值守**路径曾两处裸奔——① `buildPrompt` 里 `syncMessages` 前没校验当前 chat 是不是目标客户 → WA 在等 Gem 的 ~2min 里被切到别的聊天时，把别人的消息按 `(contact_id, wa_message_id)` UNIQUE **永久**写进这个 contact，AI 还基于别人对话生成回复；② 发送前（line 196 jump 后）没校验 → 直接把回复**发给另一个真实客户**。修法：两处 `jumpToChat` 传 `requireMatch={phone,name,waName}`；`buildPrompt` 里 `onRightChat` 为 false 时丢 DOM 消息退回纯 DB（`mergeDomWithDbMessages([], id, 50)`）绝不 sync；发送前 `verifyHeaderMatches` 不过就 `throw`（宁可不发也不发错）。**任何新加的写 `messages` 表的 AI 自动化路径都要对照"三个 ReplySection + bulk-extract 都有身份校验、auto-reply 曾漏"这个清单**，无人值守的尤其要在发送前再校验一次
 - **`findExtractTargets` 必须分页（1000 行陷阱第 4 次）**（2026-06-20 修，`lib/bulk-extract.ts:110`）：`.select('*').eq('org_id')` 没分页 → org 1700+ 客户里 >1000 的那半永远不进批量抽取（销售看到"抽取完成"实际半数没处理）。已改 PAGE 分页 + `.order('id')`。又一次印证"任何客户端 `.select('*').eq('org_id', orgId)` 形态、表行数可能 >1000 的查询，必须 fetchAll-pattern 分页"
@@ -954,11 +916,6 @@ WhatsApp 绿色主题：
 - **`verifyHeaderMatches` 比对 name/wa_name 时必须两侧 strip emoji**（`lib/jump-to-chat.ts`）：销售在 WA 通讯录给客户起带 emoji 爱称（`"K-lonchito 🥰🥰🥰"` / `"🌸🌸Zouhour🌸🌸"` / `"Banks💎👑🌟"`）非常常见，org 内 **~2.7% contact 中招**。但 WA Web header 文本一般不含这些 emoji 或位置不同 → **整串 `header.includes(candidate)` 永远不命中** → DOM 路径被锁死 → AI 生成抛 cold-start 错（DB 空时硬挂）或冻结 DB 历史（DB 有时隐性失效，销售察觉不到只觉得 AI 智商低）。修法 `stripEmojiAndNormalize`：`[\p{Extended_Pictographic}\p{Emoji_Modifier}️‍]` 一次 strip + normalize 空格 + lowercase，两侧都过再 includes。**不要用 `\p{Emoji}`** —— 它把 `# * 0-9` 也算 emoji-candidate，会误剥客户名里的数字。**任何新加"比对 contact 名 vs DOM 文本"的逻辑都先剥 emoji**（销售爱用 emoji 给重要客户做视觉标记，这是常态不是边缘 case）
 - **`vehicles.created_by` 之前长期全 NULL**（2026-05-29 才补，`VehicleModal.tsx` + 回填脚本）：FK 早就建了（→ auth.users, ON DELETE SET NULL）但插入代码从没写。任何新加"按上传人/创建人排序、过滤、归属"的功能前，**先 SQL 确认该列真有数据**，别假设 FK 存在 = 有值。回填历史用 service_role 脚本时一律分页拉全集 + PATCH filter 带 `created_by=is.null`（幂等，不重复改已填行）
 - **own-first 排序复用 ScopeContext 不另发 RPC**（`UploaderBadge` / VehiclePicker / VehiclesPage）：自己的排前面 + 上传人徽标都从 `useScope()` 的 `myUserId` + `membersById` 取数据。新加"按主理人/上传人"的列表入口直接 `const { myUserId, membersById } = useScope()`，**别再单独 `useOrgMembers` 调 list_org_members RPC**（ScopeContext 已经维护这两个 map）。⚠️ `useScope()` 必须在 `<ScopeProvider>` 内（AppShell 已包住全部 6 tab）
-- **自动逻辑永远不写 won/lost**（2026-07 起，`stage-sync.ts` + `label-sync.ts`）：autoStage `lost` 映射到 `stalled`，`AUTO_MANAGED` 不含 `lost`；WA 标签"成交/签约/订单"只打「WhatsApp 成交待核实」tag 不写 won。**won 和 lost 都是销售手动确认的业务事实**，新加任何自动分类/同步逻辑不要碰这两个 stage（sticky 保护依然在：quoted/won 不被自动降级）
-- **`last_message_direction_per_contact` 现在读 `contact_sales_signals` 汇总表**（0034 起，替代 0032 覆盖索引方案）：messages 上 3 个 statement-level trigger（transition tables）维护每 contact 一行汇总。**给 messages 表做批量写入（脚本 import/backfill）时 trigger 会逐 statement 重算被触碰的 contact**——正常；但如果哪天要 TRUNCATE/重灌全表，先 `alter table messages disable trigger` 再手动 `select rebuild_contact_sales_signals(...)` 一次性重建更快。新加"销售证据"类需求先看这张表够不够，别再回去聚合 messages
-- **DB DDL 可以从这台机器自动跑**（2026-07-15 确认）：supabase CLI 已登录，`security find-generic-password -s "Supabase CLI" -w` 取 keychain 值 → strip `go-keyring-base64:` 前缀 + `base64 -d` → `sbp_` token → `POST https://api.supabase.com/v1/projects/hgkjmmvotpakcetcwpoy/database/query` 跑任意 SQL（整个 migration 文件一次 POST = 单个隐式事务）。不用再让用户去 SQL Editor 手跑；但 `CREATE INDEX CONCURRENTLY` 这类不能进事务的语句要单独 POST
-- **ai-proxy 是网络容错 fallback 不是 key 安全方案**（`service-worker.ts` + `functions/ai-proxy/`）：直连 open.bigmodel.cn 优先，只有 fetch 抛**网络错**（非 4xx/5xx 响应）才走代理。改 AI 调用逻辑时保持这个顺序——代理有冷启动延迟且吃 Supabase 免费额度。key 仍打进 dist（backlog"搬代理 + 轮换"未完成）
-- **WA 标签目录按 (org, user) 作用域存储**（`whatsapp_labels` 表）：wa_label_id 是 WhatsApp 账号级 id，不同销售的同名标签是不同行；TagsPage 展示时按 `name.trim().toLowerCase()` 分组合并并显示来源销售数。新查询这张表记得带 user_id 或明确按 name 聚合
 
 ## 用户偏好
 
@@ -969,8 +926,8 @@ WhatsApp 绿色主题：
 - **prompt 里不要重复传时间**：结构化 `[MM-DD HH:MM]` 已经够了，WA Web bubble 末尾的"下午X:YY" / "晚上X:YY" / "已编辑" 等必须剥掉（2026-05-27 用户明确说"你就别传俩时间给各个 ai 了，把什么下午中午的都删掉"）。任何新加的 prompt-bound 文本字段都要过 `stripTrailingMeta`
 - **bug fix 之前先确认用户用的是哪个版本**：踩过坑——我修了代码以为 fix 已生效，用户实际还装着旧版本。判断方法：让用户看 `chrome://extensions/` → Sino Gear CRM → 详细信息 → 版本号，或者打开 panel devtools console 跑 `chrome.runtime.getManifest().version_name`；或者直接看 prompt 里的具体内容是否反映新逻辑（如时间是否 +12）
 - **打包发布完整流程**（用户说"打包发布" / "打包" / "发版"时按这个顺序自动做完，不要分步问）：
-  1. **改 CLAUDE.md**：在"### 还可以做的（不急）"之前插入新章节"### 近期补完（YYYY-MM-DD）— 一句话标题"，含**起点**（用户原话或具体症状） / **根因**（Chrome MCP / 实测拿到的证据，不靠猜） / **修法**（具体改了哪几个函数 + 关键代码思路） / **验证**（Chrome MCP / 实测拿到的结果）/ **教训**（下次别再踩的具体规则）。同时在"## 已知问题 / 风险"段补对应的"以后写新代码要注意"那条
+  1. **改 AGENTS.md**：在"### 还可以做的（不急）"之前插入新章节"### 近期补完（YYYY-MM-DD）— 一句话标题"，含**起点**（用户原话或具体症状） / **根因**（Chrome MCP / 实测拿到的证据，不靠猜） / **修法**（具体改了哪几个函数 + 关键代码思路） / **验证**（Chrome MCP / 实测拿到的结果）/ **教训**（下次别再踩的具体规则）。同时在"## 已知问题 / 风险"段补对应的"以后写新代码要注意"那条
   2. **`cd extension && npm run package`**：自动写 BUILD_VERSION → tsc + vite build → zip 到 `dist-zips/` → 用 service_role 推 `app_config.required_version` 到 Supabase → 还原 build-version.ts（让 git 干净）。**每次打包 = 强制全员升级**，旧版扩展 5 分钟内被 VersionGate 弹窗拦下
-  3. **git commit**：中文 message 多段——首行一句话总结；空行；详细段含起点 / 根因 / 修法。用 HEREDOC + `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer。**只 add 改过的源文件 + CLAUDE.md**（dist-zips/ 已 gitignore，不管它）
+  3. **git commit**：中文 message 多段——首行一句话总结；空行；详细段含起点 / 根因 / 修法。用 HEREDOC + `Co-Authored-By: Codex Opus 4.7 (1M context) <noreply@anthropic.com>` trailer。**只 add 改过的源文件 + AGENTS.md**（dist-zips/ 已 gitignore，不管它）
   4. **`git push origin main`**
   5. 报告用户：版本号 + zip 路径 + 提示 boss 自己 chrome://extensions/ 点 ↻ 重载 + WA Web F5；其他销售会被 VersionGate 拦下要装新 zip

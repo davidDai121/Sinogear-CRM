@@ -33,6 +33,7 @@
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://*.supabase.co/*",
+    "https://open.bigmodel.cn/*",
     "https://dashscope.aliyuncs.com/*",
     "https://translate.googleapis.com/*",
     "https://api.cloudinary.com/*",

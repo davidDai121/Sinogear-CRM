@@ -23,6 +23,7 @@ import {
 import { countryToRegion } from '@/lib/regions';
 import { stringifyError } from '@/lib/errors';
 import { syncAutoStages } from '@/lib/stage-sync';
+import { syncWhatsAppLabels } from '@/lib/label-sync';
 import {
   fetchMyPinnedIdsForOrg,
   pinContact,
@@ -129,6 +130,8 @@ const DB_REFETCH_INTERVAL_MS = 60 * 60 * 1000;
 const VISIBILITY_REFRESH_THROTTLE_MS = 15 * 60 * 1000;
 /** msg_directions RPC 刷新间隔。比 DB refetch 频繁（新消息影响"我该回"判定） */
 const MSG_DIRECTIONS_REFRESH_MS = 5 * 60 * 1000;
+/** Persist the local WhatsApp label catalog/associations without writing every poll. */
+const WA_LABEL_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 
 interface MsgDirection {
   lastInboundT: number | null;
@@ -405,6 +408,7 @@ export function useCrmData(orgId: string | null): CrmData {
   /** msg_directions 单独刷新节奏（比 DB refetch 更频繁） */
   const [msgDirNonce, setMsgDirNonce] = useState(0);
   const lastDbFetchRef = useRef(0);
+  const lastWaLabelSyncRef = useRef(0);
 
   // ----- Effect 1: 初次加载 + 手动 refresh / 兜底 refetch -----
   useEffect(() => {
@@ -561,6 +565,7 @@ export function useCrmData(orgId: string | null): CrmData {
   // ----- Effect 5: WA IDB 数据轮询（本地读，零 egress） -----
   useEffect(() => {
     if (!orgId) return;
+    const org = orgId;
     let cancelled = false;
     const fetchWa = async (): Promise<void> => {
       try {
@@ -591,6 +596,16 @@ export function useCrmData(orgId: string | null): CrmData {
           jidPhoneCache,
           pendingMap,
         });
+        const now = Date.now();
+        if (
+          wa.labels.length > 0 &&
+          now - lastWaLabelSyncRef.current >= WA_LABEL_SYNC_INTERVAL_MS
+        ) {
+          lastWaLabelSyncRef.current = now;
+          void syncWhatsAppLabels(org, wa).catch((err) =>
+            console.warn('[wa-label-sync]', stringifyError(err)),
+          );
+        }
       } catch (err) {
         console.warn('[wa-poll]', stringifyError(err));
       }

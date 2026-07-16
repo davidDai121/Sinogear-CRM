@@ -231,12 +231,16 @@ export function FilterMaintenancePanel({ orgId, onRefresh }: Props) {
       </button>
       {labelResult && (
         <div className="sgc-filter-sync-result">
-          ✓ 已分类 {labelResult.contactsTouched} 个客户：
+          ✓ 已保存 {labelResult.labelsStored} 个 WhatsApp 标签、
+          {labelResult.associationsStored} 条客户关联；
+          已分类 {labelResult.contactsTouched} 个客户：
           质量 {labelResult.qualityUpdated} ·
           阶段 {labelResult.stageUpdated} ·
           国家 {labelResult.countryUpdated} ·
           车型 {labelResult.vehiclesAdded} ·
           标签 {labelResult.tagsAdded}
+          {labelResult.associationsRemoved > 0 &&
+            ` · 清理旧关联 ${labelResult.associationsRemoved}`}
         </div>
       )}
       {labelError && <div className="sgc-filter-sync-error">{labelError}</div>}

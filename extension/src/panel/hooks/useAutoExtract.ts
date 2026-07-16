@@ -41,6 +41,10 @@ function hasSubstantiveCustomerContent(messages: { fromMe: boolean; text: string
   return messages.some((m) => !m.fromMe && isMeaningfulCustomerLine(m.text));
 }
 
+function isTransientAiNetworkError(message: string): boolean {
+  return /failed to fetch|network|timed out|timeout|connection|connect error|fetch failed|proxy/i.test(message);
+}
+
 function effectivelyEmpty(
   field: SuggestedField,
   contact: ContactRow,
@@ -111,6 +115,22 @@ export function useAutoExtract({ contact, save, enabled }: Args) {
   const saveRef = useRef(save);
   contactRef.current = contact;
   saveRef.current = save;
+
+  const applyPhoneFallback = async (c: ContactRow): Promise<SuggestedField[]> => {
+    const patch: ContactPatch = {};
+    const applied: SuggestedField[] = [];
+    if (effectivelyEmpty('country', c)) {
+      const fallback = phoneToCountry(c.phone);
+      if (fallback) {
+        patch.country = fallback;
+        applied.push('country');
+      }
+    }
+    if (Object.keys(patch).length > 0) {
+      await saveRef.current(patch);
+    }
+    return applied;
+  };
 
   useEffect(() => {
     if (!enabled) return;
@@ -249,7 +269,23 @@ export function useAutoExtract({ contact, save, enabled }: Args) {
         setStatus('done');
       } catch (err) {
         if (cancelled) return;
-        setError(stringifyError(err));
+        const message = stringifyError(err);
+        if (isTransientAiNetworkError(message) && contactRef.current) {
+          console.warn('[auto-extract] AI unavailable:', message);
+          try {
+            const applied = await applyPhoneFallback(contactRef.current);
+            if (cancelled) return;
+            setAppliedFields(applied);
+            setError('AI 自动分析暂不可用，客户资料可正常使用。请稍后点「重试」。');
+            setStatus('error');
+          } catch (fallbackErr) {
+            if (cancelled) return;
+            setError(stringifyError(fallbackErr));
+            setStatus('error');
+          }
+          return;
+        }
+        setError(message);
         setStatus('error');
       }
     })();

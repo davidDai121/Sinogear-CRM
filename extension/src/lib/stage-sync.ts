@@ -24,7 +24,9 @@ const AUTO_TO_DB: Record<AutoStage, CustomerStage> = {
   new: 'new',
   active: 'negotiating',
   stalled: 'stalled',
-  lost: 'lost',
+  // “超过 7 天未互动”只是活跃度，不等于业务流失。自动逻辑最多写到 stalled；
+  // lost 必须由销售手动确认，避免报表把沉默客户当成明确丢单。
+  lost: 'stalled',
 };
 
 const AUTO_MANAGED: ReadonlySet<CustomerStage> = new Set<CustomerStage>([
@@ -32,7 +34,6 @@ const AUTO_MANAGED: ReadonlySet<CustomerStage> = new Set<CustomerStage>([
   'qualifying',
   'negotiating',
   'stalled',
-  'lost',
 ]);
 
 export interface StageSyncItem {

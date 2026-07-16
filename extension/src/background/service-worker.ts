@@ -21,6 +21,7 @@ import { runGem, isBusy as isGemBusy } from '@/lib/gem-automation';
 import { runClaude, isBusy as isClaudeBusy } from '@/lib/claude-automation';
 import { runGpt, isBusy as isGptBusy } from '@/lib/gpt-automation';
 import { alarmKey, parseAlarmKey } from '@/lib/auto-reply-state';
+import { supabase } from '@/lib/supabase';
 
 const AI_BASE_URL =
   import.meta.env.VITE_AI_BASE_URL ??
@@ -392,23 +393,36 @@ async function callQwen(prompt: string): Promise<{ ok: true; parsed: unknown } |
   const apiKey = import.meta.env.VITE_DASHSCOPE_API_KEY;
   if (!apiKey) return { ok: false, error: '未配置 VITE_DASHSCOPE_API_KEY' };
 
-  const body = JSON.stringify({
+  const requestBody = {
     model: AI_MODEL,
     messages: [{ role: 'user', content: prompt }],
     response_format: { type: 'json_object' },
     temperature: 0.1,
-  });
+  };
+  const body = JSON.stringify(requestBody);
 
   let response: Response | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
-    response = await fetch(AI_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body,
-    });
+    try {
+      response = await fetch(AI_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body,
+      });
+    } catch (err) {
+      const message = String((err as Error)?.message ?? err);
+      const proxied = await callAiProxy(requestBody);
+      if (!proxied.ok) {
+        return {
+          ok: false,
+          error: `AI 直连失败：${message}；代理也失败：${proxied.error}`,
+        };
+      }
+      return parseJsonContent(proxied.content, 'AI 代理');
+    }
     if (response.status !== 429) break;
     const waitMs = [3000, 8000, 15000][attempt] ?? 15000;
     await new Promise((r) => setTimeout(r, waitMs));
@@ -426,10 +440,42 @@ async function callQwen(prompt: string): Promise<{ ok: true; parsed: unknown } |
   const content: string | undefined = json?.choices?.[0]?.message?.content;
   if (!content) return { ok: false, error: 'AI 返回空内容' };
 
+  return parseJsonContent(content, 'AI');
+}
+
+async function callAiProxy(
+  requestBody: Record<string, unknown>,
+): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  try {
+    const { data, error } = await supabase.functions.invoke('ai-proxy', {
+      body: requestBody,
+    });
+    if (error) {
+      return { ok: false, error: error.message };
+    }
+    if (!data?.ok || typeof data.content !== 'string') {
+      return {
+        ok: false,
+        error: String(data?.error ?? 'AI proxy returned invalid response'),
+      };
+    }
+    return { ok: true, content: data.content };
+  } catch (err) {
+    return {
+      ok: false,
+      error: String((err as Error)?.message ?? err),
+    };
+  }
+}
+
+function parseJsonContent(
+  content: string,
+  source: string,
+): { ok: true; parsed: unknown } | { ok: false; error: string } {
   try {
     return { ok: true, parsed: JSON.parse(content) };
   } catch {
-    return { ok: false, error: `AI 返回非 JSON：${content.slice(0, 100)}` };
+    return { ok: false, error: `${source} 返回非 JSON：${content.slice(0, 100)}` };
   }
 }
 
@@ -570,7 +616,7 @@ async function callQwenTranslate(
     return { ok: false, error: 'Google Translate 失败 + 未配置 Qwen fallback' };
 
   const targetName = TARGET_LANG_NAME[targetLang] ?? targetLang;
-  const body = JSON.stringify({
+  const requestBody = {
     model: AI_MODEL,
     messages: [
       {
@@ -580,18 +626,31 @@ async function callQwenTranslate(
       { role: 'user', content: text },
     ],
     temperature: 0.1,
-  });
+  };
+  const body = JSON.stringify(requestBody);
 
   let response: Response | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
-    response = await fetch(AI_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body,
-    });
+    try {
+      response = await fetch(AI_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body,
+      });
+    } catch (err) {
+      const message = String((err as Error)?.message ?? err);
+      const proxied = await callAiProxy(requestBody);
+      if (!proxied.ok) {
+        return {
+          ok: false,
+          error: `AI 直连失败：${message}；代理也失败：${proxied.error}`,
+        };
+      }
+      return { ok: true, translation: proxied.content.trim() };
+    }
     if (response.status !== 429) break;
     const waitMs = [3000, 8000, 15000][attempt] ?? 15000;
     await new Promise((r) => setTimeout(r, waitMs));

@@ -6,6 +6,8 @@ import { canonicalizeModel } from './vehicle-aliases';
 import { fetchAllPaged } from './supabase-paged';
 import type { CustomerQuality, CustomerStage } from './database.types';
 
+type WhatsAppDataSnapshot = Awaited<ReturnType<typeof readWhatsAppData>>;
+
 interface CategoryResult {
   category: 'quality' | 'stage' | 'country' | 'vehicle' | 'tag' | 'system';
   value?: string;
@@ -95,8 +97,11 @@ function categorizeLabel(name: string): CategoryResult {
 
   if (/待付款|已报价|报价/.test(trimmed))
     return { category: 'stage', value: 'quoted' };
+  // WhatsApp 标签常年不清理，不能作为付款/订单事实。以前这里直接写 won，
+  // 导致“口头同意/等待银行”的客户被 CRM 统计成成交。保留成待核实标签，
+  // 真正成交必须由销售在 CRM 手动确认。
   if (/成交|已成交|签约|订单/.test(trimmed))
-    return { category: 'stage', value: 'won' };
+    return { category: 'tag', value: 'WhatsApp 成交待核实' };
   if (/流失|丢失/.test(trimmed)) return { category: 'stage', value: 'lost' };
   if (/潜在客户|新询盘/.test(trimmed))
     return { category: 'stage', value: 'new' };
@@ -122,6 +127,10 @@ function categorizeLabel(name: string): CategoryResult {
 export interface LabelSyncResult {
   totalAssociations: number;
   contactsTouched: number;
+  labelsStored: number;
+  labelsDeactivated: number;
+  associationsStored: number;
+  associationsRemoved: number;
   qualityUpdated: number;
   stageUpdated: number;
   countryUpdated: number;
@@ -130,8 +139,161 @@ export interface LabelSyncResult {
   unmatchedLabels: string[];
 }
 
-export async function syncWhatsAppLabels(orgId: string): Promise<LabelSyncResult> {
-  const wa = await readWhatsAppData();
+interface PersistedWhatsAppResult {
+  labelsStored: number;
+  labelsDeactivated: number;
+  associationsStored: number;
+  associationsRemoved: number;
+}
+
+const WRITE_CHUNK_SIZE = 500;
+
+function chunksOf<T>(items: T[], size = WRITE_CHUNK_SIZE): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function persistWhatsAppLabels(
+  orgId: string,
+  wa: WhatsAppDataSnapshot,
+  contactByPhone: Map<
+    string | null,
+    {
+      id: string;
+      phone: string | null;
+      quality: CustomerQuality;
+      customer_stage: CustomerStage;
+      country: string | null;
+    }
+  >,
+): Promise<PersistedWhatsAppResult> {
+  const { data: authData, error: authError } = await supabase.auth.getUser();
+  if (authError) throw authError;
+  const userId = authData.user?.id;
+  if (!userId) throw new Error('登录已失效，请重新登录 CRM');
+
+  const syncedAt = new Date().toISOString();
+  const labelRows = wa.labels.map((label) => ({
+    org_id: orgId,
+    user_id: userId,
+    wa_label_id: label.id,
+    name: label.name,
+    color_index: label.colorIndex,
+    label_type: label.type,
+    is_active: label.isActive,
+    synced_at: syncedAt,
+  }));
+
+  for (const chunk of chunksOf(labelRows)) {
+    const { error } = await supabase
+      .from('whatsapp_labels')
+      .upsert(chunk, { onConflict: 'org_id,user_id,wa_label_id' });
+    if (error) throw error;
+  }
+
+  const storedLabels = await fetchAllPaged((from, to) =>
+    supabase
+      .from('whatsapp_labels')
+      .select('id, wa_label_id, is_active')
+      .eq('org_id', orgId)
+      .eq('user_id', userId)
+      .order('id', { ascending: true })
+      .range(from, to),
+  );
+
+  const currentWaIds = new Set(wa.labels.map((label) => label.id));
+  const missingLabelIds = storedLabels
+    .filter((label) => label.is_active && !currentWaIds.has(label.wa_label_id))
+    .map((label) => label.id);
+  for (const chunk of chunksOf(missingLabelIds)) {
+    const { error } = await supabase
+      .from('whatsapp_labels')
+      .update({ is_active: false, synced_at: syncedAt })
+      .in('id', chunk);
+    if (error) throw error;
+  }
+
+  const storedLabelIdByWaId = new Map(
+    storedLabels.map((label) => [label.wa_label_id, label.id]),
+  );
+  const activeWaLabelIds = new Set(
+    wa.labels.filter((label) => label.isActive).map((label) => label.id),
+  );
+  const desiredAssociations = new Map<
+    string,
+    { contact_id: string; whatsapp_label_id: string; synced_at: string }
+  >();
+
+  for (const association of wa.associations) {
+    if (
+      association.type !== 'jid' ||
+      !activeWaLabelIds.has(association.labelId)
+    ) {
+      continue;
+    }
+    const phone = resolvePhone(association.associationId, wa.jidToPhoneJid);
+    if (!phone) continue;
+    const contact = contactByPhone.get(phone);
+    const whatsappLabelId = storedLabelIdByWaId.get(association.labelId);
+    if (!contact || !whatsappLabelId) continue;
+    const key = `${contact.id}:${whatsappLabelId}`;
+    desiredAssociations.set(key, {
+      contact_id: contact.id,
+      whatsapp_label_id: whatsappLabelId,
+      synced_at: syncedAt,
+    });
+  }
+
+  const existingAssociations = await fetchAllPaged((from, to) =>
+    supabase
+      .from('contact_whatsapp_labels')
+      .select(
+        'id, contact_id, whatsapp_label_id, whatsapp_labels!inner(org_id, user_id)',
+      )
+      .eq('whatsapp_labels.org_id', orgId)
+      .eq('whatsapp_labels.user_id', userId)
+      .order('id', { ascending: true })
+      .range(from, to),
+  );
+  const staleAssociationIds = existingAssociations
+    .filter(
+      (row) =>
+        !desiredAssociations.has(`${row.contact_id}:${row.whatsapp_label_id}`),
+    )
+    .map((row) => row.id);
+
+  for (const chunk of chunksOf(staleAssociationIds)) {
+    const { error } = await supabase
+      .from('contact_whatsapp_labels')
+      .delete()
+      .in('id', chunk);
+    if (error) throw error;
+  }
+  for (const chunk of chunksOf(Array.from(desiredAssociations.values()))) {
+    const { error } = await supabase
+      .from('contact_whatsapp_labels')
+      .upsert(chunk, {
+        onConflict: 'contact_id,whatsapp_label_id',
+      });
+    if (error) throw error;
+  }
+
+  return {
+    labelsStored: labelRows.length,
+    labelsDeactivated: missingLabelIds.length,
+    associationsStored: desiredAssociations.size,
+    associationsRemoved: staleAssociationIds.length,
+  };
+}
+
+export async function syncWhatsAppLabels(
+  orgId: string,
+  snapshot?: WhatsAppDataSnapshot,
+): Promise<LabelSyncResult> {
+  const wa = snapshot ?? (await readWhatsAppData());
 
   const labelById = new Map(wa.labels.map((l) => [l.id, l]));
 
@@ -178,6 +340,7 @@ export async function syncWhatsAppLabels(orgId: string): Promise<LabelSyncResult
   }
 
   const contactByPhone = new Map(contactRows.map((c) => [c.phone, c]));
+  const persisted = await persistWhatsAppLabels(orgId, wa, contactByPhone);
   const existingTagSet = new Set(
     existingTags.map((t) => `${t.contact_id}:${t.tag}`),
   );
@@ -285,6 +448,7 @@ export async function syncWhatsAppLabels(orgId: string): Promise<LabelSyncResult
   return {
     totalAssociations: wa.associations.length,
     contactsTouched: touchedContactIds.size,
+    ...persisted,
     qualityUpdated: qualityUpdates.size,
     stageUpdated: stageUpdates.size,
     countryUpdated: countryUpdates.size,

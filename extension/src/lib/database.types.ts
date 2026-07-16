@@ -141,6 +141,82 @@ export interface Database {
         Update: Record<string, never>;
         Relationships: [];
       };
+      whatsapp_labels: {
+        Row: {
+          id: string;
+          org_id: string;
+          user_id: string;
+          wa_label_id: string;
+          name: string;
+          color_index: number;
+          label_type: number;
+          is_active: boolean;
+          synced_at: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          org_id: string;
+          user_id: string;
+          wa_label_id: string;
+          name: string;
+          color_index?: number;
+          label_type?: number;
+          is_active?: boolean;
+          synced_at?: string;
+        };
+        Update: {
+          name?: string;
+          color_index?: number;
+          label_type?: number;
+          is_active?: boolean;
+          synced_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'whatsapp_labels_membership_fkey';
+            columns: ['org_id', 'user_id'];
+            isOneToOne: false;
+            referencedRelation: 'organization_members';
+            referencedColumns: ['org_id', 'user_id'];
+          },
+        ];
+      };
+      contact_whatsapp_labels: {
+        Row: {
+          id: string;
+          contact_id: string;
+          whatsapp_label_id: string;
+          synced_at: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          contact_id: string;
+          whatsapp_label_id: string;
+          synced_at?: string;
+        };
+        Update: {
+          synced_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'contact_whatsapp_labels_contact_id_fkey';
+            columns: ['contact_id'];
+            isOneToOne: false;
+            referencedRelation: 'contacts';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'contact_whatsapp_labels_whatsapp_label_id_fkey';
+            columns: ['whatsapp_label_id'];
+            isOneToOne: false;
+            referencedRelation: 'whatsapp_labels';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       vehicle_interests: {
         Row: {
           id: string;
@@ -515,6 +591,79 @@ export interface Database {
           direction?: MessageDirection;
         };
         Relationships: [];
+      };
+      contact_sales_signals: {
+        Row: {
+          contact_id: string;
+          message_count: number;
+          inbound_count: number;
+          outbound_count: number;
+          first_message_at: string | null;
+          last_message_at: string | null;
+          last_inbound_at: string | null;
+          last_inbound_text: string | null;
+          last_outbound_at: string | null;
+          last_outbound_text: string | null;
+          quote_signal_at: string | null;
+          quote_excerpt: string | null;
+          accepted_signal_at: string | null;
+          accepted_excerpt: string | null;
+          payment_pending_at: string | null;
+          payment_pending_excerpt: string | null;
+          payment_received_at: string | null;
+          payment_received_excerpt: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          contact_id: string;
+          message_count?: number;
+          inbound_count?: number;
+          outbound_count?: number;
+          first_message_at?: string | null;
+          last_message_at?: string | null;
+          last_inbound_at?: string | null;
+          last_inbound_text?: string | null;
+          last_outbound_at?: string | null;
+          last_outbound_text?: string | null;
+          quote_signal_at?: string | null;
+          quote_excerpt?: string | null;
+          accepted_signal_at?: string | null;
+          accepted_excerpt?: string | null;
+          payment_pending_at?: string | null;
+          payment_pending_excerpt?: string | null;
+          payment_received_at?: string | null;
+          payment_received_excerpt?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          message_count?: number;
+          inbound_count?: number;
+          outbound_count?: number;
+          first_message_at?: string | null;
+          last_message_at?: string | null;
+          last_inbound_at?: string | null;
+          last_inbound_text?: string | null;
+          last_outbound_at?: string | null;
+          last_outbound_text?: string | null;
+          quote_signal_at?: string | null;
+          quote_excerpt?: string | null;
+          accepted_signal_at?: string | null;
+          accepted_excerpt?: string | null;
+          payment_pending_at?: string | null;
+          payment_pending_excerpt?: string | null;
+          payment_received_at?: string | null;
+          payment_received_excerpt?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'contact_sales_signals_contact_id_fkey';
+            columns: ['contact_id'];
+            isOneToOne: true;
+            referencedRelation: 'contacts';
+            referencedColumns: ['id'];
+          },
+        ];
       };
       contact_handlers: {
         Row: {

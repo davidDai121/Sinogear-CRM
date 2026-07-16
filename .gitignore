@@ -21,3 +21,5 @@ extension/supabase/.temp/
 reports/
 extension/.preview/
 .git.backup-*/
+outputs/
+分析导出/

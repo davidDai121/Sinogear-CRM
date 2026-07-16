@@ -49,6 +49,8 @@ const DB_REFETCH_INTERVAL_MS = 60 * 60 * 1000;
 /** visibilitychange 触发 refetch 的最短间隔。15min 内切回不重拉，对齐
  *  useCrmData 同款节流，避免日常切 tab 卡几秒 */
 const VISIBILITY_REFRESH_THROTTLE_MS = 15 * 60 * 1000;
+const AUTO_CLAIM_MAX_ORPHANS = 100;
+const AUTO_CLAIM_MAX_ORPHAN_RATIO = 0.05;
 
 const ScopeCtx = createContext<ScopeValue | null>(null);
 
@@ -111,6 +113,7 @@ export function ScopeProvider({
     byUser: new Map(),
   });
   const [loading, setLoading] = useState(true);
+  const [handlersLoaded, setHandlersLoaded] = useState(false);
   /** 兜底全量 refetch 触发器（30min / 手动 / visibility throttle） */
   const [refetchNonce, setRefetchNonce] = useState(0);
   const [scope, setScopeState] = useState<ViewScope>('mine');
@@ -139,16 +142,22 @@ export function ScopeProvider({
   useEffect(() => {
     if (!orgId) return;
     let cancelled = false;
+    setLoading(true);
+    setHandlersLoaded(false);
     void (async () => {
       try {
         const rows = await fetchHandlersForOrg(orgId);
         if (cancelled) return;
         lastFetchRef.current = Date.now();
         setMaps(buildHandlerMaps(rows));
+        setHandlersLoaded(true);
         setLoading(false);
       } catch (err) {
         console.warn('[scope] fetchHandlers failed', err);
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setHandlersLoaded(false);
+          setLoading(false);
+        }
       }
     })();
     return () => {
@@ -192,7 +201,7 @@ export function ScopeProvider({
   const autoClaimedRef = useRef(false);
   useEffect(() => {
     if (autoClaimedRef.current) return;
-    if (!orgId || !members.myUserId || loading) return;
+    if (!orgId || !members.myUserId || loading || !handlersLoaded) return;
     autoClaimedRef.current = true;
     let cancelled = false;
     void (async () => {
@@ -216,6 +225,16 @@ export function ScopeProvider({
         const handledIds = new Set(maps.byContact.keys());
         const orphans = allIds.filter((id) => !handledIds.has(id));
         if (orphans.length === 0) return;
+        const orphanRatio = allIds.length > 0 ? orphans.length / allIds.length : 0;
+        if (
+          orphans.length > AUTO_CLAIM_MAX_ORPHANS &&
+          orphanRatio > AUTO_CLAIM_MAX_ORPHAN_RATIO
+        ) {
+          console.warn(
+            `[scope] skip auto-claim: ${orphans.length}/${allIds.length} contacts look orphaned`,
+          );
+          return;
+        }
         const inserted = await batchBumpHandlers(orphans, members.myUserId!);
         if (inserted > 0) {
           console.log(
@@ -230,7 +249,7 @@ export function ScopeProvider({
     return () => {
       cancelled = true;
     };
-  }, [orgId, members.myUserId, loading, maps]);
+  }, [orgId, members.myUserId, loading, handlersLoaded, maps]);
 
   // ----- Effect: 30min 兜底 refetch + visibility 触发（throttled） -----
   useEffect(() => {

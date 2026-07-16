@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { logContactEvent } from '@/lib/events-log';
 import { ContactEditForm } from './ContactEditForm';
+import { SalesSignalBanner } from './SalesSignalBanner';
 import { GroupMembersSection } from './GroupMembersSection';
 import { TagsSection } from './TagsSection';
 import { VehicleInterestsSection } from './VehicleInterestsSection';
@@ -156,6 +157,7 @@ export function ContactDetailDrawer({ contactId, orgId, onClose, onChanged }: Pr
                 <>
                   <section className="sgc-drawer-section">
                     <div className="sgc-section-title">核心字段</div>
+                    <SalesSignalBanner contact={contact} />
                     <ContactEditForm
                       contact={contact}
                       onSave={handleSave}

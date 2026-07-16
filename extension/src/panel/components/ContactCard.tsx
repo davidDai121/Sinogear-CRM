@@ -5,6 +5,7 @@ import { useAutoExtract } from '../hooks/useAutoExtract';
 import { useAutoFbStage } from '../hooks/useAutoFbStage';
 import type { SuggestedField } from '@/lib/field-suggestions';
 import { ContactEditForm } from './ContactEditForm';
+import { SalesSignalBanner } from './SalesSignalBanner';
 import { GroupMembersSection } from './GroupMembersSection';
 import { TagsSection } from './TagsSection';
 import { VehicleInterestsSection } from './VehicleInterestsSection';
@@ -123,6 +124,7 @@ export function ContactCard({ chat, orgId }: Props) {
 
           <section className="sgc-drawer-section">
             <div className="sgc-section-title">核心字段</div>
+            <SalesSignalBanner contact={contact} />
             <ContactEditForm contact={contact} onSave={save} compact />
           </section>
 

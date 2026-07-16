@@ -12,8 +12,30 @@ interface TagStat {
   count: number;
 }
 
+interface WhatsAppTagStat {
+  key: string;
+  name: string;
+  colorIndex: number;
+  count: number;
+  sources: number;
+}
+
+const WHATSAPP_LABEL_COLORS = [
+  '#53bdeb',
+  '#ffd279',
+  '#99d793',
+  '#ff8a80',
+  '#d7aefb',
+  '#6fd3c3',
+  '#f7b955',
+  '#7f8de1',
+  '#c9df55',
+  '#f59ad7',
+];
+
 export function TagsPage({ orgId }: Props) {
   const [stats, setStats] = useState<TagStat[]>([]);
+  const [whatsAppStats, setWhatsAppStats] = useState<WhatsAppTagStat[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -31,14 +53,92 @@ export function TagsPage({ orgId }: Props) {
     // 分页拉全集，规避 1000 行上限——大 org 的 contact_tags 经常 3000+
     let rows: Array<{ tag: string }>;
     try {
-      rows = await fetchAllPaged<{ tag: string }>((from, to) =>
-        supabase
-          .from('contact_tags')
-          .select('tag, contacts!inner(org_id)')
-          .eq('contacts.org_id', orgId)
-          .order('contact_id', { ascending: true })
-          .order('tag', { ascending: true })
-          .range(from, to),
+      const [crmRows, waLabels] = await Promise.all([
+        fetchAllPaged<{ tag: string }>((from, to) =>
+          supabase
+            .from('contact_tags')
+            .select('tag, contacts!inner(org_id)')
+            .eq('contacts.org_id', orgId)
+            .order('contact_id', { ascending: true })
+            .order('tag', { ascending: true })
+            .range(from, to),
+        ),
+        fetchAllPaged<{
+          id: string;
+          name: string;
+          color_index: number;
+          user_id: string;
+        }>((from, to) =>
+          supabase
+            .from('whatsapp_labels')
+            .select('id, name, color_index, user_id')
+            .eq('org_id', orgId)
+            .eq('is_active', true)
+            .order('id', { ascending: true })
+            .range(from, to),
+        ),
+      ]);
+      rows = crmRows;
+
+      const associationRows: Array<{
+        contact_id: string;
+        whatsapp_label_id: string;
+      }> = [];
+      for (let i = 0; i < waLabels.length; i += 100) {
+        const labelIds = waLabels.slice(i, i + 100).map((label) => label.id);
+        const chunkRows = await fetchAllPaged<{
+          contact_id: string;
+          whatsapp_label_id: string;
+        }>((from, to) =>
+          supabase
+            .from('contact_whatsapp_labels')
+            .select('contact_id, whatsapp_label_id')
+            .in('whatsapp_label_id', labelIds)
+            .order('id', { ascending: true })
+            .range(from, to),
+        );
+        associationRows.push(...chunkRows);
+      }
+
+      const contactIdsByLabel = new Map<string, Set<string>>();
+      for (const row of associationRows) {
+        const ids = contactIdsByLabel.get(row.whatsapp_label_id) ?? new Set();
+        ids.add(row.contact_id);
+        contactIdsByLabel.set(row.whatsapp_label_id, ids);
+      }
+      const grouped = new Map<
+        string,
+        {
+          name: string;
+          colorIndex: number;
+          contactIds: Set<string>;
+          sourceIds: Set<string>;
+        }
+      >();
+      for (const label of waLabels) {
+        const key = label.name.trim().toLowerCase();
+        const current = grouped.get(key) ?? {
+          name: label.name,
+          colorIndex: label.color_index,
+          contactIds: new Set<string>(),
+          sourceIds: new Set<string>(),
+        };
+        current.sourceIds.add(label.user_id);
+        for (const contactId of contactIdsByLabel.get(label.id) ?? []) {
+          current.contactIds.add(contactId);
+        }
+        grouped.set(key, current);
+      }
+      setWhatsAppStats(
+        Array.from(grouped.entries())
+          .map(([key, value]) => ({
+            key,
+            name: value.name,
+            colorIndex: value.colorIndex,
+            count: value.contactIds.size,
+            sources: value.sourceIds.size,
+          }))
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -66,6 +166,11 @@ export function TagsPage({ orgId }: Props) {
     const q = search.trim().toLowerCase();
     return stats.filter((s) => s.tag.toLowerCase().includes(q));
   }, [stats, search]);
+  const filteredWhatsApp = useMemo(() => {
+    if (!search.trim()) return whatsAppStats;
+    const q = search.trim().toLowerCase();
+    return whatsAppStats.filter((s) => s.name.toLowerCase().includes(q));
+  }, [whatsAppStats, search]);
 
   const startRename = (tag: string) => {
     setRenaming(tag);
@@ -167,7 +272,7 @@ export function TagsPage({ orgId }: Props) {
       <div className="sgc-page-header">
         <h1>标签管理</h1>
         <span className="sgc-page-count">
-          共 {stats.length} 个标签 · {stats.reduce((s, t) => s + t.count, 0)} 条引用
+          WhatsApp {whatsAppStats.length} 个 · CRM {stats.length} 个
         </span>
       </div>
 
@@ -183,14 +288,48 @@ export function TagsPage({ orgId }: Props) {
       {loading && <div className="sgc-empty">加载中…</div>}
       {error && <div className="sgc-error">{error}</div>}
 
-      {!loading && filtered.length === 0 && (
-        <div className="sgc-empty">
-          {stats.length === 0 ? '还没有任何标签' : '没有匹配的标签'}
-        </div>
+      {!loading &&
+        filtered.length === 0 &&
+        filteredWhatsApp.length === 0 && (
+          <div className="sgc-empty">
+            {stats.length === 0 && whatsAppStats.length === 0
+              ? '还没有任何标签'
+              : '没有匹配的标签'}
+          </div>
+        )}
+      {!loading && filteredWhatsApp.length > 0 && (
+        <>
+          <div className="sgc-tags-section-title">WhatsApp 标签</div>
+          <div className="sgc-tags-table">
+            {filteredWhatsApp.map((s) => (
+              <div key={s.key} className="sgc-tags-row">
+                <span
+                  className="sgc-wa-label-swatch"
+                  style={{
+                    background:
+                      WHATSAPP_LABEL_COLORS[
+                        Math.abs(s.colorIndex) % WHATSAPP_LABEL_COLORS.length
+                      ],
+                  }}
+                  aria-hidden="true"
+                />
+                <span className="sgc-tags-row-name">{s.name}</span>
+                <span className="sgc-muted sgc-tags-row-count">
+                  {s.count} 个客户
+                  {s.sources > 1 ? ` · ${s.sources} 个销售来源` : ''}
+                </span>
+                <span className="sgc-source-badge">WhatsApp</span>
+              </div>
+            ))}
+          </div>
+        </>
       )}
 
-      <div className="sgc-tags-table">
-        {filtered.map((s) => {
+      {!loading && filtered.length > 0 && (
+        <>
+          <div className="sgc-tags-section-title">CRM 标签</div>
+          <div className="sgc-tags-table">
+            {filtered.map((s) => {
           const isRenaming = renaming === s.tag;
           const isBusy = busyTag === s.tag;
           const isConfirmingDelete = confirmingDelete === s.tag;
@@ -302,8 +441,10 @@ export function TagsPage({ orgId }: Props) {
               </div>
             </div>
           );
-        })}
-      </div>
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }

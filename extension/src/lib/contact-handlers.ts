@@ -60,7 +60,7 @@ export function buildHandlerMaps(rows: ContactHandlerRow[]): HandlerMaps {
 
 /**
  * 批量登记当前用户为多个客户的 handler。
- * 用于 ChatPage 加载时，把 WA 聊天列表里的所有联系人一次性归到我名下。
+ * 仅用于 ScopeContext 兜底认领少量无人主理的历史客户。
  * 已存在的不动（onConflict do nothing），不会刷新 last_seen_at。
  */
 export async function batchBumpHandlers(
