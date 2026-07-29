@@ -315,6 +315,66 @@ function readChatFromMainFiber(main: Element): {
   return { name, phone, rawJid: chatJid, groupJid: null };
 }
 
+/**
+ * MAIN-world fiber bridge 读取（2026-07-28）：SW 往页面主世界注入的脚本
+ * 每 ~800ms 把当前 chat 的 {rawJid, phoneJid, title, verifiedName} 写到
+ * <html data-sgc-fiber-chat>。isolated world 的 fiber 直读从未生效过
+ * （React expando 跨 world 不可见），这个属性是 fiber 数据的唯一可靠通道。
+ *
+ * staleness 防护：bridge 轮询有 ~1s 延迟，用户刚切聊天时属性可能还是
+ * 上一个 chat 的——必须跟当前 header 名字/号码对得上才采信，否则返回
+ * null 落回其他路径。绝不能拿 stale 身份去建 contact / 写 messages。
+ */
+function readChatFromBridge(main: Element): {
+  name: string | null;
+  phone: string | null;
+  rawJid: string | null;
+  groupJid: string | null;
+} | null {
+  const raw = document.documentElement.getAttribute('data-sgc-fiber-chat');
+  if (!raw) return null;
+  let p: {
+    rawJid?: string;
+    phoneJid?: string | null;
+    title?: string | null;
+    verifiedName?: string | null;
+  };
+  try {
+    p = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!p?.rawJid) return null;
+
+  let phone = jidToPhone(p.rawJid);
+  if (!phone && p.phoneJid) phone = jidToPhone(p.phoneJid);
+
+  const headerName = readNameFromHeader(main) || readNameFromHeader(document);
+  if (headerName) {
+    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+    const h = norm(headerName);
+    const nameHit = [p.title, p.verifiedName]
+      .filter((x): x is string => typeof x === 'string' && x.length > 0)
+      .some((c) => {
+        const a = norm(c);
+        return a.includes(h) || h.includes(a);
+      });
+    // header 本身是号码的场景（未存通讯录）：比数字
+    const headerDigits = headerName.replace(/\D/g, '');
+    const phoneHit =
+      headerDigits.length >= 7 &&
+      !!phone &&
+      phone.replace(/\D/g, '').endsWith(headerDigits.replace(/^0+/, ''));
+    if (!nameHit && !phoneHit) return null;
+  }
+
+  const name = headerName || p.title || p.verifiedName || null;
+  if (p.rawJid.endsWith('@g.us')) {
+    return { name, phone: null, rawJid: p.rawJid, groupJid: p.rawJid };
+  }
+  return { name, phone, rawJid: p.rawJid, groupJid: null };
+}
+
 function readNameFromHeader(scope: ParentNode): string | null {
   const header = scope.querySelector('header');
   if (!header) return null;
@@ -386,10 +446,20 @@ export function readCurrentChat(): CurrentChat {
   const main = findMainPane();
   if (!main) return EMPTY_CHAT;
 
-  // 0. 最优路径：直接从 #main 的 React fiber 读 chat 模型。
-  //    新版 WA Web (2026-05+) 不再把 JID 放进 DOM attribute / IDB chat.name，
-  //    但 fiber 上的 chat 对象一直完整保留 id/phoneNumber/formattedTitle。
-  //    这是唯一不依赖 nameToPhoneCache 命中的可靠路径。
+  // 0. 最优路径：MAIN-world bridge 转发的 fiber chat 模型（带 header 一致性
+  //    防 stale 校验）。isolated world 直读 fiber 从未生效过（expando 跨
+  //    world 不可见），bridge 是 @lid 业务号手机号的唯一可靠来源。
+  const fromBridge = readChatFromBridge(main);
+  if (fromBridge && (fromBridge.phone || fromBridge.groupJid)) {
+    if (fromBridge.rawJid && fromBridge.phone) {
+      void rememberJidPhone(fromBridge.rawJid, fromBridge.phone);
+    }
+    return fromBridge;
+  }
+  const bridgeRawJid =
+    fromBridge && !fromBridge.groupJid ? fromBridge.rawJid : null;
+
+  // 0b. 老的 isolated-world fiber 直读保留兜底（万一未来 world 隔离行为变化）
   const fromFiber = readChatFromMainFiber(main);
   if (fromFiber && (fromFiber.phone || fromFiber.groupJid)) {
     if (fromFiber.rawJid && fromFiber.phone) {
@@ -400,7 +470,8 @@ export function readCurrentChat(): CurrentChat {
   // fiber 给了 rawJid 但没 phone（@lid 业务号 contact.phoneNumber 空 + 多源
   // fallback 也没命中）—— 别整段丢，保留 rawJid 让下面 cache 路径还能补救
   const fiberRawJid =
-    fromFiber && !fromFiber.groupJid ? fromFiber.rawJid : null;
+    (fromFiber && !fromFiber.groupJid ? fromFiber.rawJid : null) ??
+    bridgeRawJid;
   const fiberName = fromFiber?.name ?? null;
 
   const name = readNameFromHeader(main) || readNameFromHeader(document);
@@ -448,7 +519,7 @@ export function readCurrentChat(): CurrentChat {
   }
 
   let phone: string | null = null;
-  let rawJid: string | null = fiberRawJid;
+  let rawJid: string | null = fiberRawJid ?? bridgeRawJid;
 
   const phoneFromName = extractPhoneFromText(name);
   if (phoneFromName) phone = phoneFromName;
@@ -698,6 +769,8 @@ function buildInspectReport(): Record<string, unknown> {
         : ''),
     headerName,
     groupJid,
+    bridgeAttr:
+      document.documentElement.getAttribute('data-sgc-fiber-chat') ?? null,
     jidInfoFromDataId: jidInfo,
     jidPhoneCacheKeys: cacheKeys,
     nameToPhoneCacheSize: ntpSize,

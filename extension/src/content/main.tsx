@@ -26,6 +26,20 @@ function mount() {
   const root = createRoot(host);
   root.render(<AppShell />);
 
+  // 请求 SW 往页面 MAIN world 注入 fiber bridge（isolated world 看不到
+  // 页面 React 的 __reactFiber$ expando，@lid 业务号的手机号只有 fiber 有）。
+  // 注入完成后重读当前聊天。
+  try {
+    void chrome.runtime
+      .sendMessage({ type: 'INJECT_FIBER_BRIDGE' })
+      .then(() => {
+        window.dispatchEvent(new CustomEvent('sgc:refresh-chat'));
+      })
+      .catch(() => {});
+  } catch {
+    // 扩展刚更新导致 context 失效时忽略，刷新页面自愈
+  }
+
   void refreshChatNameCache().then(() => {
     // After cache populated, re-detect current chat (in case initial read missed phone)
     window.dispatchEvent(new CustomEvent('sgc:refresh-chat'));

@@ -865,6 +865,25 @@ npm run package
 
 **教训**：① egress 模型是按当时数据量写死的快照，**数据涨了模型就失效**——contacts 再翻倍时要回头重算 useCrmData 头部注释里的数字；② visibilitychange 这类"用户行为触发"的 refetch 是隐形放大器，节流窗口按"Realtime 断线兜底"定位放宽，别按"数据新鲜度"定位收紧；③ 分析脚本每轮全量拉 messages 表很贵（~21MB/次），**做报告类任务先 dump 一次缓存到本地文件，迭代复用**；④ PostgREST `contacts!inner()` 空 embed 可以只做 join 过滤不回传字段，所有"借关联表过滤 org"的查询都该用这个形态。
 
+### 近期补完（2026-07-29）— @lid 业务号识别不出 Sima：fiber 路径从未在生产生效（isolated world 看不到 React expando），MAIN-world bridge 修复
+
+**起点**：用户问 "why sima not show"——Sima（WhatsApp 业务账号）聊天打开着，CRM 面板标题显示 Sima 但客户卡是"请在 WhatsApp 选择一个聊天"，左侧客户列表也没有；service_role 查 DB 确认 Sima contact 从未被创建过。
+
+**根因**（全部靠 boss 在 DevTools console 跑诊断实测，不靠猜）：三层叠加：
+1. **fiber 路径从未在生产生效过**——content script 跑在 isolated world，看不到页面 React 挂在 DOM 元素上的 `__reactFiber$` JS expando。扩展侧诊断报 `mainAllOwnKeysCount: 0` / `hasFiber: false`，而同一元素在页面 console（MAIN world）里明晃晃挂着 `__reactFiber$ls53danghz`；扩展全页扫 fiber 只找到自己 UI 的 `sgc-shell`（自己的 React 在自己 world 里挂的）。2026-05 写的 fiber 直读代码一直是死的，全靠 IDB name cache 掩盖，无人察觉。
+2. Sima 是 @lid 业务号，WA IndexedDB 里 **contact / chat 表完全没有名为 Sima 的行**（console 扫 IDB 两表均 0 命中），lid→phone 映射也没有 → nameToPhoneCache 构建时直接跳过，名字兜底路径也死。
+3. header 只显示 "Sima" 无号码、data-id 全是 opaque hash → 所有 4 条解析路径全灭。
+4. 但页面 console 直读 fiber 的 chat 模型里什么都有：`id: 139432019632364@lid`、`contact.phoneNumber: "251911532746@c.us"`、`verifiedName: "Sima"`——**@lid 业务号的真实手机号只存在于 fiber，IDB 没有**。且该 lid 早就在 jidPhoneCache 里，只是没有 fiber 给 rawJid 就查不到。
+
+**修法**（`service-worker.ts` + `content/main.tsx` + `content/whatsapp-dom.ts`）：
+- SW 加 `INJECT_FIBER_BRIDGE` handler：`chrome.scripting.executeScript({world:'MAIN', func: fiberBridgeMainWorld})` 往页面主世界注入自包含函数（序列化注入，不能引用外部作用域）；每 800ms + click 后补读两次，从 `#main` fiber 抽 chat 模型，把 `{rawJid, phoneJid, title, verifiedName}` JSON 写到 `<html data-sgc-fiber-chat>` 属性——**DOM 属性跨 world 共享**，这是 isolated ↔ MAIN 的桥。
+- `main.tsx` mount 时 sendMessage 请求注入，注入完成 dispatch `sgc:refresh-chat`。
+- `whatsapp-dom.ts` 新增 `readChatFromBridge` 作为 `readCurrentChat` 第 0 步：解析属性 → `jidToPhone(rawJid)` 不行再用 phoneJid → **staleness 防护**（bridge 轮询有 ~1s 延迟，切聊天瞬间可能还是上一个 chat 的值）：header 名字必须命中 title/verifiedName（normalize 后互相 contains）或 header 数字后缀命中 phone，否则返回 null 落回旧路径——绝不拿 stale 身份建 contact / 写 messages。命中后 `rememberJidPhone(lid→phone)` 持久化，useCrmData 列表扫描也能映射；bridge 的 rawJid 还接进后面 jidPhoneCache 兜底链。旧 isolated fiber 直读保留兜底。
+
+**验证**：boss 实机装新 build 后 Sima 客户卡立即解析出 +251911532746 / Ethiopia，自动 AI 抽取跑通（country 填 Ethiopia）。typecheck + build 通过。
+
+**教训**：① **content script isolated world 永远看不到页面 JS expando**（React fiber、页面全局变量）——任何"读 WA 内部模型"的功能必须 MAIN world 注入 + DOM attribute / postMessage 桥接，别再在 isolated world 里写 fiber 直读；② "路径 A 死了被路径 B 掩盖"能潜伏一年多——多路径 fallback 系统必须有像 `[sgc/inspect-chat]` 这样把**每条路径中间值**都打出来的诊断，否则死路径永远发现不了；③ 诊断日志 tag 行和 JSON 行分开打时，DevTools filter 会只显示 tag 行——JSON 也要带同 tag 前缀；④ 修完当场又遇 `AbortError: Lock broken by another request with the 'steal' option`——那是 Supabase auth 的 Web Locks 被抢：典型原因是**扩展被同时加载了两份**（团队 zip 版 + unpacked dist），双 content script 各建 supabase client 抢同 origin 的 session lock；HOST_ID guard 防双 UI 但防不了双 client。排查顺序：chrome://extensions 看是否有两个 Sino Gear CRM → 只留一份 → 关多余 WA tab → F5。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -971,6 +990,9 @@ WhatsApp 绿色主题：
 - **DB DDL 可以从这台机器自动跑**（2026-07-15 确认）：supabase CLI 已登录，`security find-generic-password -s "Supabase CLI" -w` 取 keychain 值 → strip `go-keyring-base64:` 前缀 + `base64 -d` → `sbp_` token → `POST https://api.supabase.com/v1/projects/hgkjmmvotpakcetcwpoy/database/query` 跑任意 SQL（整个 migration 文件一次 POST = 单个隐式事务）。不用再让用户去 SQL Editor 手跑；但 `CREATE INDEX CONCURRENTLY` 这类不能进事务的语句要单独 POST
 - **ai-proxy 是网络容错 fallback 不是 key 安全方案**（`service-worker.ts` + `functions/ai-proxy/`）：直连 open.bigmodel.cn 优先，只有 fetch 抛**网络错**（非 4xx/5xx 响应）才走代理。改 AI 调用逻辑时保持这个顺序——代理有冷启动延迟且吃 Supabase 免费额度。key 仍打进 dist（backlog"搬代理 + 轮换"未完成）
 - **WA 标签目录按 (org, user) 作用域存储**（`whatsapp_labels` 表）：wa_label_id 是 WhatsApp 账号级 id，不同销售的同名标签是不同行；TagsPage 展示时按 `name.trim().toLowerCase()` 分组合并并显示来源销售数。新查询这张表记得带 user_id 或明确按 name 聚合
+- **content script isolated world 看不到页面 React fiber expando**（2026-07-29 修，fiber bridge）：`__reactFiber$` 是页面 world 的 JS expando，isolated world 里 `Object.getOwnPropertyNames` 返回空——**在 content script 里直读 fiber 的代码永远不工作**（2026-05 写的 readChatFromMainFiber 就是死的，被 IDB cache 掩盖一年多）。正确姿势：SW `chrome.scripting.executeScript({world:'MAIN'})` 注入自包含函数（不能引用外部作用域），数据经 **DOM 属性**（跨 world 共享）回传——现行实现是 `fiberBridgeMainWorld`（service-worker.ts）写 `<html data-sgc-fiber-chat>`，isolated 侧 `readChatFromBridge`（whatsapp-dom.ts）读。**改 fiber 抽取逻辑要改 SW 里那份**（独立实现，不 import whatsapp-dom）；`readChatFromBridge` 的 header 一致性 staleness 校验**绝不能删**（bridge 有 ~1s 延迟，删了会拿上一个聊天的身份建 contact / 写 messages = 跨聊天污染）
+- **@lid 业务号的真实手机号可能只存在于 fiber**：WA IDB contact/chat 表完全没有该联系人（连名字都没有）也是正常情况（Sima 案例），别假设"IDB 扫不到 = 不存在"。fiber bridge 是这类客户唯一的识别来源
+- **`AbortError: Lock broken by another request with the 'steal' option'` = Supabase auth Web Locks 被抢**：几乎总是**扩展被加载了两份**（团队 zip 版 + unpacked dist 同时启用），双 content script 各建 supabase client 抢同一 origin 的 session lock；HOST_ID guard 防双 UI 但防不了双 client。排查：chrome://extensions 只留一份 Sino Gear CRM → 关多余 web.whatsapp.com tab → F5
 - **Egress 预算意识：数据涨、周期性拉取、分析脚本三个都会烧免费额度**（2026-07-16 修，21 天烧掉 4.11GB/5GB）：① useCrmData 头部 egress 模型是数据量快照，contacts 明显增长后要重算；② 新加"周期性 / 用户行为触发"的 DB 拉取（interval、visibilitychange、focus 等）先算"次数 × 单次体积 × 3 销售 × 25 天"，visibility 类节流对齐 60min；③ 全量拉大表的查询一律 slim select + `contacts!inner()` 空 embed（只 join 过滤不回传字段）；④ 一次性分析脚本别每轮迭代重拉 messages 全表（~21MB/次），dump 一次存本地文件复用
 
 ## 用户偏好
