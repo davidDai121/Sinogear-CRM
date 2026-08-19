@@ -75,6 +75,10 @@ div[style*="translate"]:has(> [role="menu"] button[aria-label="Bold"]) {
   font-size: 13px;
   color: #111b21;
   pointer-events: none;
+  /* WA Web 在祖先链上设 user-select: none，user-select 的 auto 会沿用
+     父级 used value——不显式恢复的话整个 CRM 面板文本都无法鼠标选中/复制 */
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 #sgc-extension-host > .sgc-shell {
