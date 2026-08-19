@@ -12,6 +12,16 @@ const DB_NAME = 'model-storage';
 const STORE = 'message';
 const SCAN_LIMIT = 10000;
 
+/** 一个聊天的收发活跃度——只要方向和时间，不要正文 */
+export interface ChatActivity {
+  /** 最后一条客户来信，秒级 epoch；没有则 null */
+  lastInboundT: number | null;
+  /** 最后一条我方外发，秒级 epoch；没有则 null */
+  lastOutboundT: number | null;
+  inboundCount: number;
+  outboundCount: number;
+}
+
 export interface InboundMessage {
   /** 全局唯一 id (_serialized form, 如 'false_1234@c.us_ABC123') */
   msgId: string;
@@ -145,4 +155,110 @@ function parseMessage(v: unknown): InboundMessage | null {
   }
 
   return { msgId, chatId, body, t, type };
+}
+
+/**
+ * 扫全部聊天的收发活跃度。**不读正文**——WhatsApp 2025 起消息正文在 IndexedDB
+ * 里是加密的（`msgRowOpaqueData`），`body` 字段已经不存在（boss 机器实测
+ * 7479 条消息里 body 存在数 = 0）。但方向和精确时间戳都还在，而
+ * 「球在谁手上 / 等了多久 / 我该回」这几个判断本来就只需要这两样。
+ *
+ * 为什么要它：messages 表靠 DOM 抓取累积，只覆盖「人点开过的聊天」的
+ * 「渲染出来的 30 条」——2026-08-19 实测近 7 天本机 202 个聊天里库里只有 155 个、
+ * 消息只有 54%。拿 IDB 直接算就能 100% 覆盖，且不产生任何数据库读写。
+ *
+ * 性能：一次 getAll 全表 + 一遍分组。boss 机器 7.5k 条约 200ms。
+ * 调用方自己节流（见 useCrmData 的 ACTIVITY_REFRESH_MS）。
+ */
+export async function readChatActivity(): Promise<Map<string, ChatActivity>> {
+  const out = new Map<string, ChatActivity>();
+  let db: IDBDatabase;
+  try {
+    db = await openDb();
+  } catch {
+    return out;
+  }
+  try {
+    if (!db.objectStoreNames.contains(STORE)) return out;
+    const rows = await new Promise<unknown[]>((resolve, reject) => {
+      const req = db.transaction([STORE], 'readonly').objectStore(STORE).getAll();
+      req.onsuccess = () => resolve(req.result as unknown[]);
+      req.onerror = () => reject(req.error);
+    });
+
+    for (const v of rows) {
+      const parsed = parseActivity(v);
+      if (!parsed) continue;
+      const { chatId, fromMe, t } = parsed;
+      let cur = out.get(chatId);
+      if (!cur) {
+        cur = {
+          lastInboundT: null,
+          lastOutboundT: null,
+          inboundCount: 0,
+          outboundCount: 0,
+        };
+        out.set(chatId, cur);
+      }
+      if (fromMe) {
+        cur.outboundCount++;
+        if (cur.lastOutboundT === null || t > cur.lastOutboundT) {
+          cur.lastOutboundT = t;
+        }
+      } else {
+        cur.inboundCount++;
+        if (cur.lastInboundT === null || t > cur.lastInboundT) {
+          cur.lastInboundT = t;
+        }
+      }
+    }
+    return out;
+  } catch {
+    return out;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * 轻量解析：只抠 chatId / fromMe / 秒级时间戳。
+ * 比 parseMessage 便宜（不碰 body / type），且**不丢 outbound**。
+ */
+function parseActivity(
+  v: unknown,
+): { chatId: string; fromMe: boolean; t: number } | null {
+  if (!v || typeof v !== 'object') return null;
+  const r = v as Record<string, unknown>;
+
+  let fromMe = false;
+  let chatId = '';
+  const idField = r.id;
+  if (typeof idField === 'string') {
+    // 'false_<jid>_<msgid>' / 'true_<jid>_<msgid>'
+    const m = idField.match(/^(true|false)_([^_]+@[^_]+)_/);
+    if (m) {
+      fromMe = m[1] === 'true';
+      chatId = m[2]!;
+    }
+  } else if (typeof idField === 'object' && idField !== null) {
+    const o = idField as Record<string, unknown>;
+    fromMe = o.fromMe === true;
+    if (typeof o.remote === 'string') chatId = o.remote;
+    else if (typeof o.remote === 'object' && o.remote !== null) {
+      const rem = o.remote as Record<string, unknown>;
+      if (typeof rem._serialized === 'string') chatId = rem._serialized;
+    }
+  }
+  if (typeof r.fromMe === 'boolean') fromMe = r.fromMe;
+  if (!chatId && typeof r.from === 'string') chatId = r.from;
+  if (!chatId) return null;
+  // 群聊 / 广播 / newsletter 不参与「我该回」判定
+  if (!/@(c\.us|lid)$/.test(chatId) || chatId.includes('-')) return null;
+
+  const raw = r.t;
+  if (typeof raw !== 'number' || raw <= 0) return null;
+  // WA 存秒；偶有毫秒。统一成秒（与 MsgDirection 的单位一致）
+  const t = raw > 1e12 ? Math.floor(raw / 1000) : raw;
+
+  return { chatId, fromMe, t };
 }

@@ -14,6 +14,10 @@ import {
   type WALabel,
   type WALabelAssociation,
 } from '@/lib/whatsapp-idb';
+import {
+  readChatActivity,
+  type ChatActivity,
+} from '@/lib/whatsapp-idb-messages';
 import { ensureJidPhoneCacheLoaded } from '@/lib/jid-phone-cache';
 import { classifyChat, type ChatClassification } from '@/lib/chat-classifier';
 import {
@@ -168,6 +172,12 @@ interface WaPolledState {
   jidToPhoneJid: Map<string, string>;
   jidPhoneCache: Record<string, string>;
   pendingMap: PendingReplyMap;
+  /**
+   * 每个聊天的收发活跃度，直接从 WhatsApp IndexedDB 算。
+   * messages 表只覆盖「人点开过」的聊天（实测近 7 天 202 个聊天里库里只有 155 个），
+   * 这份是全量的，用来兜住「我该回 / 等待天数」的判定。见 mergeDirection()。
+   */
+  waActivity: Map<string, ChatActivity>;
 }
 
 const EMPTY_DB: DbState = {
@@ -187,7 +197,42 @@ const EMPTY_WA: WaPolledState = {
   jidToPhoneJid: new Map(),
   jidPhoneCache: {},
   pendingMap: {},
+  waActivity: new Map(),
 };
+
+/** IDB 活跃度重算间隔。全表扫 ~7.5k 条约 200ms，没必要跟着 30s 轮询走 */
+const ACTIVITY_REFRESH_MS = 60 * 1000;
+
+/**
+ * DB（messages 表）和 IDB（WhatsApp 本地库）两份方向信号合并。
+ *
+ * - 时间戳取两边较新的：IDB 覆盖全部聊天但只留最近几个月，DB 有完整历史
+ *   但只覆盖被点开过的聊天。取 max 两边的短板互补。
+ * - 条数以 DB 为准（IDB 会滚动清理，条数偏少），DB 没有才用 IDB 的。
+ */
+function mergeDirection(
+  db: MsgDirection | undefined,
+  idb: ChatActivity | undefined,
+): MsgDirection {
+  if (!idb) {
+    return (
+      db ?? {
+        lastInboundT: null,
+        lastOutboundT: null,
+        inboundCount: 0,
+        outboundCount: 0,
+      }
+    );
+  }
+  const newer = (a: number | null, b: number | null): number | null =>
+    a === null ? b : b === null ? a : Math.max(a, b);
+  return {
+    lastInboundT: newer(db?.lastInboundT ?? null, idb.lastInboundT),
+    lastOutboundT: newer(db?.lastOutboundT ?? null, idb.lastOutboundT),
+    inboundCount: Math.max(db?.inboundCount ?? 0, idb.inboundCount),
+    outboundCount: Math.max(db?.outboundCount ?? 0, idb.outboundCount),
+  };
+}
 
 interface StoredWaLabelSyncState {
   fingerprint: string;
@@ -625,6 +670,8 @@ export function useCrmData(orgId: string | null): CrmData {
     let cancelled = false;
     let syncInFlight = false;
     let syncStateLoaded = false;
+    let lastActivityAt = 0;
+    let lastActivity = new Map<string, ChatActivity>();
     let lastFailureAt = 0;
     let storedFingerprint = '';
     let storedSyncedAt = 0;
@@ -704,6 +751,16 @@ export function useCrmData(orgId: string | null): CrmData {
           Date.now() / 1000,
         );
         if (cancelled) return;
+
+        // IDB 活跃度：60s 才重算一次，其余轮次沿用上一份
+        if (Date.now() - lastActivityAt >= ACTIVITY_REFRESH_MS) {
+          lastActivity = await readChatActivity().catch(
+            () => lastActivity,
+          );
+          lastActivityAt = Date.now();
+          if (cancelled) return;
+        }
+
         setWaState({
           labels: wa.labels,
           associations: wa.associations,
@@ -711,6 +768,7 @@ export function useCrmData(orgId: string | null): CrmData {
           jidToPhoneJid: wa.jidToPhoneJid,
           jidPhoneCache,
           pendingMap,
+          waActivity: lastActivity,
         });
         void maybeSyncWaLabels(wa);
       } catch (err) {
@@ -737,7 +795,15 @@ export function useCrmData(orgId: string | null): CrmData {
       msgDirections,
       pinnedIds,
     } = dbState;
-    const { chats, jidToPhoneJid, jidPhoneCache, labels, associations, pendingMap } =
+    const {
+      chats,
+      jidToPhoneJid,
+      jidPhoneCache,
+      labels,
+      associations,
+      pendingMap,
+      waActivity,
+    } =
       waState;
 
     const chatByPhone = new Map<string, WAChat>();
@@ -772,16 +838,14 @@ export function useCrmData(orgId: string | null): CrmData {
       .map((c) => {
         const chat = chatByPhone.get(c.phone!)!;
         const jid = chat.id;
-        const dir = msgDirections.get(c.id);
+        const dir = mergeDirection(
+          msgDirections.get(c.id),
+          waActivity.get(jid),
+        );
         const classification = classifyChat(
           chat,
           { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
-          {
-            lastInboundT: dir?.lastInboundT ?? null,
-            lastOutboundT: dir?.lastOutboundT ?? null,
-            inboundCount: dir?.inboundCount ?? 0,
-            outboundCount: dir?.outboundCount ?? 0,
-          },
+          dir,
           now,
         );
         return {
@@ -820,7 +884,7 @@ export function useCrmData(orgId: string | null): CrmData {
         classification: classifyChat(
           chat,
           { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
-          { lastInboundT: null, lastOutboundT: null },
+          mergeDirection(undefined, waActivity.get(chat.id)),
           now,
         ),
       });
