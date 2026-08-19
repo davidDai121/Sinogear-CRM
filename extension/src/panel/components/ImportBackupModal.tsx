@@ -254,7 +254,18 @@ export function ImportBackupModal({ orgId, onClose, onDone }: Props) {
                 )}
                 {summary.lidChats > 0 && (
                   <div className="sgc-muted" style={{ fontSize: 12, marginTop: 4 }}>
-                    ⚠ 业务号 lid 这版先跳过（需要再 join 表反查真号）
+                    {summary.lidResolvedChats > 0 ? (
+                      <>
+                        ✓ lid 聊天经 jid_map 反查出手机号{' '}
+                        <strong>{summary.lidResolvedChats.toLocaleString()}</strong> 个
+                        （{summary.lidResolvedMessages.toLocaleString()} 条消息），已并入下面的导入范围
+                        {summary.lidChats > summary.lidResolvedChats && (
+                          <>；还有 {(summary.lidChats - summary.lidResolvedChats).toLocaleString()} 个反查不到，跳过</>
+                        )}
+                      </>
+                    ) : (
+                      <>⚠ 这份备份没有 jid_map 表，lid 聊天无法反查真号，全部跳过</>
+                    )}
                   </div>
                 )}
               </div>

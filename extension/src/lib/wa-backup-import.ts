@@ -1,8 +1,13 @@
 /**
  * 把解密后的 msgstore.db 全量批量写到 Supabase。
  *
- * 复用 chat-import.ts 的幂等思路：wa_message_id = 'crypt15:<sha16(ts|dir|text)>'。
- * 跟 .txt 导入用的 'import:' 前缀分开，两条路径各自去重不互踩。
+ * wa_message_id 用备份里的 `message.key_id`（WhatsApp 原始消息 id）——
+ * 跟 WhatsApp Web DOM 抓取写入的是同一个值，靠 (contact_id, wa_message_id)
+ * 唯一约束天然去重，重复导入 / 与 DOM 路径重叠都不会产生副本。
+ *
+ * ⚠️ 2026-08-19 之前用的是 'crypt15:<sha16(ts|dir|text)>'，跟 DOM 的 id 撞不上：
+ * 当时库里 2026-05-08 之后的 DOM 消息有 28,006 条，按老方案重导会每条多一份副本。
+ * key_id 缺失（老 schema）时才回退到内容 hash。
  *
  * 性能优化（vs 一条条调 chat-import）：
  *   - 一次性 batch 查所有已存 contacts
@@ -219,10 +224,13 @@ export async function importBackupToSupabase(
     for (const m of messages) {
       const direction: Direction = m.fromMe ? 'outbound' : 'inbound';
       const tsIso = new Date(m.ts).toISOString();
-      const hash = (await sha256Hex(`${tsIso}|${direction}|${m.text.slice(0, 500)}`)).slice(0, 16);
+      // key_id 在手就直接用（与 DOM 路径同源，天然去重）；没有才回退到内容 hash
+      const waMessageId =
+        m.keyId ??
+        `crypt15:${(await sha256Hex(`${tsIso}|${direction}|${m.text.slice(0, 500)}`)).slice(0, 16)}`;
       pending.push({
         contact_id: contactId,
-        wa_message_id: `crypt15:${hash}`,
+        wa_message_id: waMessageId,
         direction,
         text: m.text,
         sent_at: tsIso,
