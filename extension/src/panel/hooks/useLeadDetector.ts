@@ -31,6 +31,13 @@ const POLL_INTERVAL_MS = 1500;
 const POLL_ATTEMPTS = 8;
 
 /**
+ * 上一轮后台扫描的 chat→最新消息指纹。没变就整轮跳过（见 runBackgroundScan）。
+ * 模块级而非 ref：路径 B 的 effect 只会挂载一次，跨 orgId 切换重置由
+ * fingerprint 本身天然处理（chat 集合变了指纹就变）。
+ */
+let lastScanFingerprint = '';
+
+/**
  * 两路检测：
  *
  *   A. **chat-changed 触发**（即时）：用户切到某个 chat → 800ms 后跑
@@ -168,9 +175,41 @@ async function runBackgroundScan(orgId: string): Promise<void> {
     if (!cur || cur.t < msg.t) latestByChat.set(msg.chatId, msg);
   }
 
+  // 指纹门控：45s 一轮里绝大多数时候没有任何新消息，指纹没变就整轮跳过，
+  // 一个网络请求都不发。指纹只认「哪些 chat 的最新一条是哪条」——
+  // 新消息进来 msgId 变，新 chat 出现 size 变，都会让指纹变化。
+  const fingerprint = Array.from(latestByChat.entries())
+    .map(([chatId, m]) => `${chatId}:${m.msgId}`)
+    .sort()
+    .join('|');
+  if (fingerprint === lastScanFingerprint) return;
+  lastScanFingerprint = fingerprint;
+
   // 拉 WA contacts / chats 用于 jid → phone 解析 + 取 wa_name
   const wa = await readWhatsAppData();
   const waContactByJid = new Map(wa.contacts.map((c) => [c.id, c]));
+
+  // ── 批量解析 phone → contactId ──
+  // 旧实现在下面的循环里逐个 chat 调 ensureContact，每个发一次
+  // `contacts?select=id&phone=eq.X`。实测一轮 63 个请求，45s 一轮 =
+  // ~12 万请求/天/人（2026-08-19 抓包确认）。改成一次 .in() 批量查 +
+  // 一次批量 insert 补缺，稳态下整轮 1 个请求。
+  const pendingByPhone = new Map<
+    string,
+    { chatId: string; msg: InboundMessage; waName: string | null }
+  >();
+  for (const [chatId, msg] of latestByChat) {
+    if (chatId.endsWith('@g.us')) continue; // 群聊跳过
+    const phone = resolvePhone(chatId, wa.jidToPhoneJid);
+    if (!phone) continue;
+    const waContact = waContactByJid.get(chatId);
+    const waName =
+      waContact?.name ?? waContact?.shortName ?? waContact?.pushname ?? null;
+    pendingByPhone.set(phone, { chatId, msg, waName });
+  }
+  if (pendingByPhone.size === 0) return;
+
+  const contactIdByPhone = await resolveContactIds(orgId, pendingByPhone);
 
   let vehicles: VehicleRow[] | null = null;
   const getVehicles = async () => {
@@ -185,17 +224,8 @@ async function runBackgroundScan(orgId: string): Promise<void> {
     return vehicles;
   };
 
-  for (const [chatId, msg] of latestByChat) {
-    if (chatId.endsWith('@g.us')) continue; // 群聊跳过
-
-    const phone = resolvePhone(chatId, wa.jidToPhoneJid);
-    if (!phone) continue;
-
-    const waContact = waContactByJid.get(chatId);
-    const waName =
-      waContact?.name ?? waContact?.shortName ?? waContact?.pushname ?? null;
-
-    const contactId = await ensureContact(orgId, phone, waName);
+  for (const [phone, { msg }] of pendingByPhone) {
+    const contactId = contactIdByPhone.get(phone);
     if (!contactId) continue;
 
     if (!(await isContactAutoReplyEnabled(contactId))) continue;
@@ -220,40 +250,70 @@ async function runBackgroundScan(orgId: string): Promise<void> {
   }
 }
 
-async function ensureContact(
+/**
+ * 批量把 phone 解析成 contact id，缺的补建。
+ *
+ * 旧实现是每个 chat 一次 `contacts?select=id&phone=eq.X` 的 N+1——实测一轮
+ * 63 个请求，45s 一轮 ≈ 12 万请求/天/人。这里改成：
+ *   1. 一次 `.in('phone', ...)` 把已有的全查回来
+ *   2. 缺的用一次批量 upsert 补建（onConflict 吞掉与 useContact / bulk-sync 的竞态）
+ *   3. 再查一次拿回新建的 id
+ * 稳态（没有新客户）下就是 1 个请求。
+ */
+async function resolveContactIds(
   orgId: string,
-  phone: string,
-  waName: string | null,
-): Promise<string | null> {
-  const existing = await supabase
-    .from('contacts')
-    .select('id')
-    .eq('org_id', orgId)
-    .eq('phone', phone)
-    .maybeSingle();
-  if (existing.data) return existing.data.id;
+  pending: Map<string, { waName: string | null }>,
+): Promise<Map<string, string>> {
+  const phones = Array.from(pending.keys());
+  const byPhone = new Map<string, string>();
+  if (phones.length === 0) return byPhone;
 
-  const inserted = await supabase
-    .from('contacts')
-    .insert({ org_id: orgId, phone, wa_name: waName, name: waName })
-    .select('id')
-    .single();
-  if (inserted.error) {
-    // 23505 race：另一路径（useContact / bulk-sync）刚插入同样的 (org, phone)
-    const code = (inserted.error as { code?: string }).code;
-    if (code === '23505') {
-      const refetched = await supabase
-        .from('contacts')
-        .select('id')
-        .eq('org_id', orgId)
-        .eq('phone', phone)
-        .single();
-      return refetched.data?.id ?? null;
+  // PostgREST 的 .in() 走 URL query string，一次塞太多会撞 URL 长度上限
+  const CHUNK = 100;
+  for (let i = 0; i < phones.length; i += CHUNK) {
+    const chunk = phones.slice(i, i + CHUNK);
+    const { data, error } = await supabase
+      .from('contacts')
+      .select('id, phone')
+      .eq('org_id', orgId)
+      .in('phone', chunk);
+    if (error) {
+      console.warn('[lead-watch] 批量查 contact 失败', error.message);
+      return byPhone;
     }
-    console.warn('[lead-watch] 创建 contact 失败', phone, inserted.error.message);
-    return null;
+    for (const row of data ?? []) {
+      if (row.phone) byPhone.set(row.phone, row.id);
+    }
   }
-  return inserted.data?.id ?? null;
+
+  const missing = phones.filter((p) => !byPhone.has(p));
+  if (missing.length === 0) return byPhone;
+
+  for (let i = 0; i < missing.length; i += CHUNK) {
+    const chunk = missing.slice(i, i + CHUNK);
+    const rows = chunk.map((phone) => {
+      const waName = pending.get(phone)?.waName ?? null;
+      return { org_id: orgId, phone, wa_name: waName, name: waName };
+    });
+    // ignoreDuplicates：另一路径（useContact / bulk-sync）可能刚插入同样的
+    // (org, phone)，撞了就当已存在，下面统一回查
+    const { error } = await supabase
+      .from('contacts')
+      .upsert(rows, { onConflict: 'org_id,phone', ignoreDuplicates: true });
+    if (error) {
+      console.warn('[lead-watch] 批量建 contact 失败', error.message);
+      continue;
+    }
+    const { data } = await supabase
+      .from('contacts')
+      .select('id, phone')
+      .eq('org_id', orgId)
+      .in('phone', chunk);
+    for (const row of data ?? []) {
+      if (row.phone) byPhone.set(row.phone, row.id);
+    }
+  }
+  return byPhone;
 }
 
 // ────────────────────────────────────────────────────────────────────────
