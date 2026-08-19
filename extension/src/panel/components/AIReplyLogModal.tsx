@@ -435,6 +435,16 @@ function DetailBlock({
   danger?: boolean;
   collapsed?: boolean;
 }) {
+  const [copied, setCopied] = useState(false);
+  const copyBody = (e: React.MouseEvent) => {
+    // summary 里的按钮：阻止触发 details 展开/收起
+    e.preventDefault();
+    e.stopPropagation();
+    void navigator.clipboard.writeText(body).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
   return (
     <details open={!collapsed} style={{ marginTop: 8 }}>
       <summary
@@ -446,10 +456,19 @@ function DetailBlock({
         }}
       >
         {title}
+        <button
+          type="button"
+          onClick={copyBody}
+          className="sgc-btn-secondary"
+          style={{ marginLeft: 8, fontSize: 10, padding: '1px 6px' }}
+        >
+          {copied ? '✅' : '📋 复制'}
+        </button>
       </summary>
       <pre
         style={{
           fontSize: 11,
+          color: danger ? '#7f1d1d' : '#111b21',
           background: danger ? '#fef2f2' : '#f6f7f9',
           padding: 8,
           borderRadius: 4,
@@ -458,6 +477,7 @@ function DetailBlock({
           whiteSpace: 'pre-wrap',
           wordBreak: 'break-word',
           marginTop: 4,
+          userSelect: 'text',
         }}
       >
         {body}

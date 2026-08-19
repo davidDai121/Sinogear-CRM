@@ -63,10 +63,26 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
     if (opts.ensureThinking) {
       await ensureThinkingModel(tabId);
     }
+    // 发送前记 baseline 锚点（最后一条 assistant 消息的 data-message-id）。
+    // 响应判定只认「id 变了 = 新增 turn」，绝不把续聊历史里最后一条旧响应
+    // 当成本轮结果；比数 turn 个数鲁棒（不受隐藏节点/重复渲染影响）
+    const baseline = await readTurnAnchors(tabId);
     await typeAndSend(tabId, opts.prompt);
+    let accepted = await waitForSendAccepted(tabId, baseline, 10000);
+    if (!accepted) {
+      // 输入被 hydration 吞了 → 重填重发一次
+      await typeAndSend(tabId, opts.prompt);
+      accepted = await waitForSendAccepted(tabId, baseline, 10000);
+    }
+    if (!accepted) {
+      throw new Error(
+        'Prompt 没有发出去（ChatGPT 页面吞掉了输入，两次尝试都失败）——请重新生成',
+      );
+    }
     const responseText = await waitForResponse(
       tabId,
       opts.responseTimeoutMs ?? 360000,
+      baseline,
     );
 
     const finalTab = await chrome.tabs.get(tabId);
@@ -474,6 +490,84 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
   if (!ok) throw new Error('无法填入 ChatGPT 输入框');
   await sleep(1200);
 
+  // 1b. hydration 吞字检测：填完 1.2s 后内容还在吗？续聊页面历史消息
+  //     hydrate 时 ProseMirror 会被 re-render 清空（prompt 静默丢失 →
+  //     点发送发了个空 → 页面上最后一条还是上一轮旧响应）。被吞就快速重填
+  const persisted = await execute<boolean>(
+    tabId,
+    (expectedLen: number) => {
+      const sels = [
+        '#prompt-textarea',
+        '.ProseMirror',
+        'div[contenteditable="true"][role="textbox"]',
+        'div[contenteditable="true"]',
+        'textarea',
+      ];
+      for (const s of sels) {
+        for (const el of Array.from(document.querySelectorAll(s)) as HTMLElement[]) {
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          const len =
+            el instanceof HTMLTextAreaElement
+              ? el.value.length
+              : (el.textContent ?? '').length;
+          return len >= Math.max(expectedLen * 0.8, 100);
+        }
+      }
+      return false;
+    },
+    [text.length],
+  );
+  if (!persisted) {
+    await execute(
+      tabId,
+      (text: string) => {
+        const sels = [
+          '#prompt-textarea',
+          '.ProseMirror',
+          'div[contenteditable="true"][role="textbox"]',
+          'div[contenteditable="true"]',
+          'textarea',
+        ];
+        let input: HTMLElement | null = null;
+        outer: for (const s of sels) {
+          for (const el of Array.from(document.querySelectorAll(s)) as HTMLElement[]) {
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+              input = el;
+              break outer;
+            }
+          }
+        }
+        if (!input) return;
+        input.focus();
+        if (input instanceof HTMLTextAreaElement) {
+          const desc = Object.getOwnPropertyDescriptor(
+            HTMLTextAreaElement.prototype,
+            'value',
+          );
+          desc?.set?.call(input, text);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          return;
+        }
+        input.textContent = '';
+        try {
+          document.execCommand('insertText', false, text);
+        } catch {
+          /* fall through */
+        }
+        if ((input.textContent ?? '').length < Math.max(text.length * 0.8, 100)) {
+          input.textContent = text;
+          input.dispatchEvent(
+            new InputEvent('input', { inputType: 'insertText', bubbles: true }),
+          );
+        }
+      },
+      [text],
+    );
+    await sleep(800);
+  }
+
   // 2. 点发送按钮
   const clicked = await execute<boolean>(tabId, () => {
     const inputSels = [
@@ -592,6 +686,78 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
   if (!clicked) throw new Error('找不到 ChatGPT 发送按钮');
 }
 
+// ── turn 锚点（防"拿回上一轮旧响应"）──
+
+interface TurnAnchors {
+  /** 最后一条 assistant 消息的 data-message-id（没有该属性时退化为 count 字符串） */
+  lastAssistantId: string | null;
+  /** 最后一条 user 消息的 data-message-id */
+  lastUserId: string | null;
+  generating: boolean;
+}
+
+/**
+ * 读对话锚点。ChatGPT 每条消息带唯一 data-message-id——"出新响应"判定用
+ * 「最后一条 assistant 的 id 变了」，比数 turn 个数鲁棒（不受隐藏节点、
+ * 重复渲染、testid 改版影响）。没有 id 属性时退化为 "count:N" 字符串，
+ * 个数变化同样会让锚点变化。
+ */
+async function readTurnAnchors(tabId: number): Promise<TurnAnchors> {
+  return execute<TurnAnchors>(tabId, () => {
+    const lastIdOf = (sel: string): string | null => {
+      const els = document.querySelectorAll(sel);
+      if (els.length === 0) return null;
+      const el = els[els.length - 1];
+      return el.getAttribute('data-message-id') ?? `count:${els.length}`;
+    };
+    let lastAssistantId = lastIdOf('[data-message-author-role="assistant"]');
+    if (lastAssistantId === null) {
+      // 老版 DOM 没有 author-role 属性：退化为 prose 块个数
+      const prose = document.querySelectorAll('.markdown.prose, div.prose').length;
+      lastAssistantId = prose > 0 ? `prose:${prose}` : null;
+    }
+    return {
+      lastAssistantId,
+      lastUserId: lastIdOf('[data-message-author-role="user"]'),
+      generating: !!document.querySelector(
+        'button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止"]',
+      ),
+    };
+  });
+}
+
+/** 本轮是否已出现新 assistant 消息（锚点变了） */
+function hasNewAssistant(now: TurnAnchors, baseline: TurnAnchors): boolean {
+  return (
+    now.lastAssistantId !== null &&
+    now.lastAssistantId !== baseline.lastAssistantId
+  );
+}
+
+/**
+ * 发送是否真的生效：出现"停止生成"按钮，或 user/assistant 锚点变了
+ * （新 turn 上屏）。都没有 = 输入被 hydration 吞了。
+ */
+async function waitForSendAccepted(
+  tabId: number,
+  baseline: TurnAnchors,
+  timeoutMs: number,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const now = await readTurnAnchors(tabId).catch(() => null);
+    if (now) {
+      if (now.generating) return true;
+      if (hasNewAssistant(now, baseline)) return true;
+      if (now.lastUserId !== null && now.lastUserId !== baseline.lastUserId) {
+        return true;
+      }
+    }
+    await sleep(600);
+  }
+  return false;
+}
+
 // ── 等响应 ──
 
 /**
@@ -602,30 +768,41 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
 async function waitForResponse(
   tabId: number,
   timeoutMs: number,
+  baseline: TurnAnchors,
 ): Promise<string> {
   const start = Date.now();
+  const baselineId = baseline.lastAssistantId;
 
-  // 1. 等响应迹象出现（assistant 容器 或 stop 按钮 或 Thinking 折叠面板）
+  // 1. 等响应迹象出现：stop 按钮 / **新的** assistant turn（锚点 id 变了）。
+  //    ⚠️ 续聊 URL 页面上历史 assistant 消息本来就在——绝不能拿"存在任意
+  //    assistant 容器"当迹象，否则输入被吞时会把上一轮旧响应当成本轮结果
   let appeared = false;
   while (Date.now() - start < 90000) {
-    const has = await execute<boolean>(tabId, () => {
-      const stopBtn = document.querySelector(
-        'button[data-testid="stop-button"], button[data-testid="composer-speech-button"][aria-label*="Stop" i], button[aria-label*="Stop" i], button[aria-label*="停止"]',
-      );
-      const msg = document.querySelector(
-        '[data-message-author-role="assistant"], [data-testid^="conversation-turn-"], .markdown.prose, div.prose',
-      );
-      // GPT-5 Thinking 的思考折叠面板
-      const thinking = document.querySelector(
-        '[data-testid*="thinking" i], [aria-label*="Thinking" i], [aria-label*="Reasoning" i]',
-      );
-      return !!(stopBtn || msg || thinking);
-    });
+    const has = await execute<boolean>(
+      tabId,
+      (prevId: string | null) => {
+        const stopBtn = document.querySelector(
+          'button[data-testid="stop-button"], button[data-testid="composer-speech-button"][aria-label*="Stop" i], button[aria-label*="Stop" i], button[aria-label*="停止"]',
+        );
+        if (stopBtn) return true;
+        const els = document.querySelectorAll('[data-message-author-role="assistant"]');
+        let curId: string | null = null;
+        if (els.length > 0) {
+          curId =
+            els[els.length - 1].getAttribute('data-message-id') ?? `count:${els.length}`;
+        } else {
+          const prose = document.querySelectorAll('.markdown.prose, div.prose').length;
+          curId = prose > 0 ? `prose:${prose}` : null;
+        }
+        return curId !== null && curId !== prevId;
+      },
+      [baselineId],
+    );
     if (has) {
       appeared = true;
       break;
     }
-    await sleep(2000);
+    await sleep(1500);
   }
   if (!appeared) {
     throw new Error('ChatGPT 未开始回复（90 秒内无响应迹象）');
@@ -643,50 +820,69 @@ async function waitForResponse(
       generating: boolean;
       hasCopyBtn: boolean;
       content: string;
-    }>(tabId, () => {
-      const stopBtn = document.querySelector(
-        'button[data-testid="stop-button"], button[aria-label*="Stop streaming" i], button[aria-label*="Stop generating" i], button[aria-label*="Stop response" i], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
-      );
-      // 在最后一条 assistant 消息附近找 copy 按钮（出现 = 该消息写完）
-      const copyBtn = document.querySelector(
-        'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy" i], button[aria-label*="复制" i]',
-      );
+    }>(
+      tabId,
+      (prevId: string | null) => {
+        const stopBtn = document.querySelector(
+          'button[data-testid="stop-button"], button[aria-label*="Stop streaming" i], button[aria-label*="Stop generating" i], button[aria-label*="Stop response" i], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
+        );
+        // 在最后一条 assistant 消息附近找 copy 按钮（出现 = 该消息写完）
+        const copyBtn = document.querySelector(
+          'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy" i], button[aria-label*="复制" i]',
+        );
 
-      // 提取最后一条 assistant 消息文本，跳过 thinking/reasoning 折叠面板
-      const turnSelectors = [
-        '[data-message-author-role="assistant"]',
-        '[data-testid^="conversation-turn-"]',
-        '.markdown.prose',
-        'div.prose',
-      ];
-      let content = '';
-      for (const sel of turnSelectors) {
-        const els = Array.from(
-          document.querySelectorAll(sel),
-        ) as HTMLElement[];
-        if (els.length === 0) continue;
-        const last = els[els.length - 1];
-
-        // 克隆 + 移除 thinking 区块和按钮工具栏，只保留正文
-        const clone = last.cloneNode(true) as HTMLElement;
-        clone
-          .querySelectorAll(
-            '[data-testid*="thinking" i], [aria-label*="Thinking" i], [aria-label*="Reasoning" i], button, [role="toolbar"]',
-          )
-          .forEach((el) => el.remove());
-        const t = (clone.innerText ?? clone.textContent ?? '').trim();
-        if (t) {
-          content = t;
-          break;
+        // 锚点没变 = 还没有新 assistant turn，content 一律留空——
+        // 此刻最后一条是上一轮的旧响应，绝不能读
+        const els = document.querySelectorAll('[data-message-author-role="assistant"]');
+        let curId: string | null = null;
+        if (els.length > 0) {
+          curId =
+            els[els.length - 1].getAttribute('data-message-id') ?? `count:${els.length}`;
+        } else {
+          const prose = document.querySelectorAll('.markdown.prose, div.prose').length;
+          curId = prose > 0 ? `prose:${prose}` : null;
         }
-      }
+        if (curId === null || curId === prevId) {
+          return { generating: !!stopBtn, hasCopyBtn: !!copyBtn, content: '' };
+        }
 
-      return {
-        generating: !!stopBtn,
-        hasCopyBtn: !!copyBtn,
-        content,
-      };
-    });
+        // 提取最后一条 assistant 消息文本，跳过 thinking/reasoning 折叠面板
+        const turnSelectors = [
+          '[data-message-author-role="assistant"]',
+          '[data-testid^="conversation-turn-"]',
+          '.markdown.prose',
+          'div.prose',
+        ];
+        let content = '';
+        for (const sel of turnSelectors) {
+          const els = Array.from(
+            document.querySelectorAll(sel),
+          ) as HTMLElement[];
+          if (els.length === 0) continue;
+          const last = els[els.length - 1];
+
+          // 克隆 + 移除 thinking 区块和按钮工具栏，只保留正文
+          const clone = last.cloneNode(true) as HTMLElement;
+          clone
+            .querySelectorAll(
+              '[data-testid*="thinking" i], [aria-label*="Thinking" i], [aria-label*="Reasoning" i], button, [role="toolbar"]',
+            )
+            .forEach((el) => el.remove());
+          const t = (clone.innerText ?? clone.textContent ?? '').trim();
+          if (t) {
+            content = t;
+            break;
+          }
+        }
+
+        return {
+          generating: !!stopBtn,
+          hasCopyBtn: !!copyBtn,
+          content,
+        };
+      },
+      [baselineId],
+    );
 
     if (state.generating) sawGenerating = true;
 
@@ -702,10 +898,25 @@ async function waitForResponse(
       await sleep(4000);
       const final = await execute<{ generating: boolean; content: string }>(
         tabId,
-        () => {
+        (prevId: string | null) => {
           const stopBtn = document.querySelector(
             'button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
           );
+          const roleEls = document.querySelectorAll(
+            '[data-message-author-role="assistant"]',
+          );
+          let curId: string | null = null;
+          if (roleEls.length > 0) {
+            curId =
+              roleEls[roleEls.length - 1].getAttribute('data-message-id') ??
+              `count:${roleEls.length}`;
+          } else {
+            const prose = document.querySelectorAll('.markdown.prose, div.prose').length;
+            curId = prose > 0 ? `prose:${prose}` : null;
+          }
+          if (curId === null || curId === prevId) {
+            return { generating: !!stopBtn, content: '' };
+          }
           const turnSelectors = [
             '[data-message-author-role="assistant"]',
             '[data-testid^="conversation-turn-"]',
@@ -733,6 +944,7 @@ async function waitForResponse(
           }
           return { generating: !!stopBtn, content };
         },
+        [baselineId],
       );
       if (!final.generating && final.content.length >= state.content.length) {
         return final.content;

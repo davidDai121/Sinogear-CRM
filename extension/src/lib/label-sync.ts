@@ -147,6 +147,7 @@ interface PersistedWhatsAppResult {
 }
 
 const WRITE_CHUNK_SIZE = 500;
+const READ_FILTER_CHUNK_SIZE = 100;
 
 function chunksOf<T>(items: T[], size = WRITE_CHUNK_SIZE): T[][] {
   const chunks: T[][] = [];
@@ -154,6 +155,102 @@ function chunksOf<T>(items: T[], size = WRITE_CHUNK_SIZE): T[][] {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
+}
+
+function vehicleInterestKey(contactId: string, model: string): string {
+  return `${contactId}:${canonicalizeModel(model).trim().toLowerCase()}`;
+}
+
+/**
+ * 标签同步只需要碰“当前仍有关联的 WA 标签客户”。旧实现每次都把整个 org 的
+ * contacts / contact_tags / vehicle_interests 拉到浏览器；vehicle_interests 被
+ * 重复数据撑到 4 万+ 行后，这个 10 分钟任务本身就成了 egress 最大户。
+ */
+async function fetchLabelScopedRows(
+  orgId: string,
+  wa: WhatsAppDataSnapshot,
+): Promise<{
+  contactRows: Array<{
+    id: string;
+    phone: string | null;
+    quality: CustomerQuality;
+    customer_stage: CustomerStage;
+    country: string | null;
+  }>;
+  existingTags: Array<{ contact_id: string; tag: string }>;
+  existingVehicles: Array<{ contact_id: string; model: string }>;
+}> {
+  const activeLabelIds = new Set(
+    wa.labels.filter((label) => label.isActive).map((label) => label.id),
+  );
+  const phones = new Set<string>();
+  for (const association of wa.associations) {
+    if (
+      association.type !== 'jid' ||
+      !activeLabelIds.has(association.labelId)
+    ) {
+      continue;
+    }
+    const phone = resolvePhone(association.associationId, wa.jidToPhoneJid);
+    if (phone) phones.add(phone);
+  }
+
+  const contactRows: Array<{
+    id: string;
+    phone: string | null;
+    quality: CustomerQuality;
+    customer_stage: CustomerStage;
+    country: string | null;
+  }> = [];
+  for (const phoneChunk of chunksOf(
+    Array.from(phones),
+    READ_FILTER_CHUNK_SIZE,
+  )) {
+    const { data, error } = await supabase
+      .from('contacts')
+      .select('id, phone, quality, customer_stage, country')
+      .eq('org_id', orgId)
+      .in('phone', phoneChunk)
+      .order('id', { ascending: true });
+    if (error) throw error;
+    contactRows.push(...(data ?? []));
+  }
+
+  const contactIds = contactRows.map((contact) => contact.id);
+  if (contactIds.length === 0) {
+    return { contactRows, existingTags: [], existingVehicles: [] };
+  }
+
+  const existingTags: Array<{ contact_id: string; tag: string }> = [];
+  const existingVehicles: Array<{ contact_id: string; model: string }> = [];
+  for (const contactIdChunk of chunksOf(
+    contactIds,
+    READ_FILTER_CHUNK_SIZE,
+  )) {
+    const [tagRows, vehicleRows] = await Promise.all([
+      fetchAllPaged<{ contact_id: string; tag: string }>((from, to) =>
+        supabase
+          .from('contact_tags')
+          .select('contact_id, tag')
+          .in('contact_id', contactIdChunk)
+          .order('contact_id', { ascending: true })
+          .order('tag', { ascending: true })
+          .range(from, to),
+      ),
+      fetchAllPaged<{ contact_id: string; model: string }>((from, to) =>
+        supabase
+          .from('vehicle_interests')
+          .select('contact_id, model')
+          .in('contact_id', contactIdChunk)
+          .order('id', { ascending: true })
+          .range(from, to),
+      ),
+    ]);
+    existingTags.push(...tagRows);
+    existingVehicles.push(...vehicleRows);
+  }
+
+  return { contactRows, existingTags, existingVehicles };
 }
 
 async function persistWhatsAppLabels(
@@ -297,47 +394,14 @@ export async function syncWhatsAppLabels(
 
   const labelById = new Map(wa.labels.map((l) => [l.id, l]));
 
-  // 三张表都分页拉全集，规避 1000 行上限
-  let contactRows: Array<{
-    id: string;
-    phone: string | null;
-    quality: CustomerQuality;
-    customer_stage: CustomerStage;
-    country: string | null;
-  }>;
-  let existingTags: Array<{ contact_id: string; tag: string }>;
-  let existingVehicles: Array<{ contact_id: string; model: string }>;
+  let scopedRows: Awaited<ReturnType<typeof fetchLabelScopedRows>>;
   try {
-    [contactRows, existingTags, existingVehicles] = await Promise.all([
-      fetchAllPaged((from, to) =>
-        supabase
-          .from('contacts')
-          .select('id, phone, quality, customer_stage, country')
-          .eq('org_id', orgId)
-          .order('id', { ascending: true })
-          .range(from, to),
-      ),
-      fetchAllPaged((from, to) =>
-        supabase
-          .from('contact_tags')
-          .select('contact_id, tag, contacts!inner(org_id)')
-          .eq('contacts.org_id', orgId)
-          .order('contact_id', { ascending: true })
-          .order('tag', { ascending: true })
-          .range(from, to),
-      ),
-      fetchAllPaged((from, to) =>
-        supabase
-          .from('vehicle_interests')
-          .select('contact_id, model, contacts!inner(org_id)')
-          .eq('contacts.org_id', orgId)
-          .order('id', { ascending: true })
-          .range(from, to),
-      ),
-    ]);
+    scopedRows = await fetchLabelScopedRows(orgId, wa);
   } catch (err) {
     throw new Error(stringifyError(err));
   }
+
+  const { contactRows, existingTags, existingVehicles } = scopedRows;
 
   const contactByPhone = new Map(contactRows.map((c) => [c.phone, c]));
   const persisted = await persistWhatsAppLabels(orgId, wa, contactByPhone);
@@ -345,7 +409,7 @@ export async function syncWhatsAppLabels(
     existingTags.map((t) => `${t.contact_id}:${t.tag}`),
   );
   const existingVehicleSet = new Set(
-    existingVehicles.map((v) => `${v.contact_id}:${v.model}`),
+    existingVehicles.map((v) => vehicleInterestKey(v.contact_id, v.model)),
   );
 
   const qualityUpdates = new Map<string, CustomerQuality>();
@@ -397,7 +461,7 @@ export async function syncWhatsAppLabels(
       }
     } else if (cat.category === 'vehicle' && cat.value) {
       const canonModel = canonicalizeModel(cat.value);
-      const key = `${contact.id}:${canonModel.toLowerCase()}`;
+      const key = vehicleInterestKey(contact.id, canonModel);
       if (!existingVehicleSet.has(key)) {
         vehiclesToInsert.push({ contact_id: contact.id, model: canonModel });
         existingVehicleSet.add(key);

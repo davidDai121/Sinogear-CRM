@@ -33,6 +33,7 @@ import {
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type VehicleInterestRow = Database['public']['Tables']['vehicle_interests']['Row'];
 type ContactTagRow = Database['public']['Tables']['contact_tags']['Row'];
+type WhatsAppDataSnapshot = Awaited<ReturnType<typeof readWhatsAppData>>;
 
 /**
  * 左边聊天列表 + 撞单 + autoStage 实际只用 11 列；select('*') 会把 notes
@@ -135,8 +136,11 @@ const VISIBILITY_REFRESH_THROTTLE_MS = 60 * 60 * 1000;
 /** msg_directions RPC 刷新间隔。比 DB refetch 频繁（新消息影响"我该回"判定）。
  *  返回行数随"有消息的 contact 数"增长（2026-07 已 ~300KB/次），5min → 15min */
 const MSG_DIRECTIONS_REFRESH_MS = 15 * 60 * 1000;
-/** Persist the local WhatsApp label catalog/associations without writing every poll. */
-const WA_LABEL_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+/** 标签/关联没变化时最多每天做一次一致性兜底，不再每 10 分钟全量同步。 */
+const WA_LABEL_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** 同步失败后的重试退避，避免断网时每 30 秒打一次 Supabase。 */
+const WA_LABEL_SYNC_RETRY_MS = 10 * 60 * 1000;
+const WA_LABEL_SYNC_STATE_PREFIX = 'sgc:wa-label-sync-state';
 
 interface MsgDirection {
   lastInboundT: number | null;
@@ -184,6 +188,50 @@ const EMPTY_WA: WaPolledState = {
   jidPhoneCache: {},
   pendingMap: {},
 };
+
+interface StoredWaLabelSyncState {
+  fingerprint: string;
+  syncedAt: number;
+}
+
+/**
+ * 只把会影响服务端标签快照的字段放进指纹。association 同时带 resolve 后的
+ * phone：@lid → phone 映射稍后才补齐时，即使 label-association 原始行没变，
+ * 也会重新同步一次，把此前无法匹配的客户补上。
+ */
+async function fingerprintWhatsAppLabels(wa: {
+  labels: WALabel[];
+  associations: WALabelAssociation[];
+  jidToPhoneJid: Map<string, string>;
+}): Promise<string> {
+  const labels = wa.labels
+    .map((label) => [
+      label.id,
+      label.name,
+      label.colorIndex,
+      label.type,
+      label.isActive ? 1 : 0,
+    ])
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  const associations = wa.associations
+    .filter((association) => association.type === 'jid')
+    .map((association) => [
+      association.labelId,
+      association.associationId,
+      resolvePhone(association.associationId, wa.jidToPhoneJid) ?? '',
+    ])
+    .sort((a, b) => {
+      const labelCmp = a[0].localeCompare(b[0]);
+      return labelCmp || a[1].localeCompare(b[1]);
+    });
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({ labels, associations }),
+  );
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+}
 
 /**
  * 从 messages 表回填"客户最后发的没回"信号。需要 migration 0019 提供
@@ -417,7 +465,6 @@ export function useCrmData(orgId: string | null): CrmData {
   /** msg_directions 单独刷新节奏（比 DB refetch 更频繁） */
   const [msgDirNonce, setMsgDirNonce] = useState(0);
   const lastDbFetchRef = useRef(0);
-  const lastWaLabelSyncRef = useRef(0);
 
   // ----- Effect 1: 初次加载 + 手动 refresh / 兜底 refetch -----
   useEffect(() => {
@@ -576,6 +623,66 @@ export function useCrmData(orgId: string | null): CrmData {
     if (!orgId) return;
     const org = orgId;
     let cancelled = false;
+    let syncInFlight = false;
+    let syncStateLoaded = false;
+    let lastFailureAt = 0;
+    let storedFingerprint = '';
+    let storedSyncedAt = 0;
+    const storageKeyPromise = supabase.auth.getSession().then(({ data }) => {
+      const userId = data.session?.user.id ?? 'unknown-user';
+      return `${WA_LABEL_SYNC_STATE_PREFIX}:${org}:${userId}`;
+    });
+
+    const loadSyncState = async (): Promise<void> => {
+      if (syncStateLoaded) return;
+      const storageKey = await storageKeyPromise;
+      const stored = await chrome.storage.local.get(storageKey);
+      const value = stored[storageKey] as Partial<StoredWaLabelSyncState> | undefined;
+      if (typeof value?.fingerprint === 'string') {
+        storedFingerprint = value.fingerprint;
+      }
+      if (typeof value?.syncedAt === 'number') {
+        storedSyncedAt = value.syncedAt;
+      }
+      syncStateLoaded = true;
+    };
+
+    const maybeSyncWaLabels = async (
+      wa: WhatsAppDataSnapshot,
+    ): Promise<void> => {
+      if (wa.labels.length === 0 || syncInFlight || cancelled) return;
+      syncInFlight = true;
+      try {
+        await loadSyncState();
+        if (cancelled) return;
+
+        const fingerprint = await fingerprintWhatsAppLabels(wa);
+        const now = Date.now();
+        const changed = fingerprint !== storedFingerprint;
+        const reconcileDue =
+          now - storedSyncedAt >= WA_LABEL_RECONCILE_INTERVAL_MS;
+        if (!changed && !reconcileDue) return;
+        if (now - lastFailureAt < WA_LABEL_SYNC_RETRY_MS) return;
+
+        await syncWhatsAppLabels(org, wa);
+        if (cancelled) return;
+        lastFailureAt = 0;
+        storedFingerprint = fingerprint;
+        storedSyncedAt = Date.now();
+        const storageKey = await storageKeyPromise;
+        const state: StoredWaLabelSyncState = {
+          fingerprint: storedFingerprint,
+          syncedAt: storedSyncedAt,
+        };
+        await chrome.storage.local.set({ [storageKey]: state });
+      } catch (err) {
+        lastFailureAt = Date.now();
+        console.warn('[wa-label-sync]', stringifyError(err));
+      } finally {
+        syncInFlight = false;
+      }
+    };
+
     const fetchWa = async (): Promise<void> => {
       try {
         const [wa, jidPhoneCache] = await Promise.all([
@@ -605,16 +712,7 @@ export function useCrmData(orgId: string | null): CrmData {
           jidPhoneCache,
           pendingMap,
         });
-        const now = Date.now();
-        if (
-          wa.labels.length > 0 &&
-          now - lastWaLabelSyncRef.current >= WA_LABEL_SYNC_INTERVAL_MS
-        ) {
-          lastWaLabelSyncRef.current = now;
-          void syncWhatsAppLabels(org, wa).catch((err) =>
-            console.warn('[wa-label-sync]', stringifyError(err)),
-          );
-        }
+        void maybeSyncWaLabels(wa);
       } catch (err) {
         console.warn('[wa-poll]', stringifyError(err));
       }
