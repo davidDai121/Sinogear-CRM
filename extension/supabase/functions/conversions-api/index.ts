@@ -10,14 +10,19 @@
 //
 // 必需的 env vars（Supabase secrets）：
 //   FB_ACCESS_TOKEN  — System User access token（永不过期那种）
-//   FB_DATASET_ID    — 数据集 ID，默认 710402162034322
+//   FB_DATASET_ID    — 数据集 ID，必填无兜底（新 business pixel: 1028794893354914）
 // 函数运行时 Supabase 自动注入：SUPABASE_URL, SUPABASE_ANON_KEY
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 
 const FB_API_VERSION = 'v25.0';
-const FB_DATASET_ID = Deno.env.get('FB_DATASET_ID') ?? '710402162034322';
+// ⚠️ 不要给 FB_DATASET_ID 加硬编码兜底。
+// 2026-08-20：这里原本是 `?? '710402162034322'`，那是旧 business 的 pixel。
+// 公司换了新 business 之后那个 ID 够不着了（Graph API 报 100/33），而函数
+// 不会报错，只是每条事件都默默记一个 400 —— 面板上什么都看不出来。
+// 没配 secret 就直接 500，让人立刻发现。新 pixel: 1028794893354914
+const FB_DATASET_ID = Deno.env.get('FB_DATASET_ID') ?? '';
 const FB_ACCESS_TOKEN = Deno.env.get('FB_ACCESS_TOKEN') ?? '';
 
 const corsHeaders = {
@@ -63,6 +68,9 @@ serve(async (req) => {
 
   if (!FB_ACCESS_TOKEN) {
     return jsonResponse({ error: 'FB_ACCESS_TOKEN secret not configured' }, 500);
+  }
+  if (!FB_DATASET_ID) {
+    return jsonResponse({ error: 'FB_DATASET_ID secret not configured' }, 500);
   }
 
   let body: RequestBody;
@@ -144,7 +152,15 @@ serve(async (req) => {
     custom_data: {
       event_source: 'crm',
       lead_event_source: 'Sino Gear CRM',
-      ...(body.value !== undefined ? { value: body.value, currency: 'USD' } : {}),
+      // Purchase 是特例：Meta 强制要求 value + currency，缺了直接 400
+      //（subcode 2804010 "Missing Currency for Purchase Event"）。2026-08-20 实测。
+      // 客户端正常会把水单金额传进来（events-log.ts 里透传），这里再兜一层，
+      // 免得将来有别的调用方忘了传，整条成交事件被 Meta 丢掉。
+      ...(body.event_name === 'Purchase'
+        ? { value: body.value ?? 0, currency: 'USD' }
+        : body.value !== undefined
+          ? { value: body.value, currency: 'USD' }
+          : {}),
     },
     user_data: userData,
   };

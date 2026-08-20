@@ -50,6 +50,36 @@ export function mapStageToFbEvent(stage: CustomerStage): string | null {
 }
 
 /**
+ * 直接发一个指定名字的事件（不走 stage 映射）。
+ *
+ * 用于人工判定的「合格线索 / 不合格线索」—— Meta 的 Conversion Leads
+ * Optimization 就是靠这类自定义事件名学习的（需要在 Events Manager 里
+ * 先把事件名注册成 lead 阶段）。
+ *
+ * conversions-api 的 event_name 是自由字符串、没有白名单，所以自定义名字
+ * 不需要重新部署函数。
+ */
+export function sendFbEvent(
+  contactId: string,
+  eventName: string,
+  opts?: { value?: number; testEventCode?: string },
+): void {
+  void supabase.functions
+    .invoke('conversions-api', {
+      body: {
+        contact_id: contactId,
+        event_name: eventName,
+        ...(opts?.value !== undefined ? { value: opts.value } : {}),
+        ...(opts?.testEventCode ? { test_event_code: opts.testEventCode } : {}),
+      },
+    })
+    .then(({ error }) => {
+      if (error) console.warn('[fb-conversions] invoke failed:', error.message);
+    })
+    .catch((err) => console.warn('[fb-conversions] invoke threw:', err));
+}
+
+/**
  * fire-and-forget 调 conversions-api Edge Function
  * stage 不在白名单内静默 skip。失败只 console.warn 不抛错。
  */

@@ -28,10 +28,30 @@ export async function logContactEvent(
   }
 
   // 副作用：stage_changed → Meta Conversions API
-  if (type === 'stage_changed') {
+  //
+  // ⛔ 只回传人工改的（automatic === false）。
+  // 2026-08-20 实测：近 8 周 qualifying 变更 532 条里 415 条（78%）是 AI 推的，
+  // negotiating 401 条里 385 条（96%）。而同一个 AI 会把广告表单的自动首句
+  // 「Hi, I'm interested in the Changan UNI-K.」读成「客户已购买并支付定金」。
+  // 把这种判断回传给 Meta，等于教它「发广告表单自动消息的人 = 优质客户」，
+  // 它会照这个特征找来更多同类人 —— 比不回传更糟。
+  if (type === 'stage_changed' && payload['automatic'] === false) {
     const to = payload['to'];
     if (typeof to === 'string') {
-      triggerFbConversion(contactId, to as CustomerStage);
+      // ⚠️ Purchase 必须带 value + currency，否则 Meta 直接 400
+      //（subcode 2804010 "Missing Currency for Purchase Event"）。
+      // conversions-api 里 currency 是跟着 value 一起进 custom_data 的，
+      // 所以这里不传 value 等于每条成交都被拒。2026-08-20 实测踩到。
+      // 水单金额从 payload.value 来（PaymentReceiptSection 填的），
+      // 销售没填金额时补 0 —— 数据不漂亮，但比整条事件丢掉强。
+      const raw = payload['value'];
+      const value =
+        typeof raw === 'number' && Number.isFinite(raw)
+          ? raw
+          : to === 'won'
+            ? 0
+            : undefined;
+      triggerFbConversion(contactId, to as CustomerStage, { value });
     }
   }
 }

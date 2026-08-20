@@ -909,6 +909,32 @@ npm run package
 
 **教训**：① **任何"业务事实"字段（won/lost/已付款）都不能由 AI 或正则单独产生**，必须有一条人工入口 + 一条 append-only 凭证；写凭证的代码不能用吞错误的 `logContactEvent`。② **写凭证和改状态有先后**：凭证先落库，成功了才改状态——反过来会留下"状态改了但没证据"的脏数据。③ **表单草稿只在 `contact.id` 变时重置 = 外部改字段后会被静默写回**，任何"绕过表单直接改 contact 字段"的新功能，都要给表单加对应字段的同步 effect。④ 正则识别销售信号时**必须同时排除方向和否定句**，`payment_received_at` 那列两样都没做。
 
+### 近期补完（2026-08-20）— FB 归因链五处断点全修 + 线索合格判定回传 Meta
+
+**起点**：boss 问「Facebook Lead → CRM → 销售跟进 → 判定合格 → 回传 Meta，让 Meta 学会找对的人，这个能实现吗」。答案是四段里三段的代码早就有，但**实测发现整条链路有五处独立断点，每一处都足以让它静默失效**。
+
+**五处断点（按发现顺序）**：
+
+1. **token 无效（190）**——公司换了新 business（Sino Gear Power Technology LLC，`995401959837699`），旧 token 作废。
+2. **`FB_DATASET_ID` 指向旧 business 的 pixel**（`710402162034322`）——新 token 也够不着，报 `100/33 对象不存在`。新 pixel 是 `1028794893354914`（合肥鑫齿动力科技有限公司's Pixel，正在收网站事件）。
+3. **Purchase 缺 currency（subcode 2804010）**——`conversions-api` 里 `currency` 是跟着 `value` 一起进 `custom_data` 的，而 `events-log.ts` 调 `triggerFbConversion` 时从不传 value → **每一条成交事件都被 Meta 拒**。这个 bug 从 CAPI 上线就存在，一直被 190 盖着；**换完 token 之后仍然全挂**。
+4. **Page 和 pixel 分属两个 business**——主页在 Sino Gear Auto（`1244018702132116`），pixel/广告账户/app 在 LLC。已把主页迁到 LLC，Sino Gear Auto 弃用。⚠️ 广告账户 `sino gear-1` 归 **Meetsocial（飞书深诺）代理商**所有，只是共享进来，动不了。
+5. **Page 从未订阅 leadgen webhook**——App Dashboard 里勾 Subscribe 只是**app 层声明**，还要 `POST /{page-id}/subscribed_apps` 做**Page 层绑定**，新版后台没有这个界面，必须调 API（要 `pages_manage_metadata`）。
+
+**修法**：
+- **`events-log.ts`**：① 透传 `payload.value` 给 `triggerFbConversion`，`won` 无金额时补 0（Purchase 必须有 value+currency）；② **只回传 `automatic === false` 的 stage 变化**——实测近 8 周 qualifying 变更 532 条里 415 条（78%）是 AI 推的，negotiating 401 条里 385 条（96%），而同一个 AI 会把广告表单自动首句读成「客户已购买并支付定金」。喂这种数据给 Meta 等于教它「发广告表单自动消息的人 = 优质客户」，比不回传更糟。
+- **`useContact.save(patch, eventExtra?)`**：多接一个参数塞进 stage_changed payload，水单金额由此传到 Meta。
+- **`lib/lead-qualification.ts` + `LeadQualitySection.tsx`**（新）：客户卡上「🎯 合格 / 🚫 不合格」人工判定，写 `contact_events('lead_qualified')` 留证 + 发自定义 CAPI 事件 `QualifiedLead` / `DisqualifiedLead`。**门控：只有客户带 `fb_lead_id`/`ctwa_clid`/`fb_ad_id` 才回传**——不是广告来的客户，Meta 仍可能靠哈希手机号匹配到某个 FB 用户，拿跟广告无关的人当训练样本。不合格原因用**固定选项**（买不起/只是问问/国家做不了/车型没有/联系不上/同行骚扰），自由文本无法聚合。
+- **migration `0036_lead_qualified_event.sql`**：`contact_event_type` 加 `lead_qualified`（已应用）。
+- **两个 Edge Function 去掉 `FB_DATASET_ID` 硬编码兜底**：原本 `?? '710402162034322'`，忘配 secret 时会默默往旧 pixel 推、每条记 400 但界面无感。改成没配直接 500。`conversions-api` 另加 Purchase 强制带 currency 兜底。⚠️ **这两处要重新部署才生效**，本次未部署。
+- **`scripts/backfill-fb-leads.mjs`**（新）：一次性回填历史线索，默认 dry-run，`--apply` 才写。
+
+**验证（全部实测）**：token `debug_token` 11 scope + 永不过期；读 Page ✅；列线索表单 8 个 ✅（要 Page token，从 system user token 现换）；`GET /{lead_id}` 用 system user token 直接可读 ✅（**证明 `fb-lead-webhook` 不用改代码**）；`subscribed_apps` 从 `[]` → `app: CRMDataSource · leadgen` ✅；Meta 点 Test 推送后函数日志出现 `Graph API 400 for lead 444444444444` ——**这行日志出现在签名校验之后**，而 `verifySignature` 首行 `if (!signatureHeader || !FB_APP_SECRET) return false`，所以它反证了 `FB_APP_SECRET` 正确、POST 路径全通；CRM 点「已收水单」触发真实 Purchase → `meta_status: 200`（此前一直 400）。
+
+**回填结果**：8 个表单 505 条线索（**全部产生在 8/4–8/20，约 31 条/天**），481 个唯一手机号。207 个匹配到现有客户补 `fb_lead_id`，**274 个（57%）从来没进过 CRM**——花钱买来的线索超过一半蒸发了。匹配上的 207 个里 161 个（78%）是 `stalled`。产物 `广告线索_从未联系_274人_2026-08-20.xlsx`：94 人填「30天内要买」、20 人填「6台以上」。
+
+**教训**：① **「配置对了」不等于「链路通了」**——本次五处断点里有三处（Purchase currency、Page 层订阅、business 归属）光看配置界面完全看不出来，必须端到端打一次真实事件。修完 token 就宣布完成的话，成交事件仍然一条都进不去。② **Meta 的 webhook 是两层订阅**：App Dashboard 勾 Subscribe 只是 app 层，Page 层要 `POST /{page-id}/subscribed_apps`，新版后台无界面。③ **自定义 CAPI 事件不能预先注册**——必须先发出去、Meta 收到后才出现在 Events Manager 的 Custom Conversion 事件列表里，所以「先在后台注册再发」的顺序是错的。④ **回填历史线索时手机号必须规范化**：表单里有本地格式号（`078xxx`/`099xxx`），直接存 `+078...` 是废号，永远匹配不上 WhatsApp；表单名前缀（`RW-`/`PL-`/`AZ-`）自带国家，用它补区号。⑤ 手机号模糊匹配要求**候选唯一**才认，多候选宁可新建——错配会把 A 的 lead_id 写到 B 身上，事后极难发现。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1023,6 +1049,16 @@ WhatsApp 绿色主题：
 - **表单草稿只在 `contact.id` 变时重置 → 外部改字段会被静默写回**（2026-08-20 修，`ContactEditForm`）：`PaymentReceiptSection` 把 stage 改成 `won` 后，表单下拉还停在旧值「已报价」，销售随手点一下「保存」就把成交撤销掉。已加只同步 `customer_stage` 一个字段的 effect（不整份重置，免得冲掉正在输入的姓名/备注）。**任何"绕过表单直接改 contact 字段"的新功能，都要给表单加对应字段的同步 effect**
 - **`direction='inbound'` 过滤不够，历史行有一批方向是反的**（2026-08-20 分析时踩到）：2026-06-08 修的"WA Web 删 class 导致全判入站"的 bug，`fixDirectionMismatch` 只在**有人重新打开那个聊天**时才自愈，没人点开的老客户 DB 里至今还是错的。实例：Ayodele 名下存着 `Good morning, Ayodele. I have safely received your payment evidence.`（Miles 说的话被存成 inbound）。**跑消息分析时除了 `direction` 过滤，还要看内容口气**——入站消息里出现客户自己的名字、"my friend" 式销售话术、或 PI/银行账号明细，基本都是我方消息存错了方向
 - **Meta conversions-api 的 access token 是坏的**（2026-08-20 实测）：手动触发的 `Purchase` 返回 **400 / 错误码 190（OAuth token 无效）**，跟广告分析里记的"Brian 的 Lead/InitiateCheckout 全部失败 400"是同一个根因——**不是单个事件的问题，是 token 从来没有效过**，conversions-api 一次都没成功。修 FB 归因前先换 token，别再排查事件构造
+- **AI 自动判断永远不回传 Meta**（2026-08-20，`events-log.ts`）：钩子只对 `payload.automatic === false` 触发 CAPI。实测 78% 的 qualifying / 96% 的 negotiating 阶段变更是 AI 推的，而 AI 会把广告表单自动首句「Hi, I'm interested in the Changan UNI-K.」读成「客户已购买并支付定金」。**喂错标签给 Meta 比不喂更糟**——它会照着这个特征找来更多同类人。新加任何回传 Meta 的逻辑，先问「这个判断是人做的还是机器做的」
+- **回传 Meta 前必须确认客户带广告标识**（`lead-qualification.ts` `hasAdIdentifier`）：只有 `fb_lead_id`/`ctwa_clid`/`fb_ad_id` 至少有一个才发。不是广告来的客户，Meta 仍可能靠哈希手机号匹配到某个 FB 用户，拿跟广告毫无关系的人当训练样本
+- **Purchase 事件必须带 value + currency**（2026-08-20 修，subcode 2804010）：`conversions-api` 里 `currency` 跟着 `value` 一起进 `custom_data`，不传 value 等于不传 currency → Meta 直接 400。这个 bug 从 CAPI 上线就在，被 token 190 盖了几个月。**客户端传 value 就能修，不用重新部署函数**
+- **Meta webhook 是两层订阅，App Dashboard 只做了第一层**（2026-08-20）：① App Dashboard → Webhooks → Page → Subscribe = **app 层**「我想收 Page 的 leadgen」；② `POST /{page-id}/subscribed_apps?subscribed_fields=leadgen` = **Page 层**把具体主页绑到 app。新版后台**没有第二层的界面**，必须调 API（需 `pages_manage_metadata`）。查 `GET /{page-id}/subscribed_apps` 返回 `[]` 就是第二层没做
+- **自定义 CAPI 事件不能预先注册**：Events Manager → Custom Conversions 的 Event 下拉只列**已经收到过**的事件。所以顺序是「先发出去 → Meta 收到 → 才能建 Custom Conversion → 才能在广告组选它当优化目标」，不能反过来
+- **`FB_DATASET_ID` / `FB_ACCESS_TOKEN` 等 secret 不要给硬编码兜底**（2026-08-20 修）：原本 `?? '710402162034322'`（旧 business 的 pixel），换 business 后忘配 secret 会**默默往够不着的 dataset 推、每条记 400 但界面无感**。没配就 500，让人立刻发现
+- **换 Meta business 等于整条 FB 链路重接**：token / dataset id / app secret / verify token / webhook 订阅 / Page 归属 全部要重做。pixel **不能跨 business 迁移**（只能共享），Page **可以迁**，代理商所有的广告账户（如 Meetsocial 的 `sino gear-1`）**动不了**。当前资产：business `995401959837699` · pixel `1028794893354914` · Page `1241950519005601` · app `1364804098472538`(CRMDataSource) · system user `cici` `61593387932394`
+- **System user token 生成时默认是 60 天**，要手动选 **Never**。过期后 CAPI 和 lead webhook **同时静默失效**（错误码 190），面板上什么都看不出来。本次连续两次踩到，第三次才选对
+- **`/{page}/leadgen_forms` 要 Page access token，但 `GET /{lead_id}` 用 system user token 就行**（有 `leads_retrieval`）。所以 `fb-lead-webhook` 只存 system user token 是够的，Page token 可以随时从 `GET /me/accounts?fields=access_token` 现换
+- **回填历史线索时手机号要按表单国家补区号**（`scripts/backfill-fb-leads.mjs`）：表单里有本地格式号（`078xxx` 卢旺达 / `099xxx` 阿塞拜疆），直接存 `+078...` 是**废号，永远匹配不上 WhatsApp 聊天**。表单名前缀 `RW-`/`PL-`/`AZ-` 自带国家。模糊匹配要求**候选唯一**才认，多候选宁可新建——错配会把 A 的 `fb_lead_id` 写到 B 身上，事后极难发现
 - **Egress 预算意识：数据涨、周期性拉取、分析脚本三个都会烧免费额度**（2026-07-16 修，21 天烧掉 4.11GB/5GB）：① useCrmData 头部 egress 模型是数据量快照，contacts 明显增长后要重算；② 新加"周期性 / 用户行为触发"的 DB 拉取（interval、visibilitychange、focus 等）先算"次数 × 单次体积 × 3 销售 × 25 天"，visibility 类节流对齐 60min；③ 全量拉大表的查询一律 slim select + `contacts!inner()` 空 embed（只 join 过滤不回传字段）；④ 一次性分析脚本别每轮迭代重拉 messages 全表（~21MB/次），dump 一次存本地文件复用
 
 ## 用户偏好

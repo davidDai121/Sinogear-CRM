@@ -24,7 +24,8 @@ export type ContactEventType =
   | 'ai_extracted'
   | 'fb_conversion_sent'
   | 'fb_lead_received'
-  | 'payment_received';
+  | 'payment_received'
+  | 'lead_qualified';
 export type FuelType = 'gas' | 'diesel' | 'hybrid' | 'ev';
 export type SaleStatus = 'available' | 'paused' | 'expired';
 export type MessageDirection = 'inbound' | 'outbound';

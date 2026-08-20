@@ -34,6 +34,7 @@ const ICON: Record<ContactEventType, string> = {
   fb_conversion_sent: '📣',
   fb_lead_received: '📨',
   payment_received: '💳',
+  lead_qualified: '🎯',
 };
 
 function timeAgo(iso: string): string {
@@ -128,6 +129,15 @@ function describe(ev: ContactEventRow): { title: string; detail?: string } {
       return {
         title: `📨 收到 FB Lead Ads 表单`,
         detail: `${formName}${leadId ? ` · ${leadId}` : ''}`,
+      };
+    }
+    case 'lead_qualified': {
+      const ok = p.qualified === true;
+      const reason = typeof p.reason === 'string' ? p.reason : '';
+      const sent = p.fb_event_sent === true;
+      return {
+        title: ok ? '🎯 判定：合格线索' : '🎯 判定：不合格线索',
+        detail: `${reason ? reason + ' · ' : ''}${sent ? '已回传 Meta' : '未回传（无广告标识）'}`,
       };
     }
     case 'payment_received': {

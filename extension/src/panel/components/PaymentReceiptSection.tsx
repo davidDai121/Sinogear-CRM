@@ -25,8 +25,12 @@ type ContactRow = Database['public']['Tables']['contacts']['Row'];
 
 interface Props {
   contact: ContactRow;
-  /** 事件写成功之后才调用，把 stage 落成 won（走 useContact.save，顺带记 stage_changed） */
-  onConfirmed: () => Promise<void>;
+  /**
+   * 事件写成功之后才调用，把 stage 落成 won（走 useContact.save，顺带记 stage_changed）。
+   * amountUsd 会进 stage_changed payload → 转给 Meta 当 Purchase 的 value
+   *（Purchase 没有 value+currency 会被 Meta 直接 400，详见 events-log.ts）。
+   */
+  onConfirmed: (amountUsd: number | null) => Promise<void>;
 }
 
 function fmtDate(iso: string): string {
@@ -93,7 +97,7 @@ export function PaymentReceiptSection({ contact, onConfirmed }: Props) {
       // 一个又是 won、又没有任何凭证的客户，正是这次要消灭的东西。
       if (!isWon) {
         setBusy('标记成交…');
-        await onConfirmed();
+        await onConfirmed(saved.amountUsd);
       }
       setReceipt(saved);
       setOpen(false);

@@ -16,14 +16,19 @@
 //   FB_APP_SECRET     - App Settings → Basic 里的 App Secret
 //   FB_VERIFY_TOKEN   - 任意字符串，跟 Meta 后台配 webhook 时填的对得上
 //   FB_ORG_ID         - CRM org id，新 lead 归到哪个 org
-//   FB_DATASET_ID     - default 710402162034322
+//   FB_DATASET_ID     - 必填，无兜底（新 business pixel: 1028794893354914）
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (自动注入)
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 
 const FB_API_VERSION = 'v25.0';
-const FB_DATASET_ID = Deno.env.get('FB_DATASET_ID') ?? '710402162034322';
+// ⚠️ 不要给 FB_DATASET_ID 加硬编码兜底。
+// 2026-08-20：这里原本是 `?? '710402162034322'`，那是旧 business 的 pixel。
+// 公司换了新 business 之后那个 ID 够不着了（Graph API 报 100/33），而函数
+// 不会报错，只是每条事件都默默记一个 400 —— 面板上什么都看不出来。
+// 没配 secret 就直接 500，让人立刻发现。新 pixel: 1028794893354914
+const FB_DATASET_ID = Deno.env.get('FB_DATASET_ID') ?? '';
 const FB_ACCESS_TOKEN = Deno.env.get('FB_ACCESS_TOKEN') ?? '';
 const FB_APP_SECRET = Deno.env.get('FB_APP_SECRET') ?? '';
 const FB_VERIFY_TOKEN = Deno.env.get('FB_VERIFY_TOKEN') ?? '';
@@ -296,12 +301,19 @@ serve(async (req) => {
   // 环境检查
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-  if (!supabaseUrl || !supabaseServiceKey || !FB_ORG_ID || !FB_ACCESS_TOKEN) {
+  if (
+    !supabaseUrl ||
+    !supabaseServiceKey ||
+    !FB_ORG_ID ||
+    !FB_ACCESS_TOKEN ||
+    !FB_DATASET_ID
+  ) {
     console.error('Missing env vars', {
       hasUrl: !!supabaseUrl,
       hasKey: !!supabaseServiceKey,
       hasOrgId: !!FB_ORG_ID,
       hasToken: !!FB_ACCESS_TOKEN,
+      hasDatasetId: !!FB_DATASET_ID,
     });
     // 给 Meta 200 防止重试，错误日志在 SW logs 里看
     return new Response('Server misconfigured', { status: 200 });

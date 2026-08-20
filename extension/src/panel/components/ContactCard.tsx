@@ -8,6 +8,7 @@ import { ContactEditForm } from './ContactEditForm';
 import { SalesSignalBanner } from './SalesSignalBanner';
 import { PendingRequestBanner } from './PendingRequestBanner';
 import { PaymentReceiptSection } from './PaymentReceiptSection';
+import { LeadQualitySection } from './LeadQualitySection';
 import { GroupMembersSection } from './GroupMembersSection';
 import { TagsSection } from './TagsSection';
 import { VehicleInterestsSection } from './VehicleInterestsSection';
@@ -129,8 +130,14 @@ export function ContactCard({ chat, orgId }: Props) {
             <SalesSignalBanner contact={contact} />
             <PaymentReceiptSection
               contact={contact}
-              onConfirmed={() => save({ customer_stage: 'won' })}
+              onConfirmed={(amountUsd) =>
+                save(
+                  { customer_stage: 'won' },
+                  amountUsd != null ? { value: amountUsd } : undefined,
+                )
+              }
             />
+            <LeadQualitySection contact={contact} />
             <PendingRequestBanner contactId={contact.id} orgId={orgId} />
             <ContactEditForm contact={contact} onSave={save} compact />
           </section>

@@ -17,7 +17,12 @@ export function useContact(
   phone: string | null,
   waName: string | null,
   groupJid: string | null = null,
-): ContactState & { save: (patch: Partial<ContactRow>) => Promise<void> } {
+): ContactState & {
+  save: (
+    patch: Partial<ContactRow>,
+    eventExtra?: Record<string, unknown>,
+  ) => Promise<void>;
+} {
   const [state, setState] = useState<ContactState>({
     contact: null,
     loading: false,
@@ -151,7 +156,15 @@ export function useContact(
     };
   }, [orgId, phone, waName, groupJid]);
 
-  const save = async (patch: Partial<ContactRow>) => {
+  /**
+   * eventExtra：额外塞进 stage_changed payload 的字段。
+   * 目前只用来带水单金额（value）—— Meta 的 Purchase 事件必须有 value+currency，
+   * 详见 events-log.ts 里的注释。
+   */
+  const save = async (
+    patch: Partial<ContactRow>,
+    eventExtra?: Record<string, unknown>,
+  ) => {
     if (!state.contact) return;
     const allowed: Database['public']['Tables']['contacts']['Update'] = {
       name: patch.name ?? undefined,
@@ -178,6 +191,7 @@ export function useContact(
         from: before.customer_stage,
         to: data.customer_stage,
         automatic: false,
+        ...eventExtra,
       });
     }
     setState({ contact: data, loading: false, error: null });
