@@ -47,12 +47,30 @@ export function PendingRequestBanner({ contactId, orgId }: Props) {
       const since = new Date(
         Date.now() - WINDOW_DAYS * 86_400_000,
       ).toISOString();
+
+      // ⚠️ 只认「我方最后一条外发之后」客户才提的要求。
+      // 2026-08-19 教训：第一版把客户历史上提过的全列出来，结果 Brian 的卡上
+      // 显示「等视频 / 等 VIN / 等营业执照」——这三样销售早在 8/14 就发过了
+      // （视频切段、VIN、营业执照 PDF×3）。只看「提过什么」不看「后来给没给」，
+      // 这个横幅就是噪音，会跟 tasks 一样很快被无视。
+      // 用「回复了就算处理过」这条规则：粗，但方向对，且和面板「我该回」同口径。
+      const { data: lastOut } = await supabase
+        .from('messages')
+        .select('sent_at')
+        .eq('contact_id', contactId)
+        .eq('direction', 'outbound')
+        .not('sent_at', 'is', null)
+        .order('sent_at', { ascending: false })
+        .limit(1);
+      if (cancelled) return;
+      const cutoff = lastOut?.[0]?.sent_at ?? since;
+
       const { data } = await supabase
         .from('messages')
         .select('text, sent_at')
         .eq('contact_id', contactId)
         .eq('direction', 'inbound')
-        .gte('sent_at', since)
+        .gt('sent_at', cutoff > since ? cutoff : since)
         .order('sent_at', { ascending: false })
         .limit(FETCH_LIMIT);
       if (cancelled) return;
@@ -80,7 +98,7 @@ export function PendingRequestBanner({ contactId, orgId }: Props) {
     <div className="sgc-sales-signal sgc-sales-signal-warning">
       <strong>⏳ 客户在等你给这些</strong>
       <span style={{ fontSize: 12, opacity: 0.85 }}>
-        从他最近 {WINDOW_DAYS} 天的消息里识别出来的，点一下加进待办。
+        你最后一次回复之后，他又提的要求。点一下加进待办。
       </span>
       <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
         {items.map((item) => {
