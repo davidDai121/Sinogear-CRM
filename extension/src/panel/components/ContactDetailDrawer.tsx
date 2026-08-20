@@ -4,6 +4,7 @@ import type { Database } from '@/lib/database.types';
 import { logContactEvent } from '@/lib/events-log';
 import { ContactEditForm } from './ContactEditForm';
 import { SalesSignalBanner } from './SalesSignalBanner';
+import { PendingRequestBanner } from './PendingRequestBanner';
 import { GroupMembersSection } from './GroupMembersSection';
 import { TagsSection } from './TagsSection';
 import { VehicleInterestsSection } from './VehicleInterestsSection';
@@ -158,6 +159,7 @@ export function ContactDetailDrawer({ contactId, orgId, onClose, onChanged }: Pr
                   <section className="sgc-drawer-section">
                     <div className="sgc-section-title">核心字段</div>
                     <SalesSignalBanner contact={contact} />
+                    <PendingRequestBanner contactId={contact.id} orgId={orgId} />
                     <ContactEditForm
                       contact={contact}
                       onSave={handleSave}
