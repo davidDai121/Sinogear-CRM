@@ -33,6 +33,7 @@ const ICON: Record<ContactEventType, string> = {
   ai_extracted: '🤖',
   fb_conversion_sent: '📣',
   fb_lead_received: '📨',
+  payment_received: '💳',
 };
 
 function timeAgo(iso: string): string {
@@ -127,6 +128,15 @@ function describe(ev: ContactEventRow): { title: string; detail?: string } {
       return {
         title: `📨 收到 FB Lead Ads 表单`,
         detail: `${formName}${leadId ? ` · ${leadId}` : ''}`,
+      };
+    }
+    case 'payment_received': {
+      const amount = typeof p.amount_usd === 'number' ? p.amount_usd : null;
+      const hasImg = typeof p.receipt_url === 'string' && p.receipt_url;
+      const note = typeof p.note === 'string' ? p.note : '';
+      return {
+        title: `💳 已收水单${amount != null ? ` · $${amount.toLocaleString()}` : ''}`,
+        detail: `${hasImg ? '已附水单图' : '未附水单图'}${note ? ` · ${note}` : ''}`,
       };
     }
     default:

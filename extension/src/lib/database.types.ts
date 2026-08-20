@@ -23,7 +23,8 @@ export type ContactEventType =
   | 'task_created'
   | 'ai_extracted'
   | 'fb_conversion_sent'
-  | 'fb_lead_received';
+  | 'fb_lead_received'
+  | 'payment_received';
 export type FuelType = 'gas' | 'diesel' | 'hybrid' | 'ev';
 export type SaleStatus = 'available' | 'paused' | 'expired';
 export type MessageDirection = 'inbound' | 'outbound';

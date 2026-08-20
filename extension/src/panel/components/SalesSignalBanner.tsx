@@ -23,20 +23,13 @@ function buildBanner(
   const messageCount = signal?.message_count ?? 0;
   const coverage = `CRM 已同步 ${messageCount} 条消息`;
 
-  if (contact.customer_stage === 'won') {
-    if (!signal?.payment_received_at) {
-      return {
-        tone: 'danger',
-        title: '成交状态待核实',
-        detail: `聊天中未发现定金/付款到账证据。请先核对财务回单、PI 和订单号；未到账时不要计入成交。${coverage}。`,
-      };
-    }
-    return {
-      tone: 'success',
-      title: '聊天中有付款确认信号',
-      detail: `仍建议以财务回单和订单号为最终依据。${coverage}。`,
-    };
-  }
+  // 成交客户不在这里出横幅：是否真收到水单由 PaymentReceiptSection 判定
+  // （读 contact_events 的 payment_received 人工凭证）。
+  // ⚠️ 曾经这里读 signal.payment_received_at 判「有没有付款证据」——那列的正则
+  // 没分方向也没排除否定句，全库只命中 5 条且全是我方发的
+  // "we still have not received the payment"，等于把没付款的判成付了。
+  // 这一列在成交判定上一律不再采信。
+  if (contact.customer_stage === 'won') return null;
 
   if (contact.customer_stage === 'quoted' && !signal?.quote_signal_at) {
     return {
@@ -46,11 +39,11 @@ function buildBanner(
     };
   }
 
-  if (signal?.payment_pending_at && !signal.payment_received_at) {
+  if (signal?.payment_pending_at) {
     return {
       tone: 'warning',
       title: '客户进入付款/银行环节',
-      detail: `尚未发现到账确认。请记录承诺付款日期，并在收到回单后再改为成交。${coverage}。`,
+      detail: `聊天里出现了银行/转账字样。记下承诺付款日期，收到水单后点「✅ 已收水单」再算成交。${coverage}。`,
     };
   }
 

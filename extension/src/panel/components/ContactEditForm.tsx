@@ -7,13 +7,17 @@ import type {
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 
-const STAGES: { value: CustomerStage; label: string }[] = [
+// ⛔ 'won' 在下拉里禁用：boss 定的口径是「客户发来水单才算成交」，
+// 唯一入口是客户卡的「✅ 已收水单」按钮（PaymentReceiptSection），
+// 那条路会同时写一条 payment_received 事件留证。这里放着只是为了
+// 已成交客户能正常显示当前值 —— 以及让人看见为什么点不了。
+const STAGES: { value: CustomerStage; label: string; disabled?: boolean }[] = [
   { value: 'new', label: '新客户' },
   { value: 'qualifying', label: '资质确认' },
   { value: 'negotiating', label: '跟进中' },
   { value: 'stalled', label: '待跟进' },
   { value: 'quoted', label: '已报价' },
-  { value: 'won', label: '成交' },
+  { value: 'won', label: '成交（只能点「已收水单」）', disabled: true },
   { value: 'lost', label: '流失' },
 ];
 
@@ -65,6 +69,18 @@ export function ContactEditForm({
       notes: contact.notes ?? '',
     });
   }, [contact.id]);
+
+  // 外部改了 stage（「✅ 已收水单」按钮会把客户置成成交）时同步下拉框。
+  // 不同步的话草稿停在旧值，销售随手点一下「保存」就把成交写回已报价 ——
+  // 2026-08-20 实测踩到：确认水单后卡上是绿条「已收水单」，下面阶段还写着「已报价」。
+  // 只同步 stage 这一个字段，不整份重置，免得冲掉正在输入的姓名/备注。
+  useEffect(() => {
+    setDraft((d) =>
+      d.customer_stage === contact.customer_stage
+        ? d
+        : { ...d, customer_stage: contact.customer_stage },
+    );
+  }, [contact.customer_stage]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -173,7 +189,11 @@ export function ContactEditForm({
           }
         >
           {STAGES.map((s) => (
-            <option key={s.value} value={s.value}>
+            <option
+              key={s.value}
+              value={s.value}
+              disabled={s.disabled && draft.customer_stage !== s.value}
+            >
               {s.label}
             </option>
           ))}

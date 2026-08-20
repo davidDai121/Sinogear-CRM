@@ -884,6 +884,31 @@ npm run package
 
 **教训**：① **content script isolated world 永远看不到页面 JS expando**（React fiber、页面全局变量）——任何"读 WA 内部模型"的功能必须 MAIN world 注入 + DOM attribute / postMessage 桥接，别再在 isolated world 里写 fiber 直读；② "路径 A 死了被路径 B 掩盖"能潜伏一年多——多路径 fallback 系统必须有像 `[sgc/inspect-chat]` 这样把**每条路径中间值**都打出来的诊断，否则死路径永远发现不了；③ 诊断日志 tag 行和 JSON 行分开打时，DevTools filter 会只显示 tag 行——JSON 也要带同 tag 前缀；④ 修完当场又遇 `AbortError: Lock broken by another request with the 'steal' option`——那是 Supabase auth 的 Web Locks 被抢：典型原因是**扩展被同时加载了两份**（团队 zip 版 + unpacked dist），双 content script 各建 supabase client 抢同 origin 的 session lock；HOST_ID guard 防双 UI 但防不了双 client。排查顺序：chrome://extensions 看是否有两个 Sino Gear CRM → 只留一份 → 关多余 WA tab → F5。
 
+### 近期补完（2026-08-20）— 成交只能由「已收水单」产生：堵死 AI 标 won 的最后一条路
+
+**起点**：boss 发现有几个没成交的客户被判成了成交。实测确认 Karim（+237671205883）库里是 `won`，但聊天里他最后两句是「The price is a little high can you bring it lower」和「How much will it cost to me all in total」——还在砍价。boss 由此定了新口径：**客户发来水单（银行回单）才算成交，其余一律不算。**
+
+**根因**：`won` 有三条产生路径，全都不需要任何付款事实：① Gem/Claude 回复里解析出的 `won/closed/closed_won` 被 `useAutoFbStage` 直接落库（8/19 已硬拦）；② `ContactEditForm` 的阶段下拉可以随手选「成交」；③ `SalesSignalBanner` 用 `contact_sales_signals.payment_received_at` 判「有没有付款证据」，而那列的正则**既没分方向也没排除否定句**——全库只命中 5 条，全是我方发的 "we still have **not** received the payment"，等于把没付款的判成付了。实测 23 个 `won` 里 **20 个是 AI 标的**（12 个 95% 置信度、8 个 85%），2 个人工，1 个连 `stage_changed` 记录都没有。
+
+**修法**：
+- **migration `0035_payment_received_event.sql`**：`contact_event_type` 加 `payment_received`
+- **`lib/payment-receipt.ts`**（新）：`fetchLatestReceipt` / `confirmPaymentReceived`。**故意不用 `logContactEvent`**——那个吞错误只 console.warn，而这条是成交凭证，写失败必须让人看见；0035 没跑时 PG 报的 enum 错会被翻成「请先跑 0035 迁移」的人话
+- **`panel/components/PaymentReceiptSection.tsx`**（新）：客户卡上唯一能置 `won` 的入口。三态——未成交出蓝条 +「✅ 已收水单」按钮；已成交且有凭证出绿条（日期/金额/备注/查看水单）；已成交但没凭证出**红条**「⚠️ 这单没有水单凭证」+ 补录按钮。水单图**建议传不强制**（销售在 WhatsApp 里干活，强制上传会让这个按钮变成第二个没人用的 tasks 表），没传图记成「未附水单图」便于复核
+- **顺序是设计的一部分**：凭证 `payment_received` 写成功之后才 `save({customer_stage:'won'})`。反过来的话事件写失败就会留下一个又是 won、又没有任何凭证的客户——正是这次要消灭的东西
+- **`ContactEditForm`**：下拉里「成交」`disabled`（除非当前值就是它，否则已成交客户显示不出来），标签改成「成交（只能点「已收水单」）」
+- **`SalesSignalBanner`**：`won` 分支整个删掉（改由 PaymentReceiptSection 判），`payment_pending` 分支不再和 `payment_received_at` 做 AND。**那列在成交判定上一律不再采信**
+- **`ContactEditForm` 加 stage 外部同步 effect**（UI 实测时发现的 bug，见下）
+
+**验证（Chrome MCP 实测，测试号 David +8613552592187，跑完全部还原）**：下拉框 `won` 实测 `disabled: true`；带图确认 → Cloudinary 落在 `payment-receipts` folder（说明 unsigned preset 接受 folder 覆盖）；DB 事件顺序 `payment_received`(06:40:03) → `stage_changed` quoted→won `automatic:false`(06:40:04)；无图路径 `receipt_url/file_name/amount_usd` 均为 null，绿条显示「未附水单图」；修完 stage 同步后点「保存」DB 仍是 `won`，无 won→quoted 事件。
+
+**中途抓到的 bug（已修）**：确认水单后卡上是绿条「已收水单」，下面「客户阶段」还写着**已报价**——`ContactEditForm` 的草稿只在 `contact.id` 变化时重置，外部改 stage 它不知道。危险在于销售随手点一下「保存」就把 `quoted` 写回去，**撤销掉刚确认的成交**。修法：加一个只同步 `customer_stage` 一个字段的 effect（不整份重置，免得冲掉正在输入的姓名/备注）。
+
+**顺带确认的两件事**：① 触发的 Meta `Purchase` 事件返回 **400 / 错误码 190（OAuth token 无效）**——广告分析里记的「Brian 的 Meta 事件全部失败」不是个案，是 access token 整个是坏的，conversions-api 从来没成功过；② `direction='inbound'` 过滤**不够**——2026-06-08 修的方向判反 bug，`fixDirectionMismatch` 只在有人重开聊天时自愈，没人点开的老客户 DB 里至今还错着（详见下方"已知问题"）。
+
+**产物**：`待复核成交_2026-08-20.md`——23 个 `won` 逐个列出「谁标的 / AI 的理由 / 客户实际说了什么」，按可信度分 A/B/C/D 四组。其中 Laar 全库只有 1 条入站（还是 FB 广告表单的自动首条消息），AI 据此推出「客户已购买其他车型并支付定金」；boakyefrank025 说的是 `I have gotten one already`（在别家买了）、Alagie Sarr 说 `We got a Jetour T1 for that client`，AI 把「买了别家」读成「已经购买 → 成交」。全部过完后 `won` 预计从 23 掉到 4~6 个。
+
+**教训**：① **任何"业务事实"字段（won/lost/已付款）都不能由 AI 或正则单独产生**，必须有一条人工入口 + 一条 append-only 凭证；写凭证的代码不能用吞错误的 `logContactEvent`。② **写凭证和改状态有先后**：凭证先落库，成功了才改状态——反过来会留下"状态改了但没证据"的脏数据。③ **表单草稿只在 `contact.id` 变时重置 = 外部改字段后会被静默写回**，任何"绕过表单直接改 contact 字段"的新功能，都要给表单加对应字段的同步 effect。④ 正则识别销售信号时**必须同时排除方向和否定句**，`payment_received_at` 那列两样都没做。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -993,6 +1018,11 @@ WhatsApp 绿色主题：
 - **content script isolated world 看不到页面 React fiber expando**（2026-07-29 修，fiber bridge）：`__reactFiber$` 是页面 world 的 JS expando，isolated world 里 `Object.getOwnPropertyNames` 返回空——**在 content script 里直读 fiber 的代码永远不工作**（2026-05 写的 readChatFromMainFiber 就是死的，被 IDB cache 掩盖一年多）。正确姿势：SW `chrome.scripting.executeScript({world:'MAIN'})` 注入自包含函数（不能引用外部作用域），数据经 **DOM 属性**（跨 world 共享）回传——现行实现是 `fiberBridgeMainWorld`（service-worker.ts）写 `<html data-sgc-fiber-chat>`，isolated 侧 `readChatFromBridge`（whatsapp-dom.ts）读。**改 fiber 抽取逻辑要改 SW 里那份**（独立实现，不 import whatsapp-dom）；`readChatFromBridge` 的 header 一致性 staleness 校验**绝不能删**（bridge 有 ~1s 延迟，删了会拿上一个聊天的身份建 contact / 写 messages = 跨聊天污染）
 - **@lid 业务号的真实手机号可能只存在于 fiber**：WA IDB contact/chat 表完全没有该联系人（连名字都没有）也是正常情况（Sima 案例），别假设"IDB 扫不到 = 不存在"。fiber bridge 是这类客户唯一的识别来源
 - **`AbortError: Lock broken by another request with the 'steal' option'` = Supabase auth Web Locks 被抢**：几乎总是**扩展被加载了两份**（团队 zip 版 + unpacked dist 同时启用），双 content script 各建 supabase client 抢同一 origin 的 session lock；HOST_ID guard 防双 UI 但防不了双 client。排查：chrome://extensions 只留一份 Sino Gear CRM → 关多余 web.whatsapp.com tab → F5
+- **`won` 只能由「✅ 已收水单」按钮产生**（2026-08-20，`PaymentReceiptSection` + `lib/payment-receipt.ts`）：boss 口径是「客户发来水单才算成交」。三条旧路径全堵：AI 走 `useAutoFbStage.isStageTransitionAllowed` 硬拦、下拉框「成交」`disabled`、`SalesSignalBanner` 不再读 `payment_received_at`。**新加任何会改 `customer_stage` 的代码，一律不许写 `won`**。凭证写在 `contact_events('payment_received')`，且**必须凭证先落库、成功了才改 stage**——反过来会留下"状态改了但没证据"的脏数据。写凭证不能用 `logContactEvent`（它吞错误只 console.warn）
+- **`contact_sales_signals.payment_received_at` 不可用于判成交**（0034 的正则缺陷）：没分方向也没排除否定句，全库只命中 5 条且全是我方发的 "we still have **not** received the payment"。该列没修，只是判成交时一律不采信。**任何新写的销售信号正则都要同时加 `direction` 过滤和否定句排除**
+- **表单草稿只在 `contact.id` 变时重置 → 外部改字段会被静默写回**（2026-08-20 修，`ContactEditForm`）：`PaymentReceiptSection` 把 stage 改成 `won` 后，表单下拉还停在旧值「已报价」，销售随手点一下「保存」就把成交撤销掉。已加只同步 `customer_stage` 一个字段的 effect（不整份重置，免得冲掉正在输入的姓名/备注）。**任何"绕过表单直接改 contact 字段"的新功能，都要给表单加对应字段的同步 effect**
+- **`direction='inbound'` 过滤不够，历史行有一批方向是反的**（2026-08-20 分析时踩到）：2026-06-08 修的"WA Web 删 class 导致全判入站"的 bug，`fixDirectionMismatch` 只在**有人重新打开那个聊天**时才自愈，没人点开的老客户 DB 里至今还是错的。实例：Ayodele 名下存着 `Good morning, Ayodele. I have safely received your payment evidence.`（Miles 说的话被存成 inbound）。**跑消息分析时除了 `direction` 过滤，还要看内容口气**——入站消息里出现客户自己的名字、"my friend" 式销售话术、或 PI/银行账号明细，基本都是我方消息存错了方向
+- **Meta conversions-api 的 access token 是坏的**（2026-08-20 实测）：手动触发的 `Purchase` 返回 **400 / 错误码 190（OAuth token 无效）**，跟广告分析里记的"Brian 的 Lead/InitiateCheckout 全部失败 400"是同一个根因——**不是单个事件的问题，是 token 从来没有效过**，conversions-api 一次都没成功。修 FB 归因前先换 token，别再排查事件构造
 - **Egress 预算意识：数据涨、周期性拉取、分析脚本三个都会烧免费额度**（2026-07-16 修，21 天烧掉 4.11GB/5GB）：① useCrmData 头部 egress 模型是数据量快照，contacts 明显增长后要重算；② 新加"周期性 / 用户行为触发"的 DB 拉取（interval、visibilitychange、focus 等）先算"次数 × 单次体积 × 3 销售 × 25 天"，visibility 类节流对齐 60min；③ 全量拉大表的查询一律 slim select + `contacts!inner()` 空 embed（只 join 过滤不回传字段）；④ 一次性分析脚本别每轮迭代重拉 messages 全表（~21MB/次），dump 一次存本地文件复用
 
 ## 用户偏好
