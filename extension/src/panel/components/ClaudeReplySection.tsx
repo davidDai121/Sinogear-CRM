@@ -1216,9 +1216,11 @@ const STAGE_MAP: Record<string, CustomerStage> = {
   cold: 'stalled',
   quoted: 'quoted',
   quote: 'quoted',
-  won: 'won',
-  closed: 'won',
-  closed_won: 'won',
+  // ⛔ AI 不许标成交——只有客户发来水单、人工确认后才是 won（2026-08-19 定）。
+  // AI 说的 won/closed/closed_won 一律降级成「已报价」，让人自己判断。
+  won: 'quoted',
+  closed: 'quoted',
+  closed_won: 'quoted',
   lost: 'lost',
   closed_lost: 'lost',
 };

@@ -78,10 +78,21 @@ function isStageTransitionAllowed(
   next: InferableStage,
 ): boolean {
   if (current === next) return false; // 无变化
+
+  // ⛔ 成交只能由人工确认，AI 永远不许标 won。
+  // 2026-08-19 boss 反馈「有几个没成交的被判成了成交」，实测确认：
+  // Karim (+237671205883) 库里是 won，但聊天里他最后两句是
+  // 「The price is a little high can you bring it lower」和
+  // 「How much will it cost to me all in total」——还在砍价。
+  // 根因是 Gem/Claude 回复里解析出的 won/closed/closed_won 被直接落库。
+  // 新口径（boss 定）：**客户发来水单才算成交**，其余一律不算。
+  // 所以这里硬拦，won 只能走人工路径（ContactEditForm 手选 / 收水单按钮）。
+  if (next === 'won') return false;
+
   // won 锁定：只能 stays won
   if (current === 'won') return false;
-  // lost 半锁定：只能复活到 won
-  if (current === 'lost') return next === 'won';
+  // lost 锁定：AI 不许复活（原来允许 lost → won，现在 won 归人工）
+  if (current === 'lost') return false;
   return true;
 }
 
