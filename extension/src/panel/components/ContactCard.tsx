@@ -9,6 +9,7 @@ import { SalesSignalBanner } from './SalesSignalBanner';
 import { PendingRequestBanner } from './PendingRequestBanner';
 import { PaymentReceiptSection } from './PaymentReceiptSection';
 import { LeadQualitySection } from './LeadQualitySection';
+import { AdLeadBanner } from './AdLeadBanner';
 import { GroupMembersSection } from './GroupMembersSection';
 import { TagsSection } from './TagsSection';
 import { VehicleInterestsSection } from './VehicleInterestsSection';
@@ -127,6 +128,7 @@ export function ContactCard({ chat, orgId }: Props) {
 
           <section className="sgc-drawer-section">
             <div className="sgc-section-title">核心字段</div>
+            <AdLeadBanner contact={contact} />
             <SalesSignalBanner contact={contact} />
             <PaymentReceiptSection
               contact={contact}

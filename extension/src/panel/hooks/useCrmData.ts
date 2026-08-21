@@ -50,6 +50,10 @@ type WhatsAppDataSnapshot = Awaited<ReturnType<typeof readWhatsAppData>>;
  *      完整行因为 REPLICA IDENTITY FULL）
  *   2. 在该组件内单独 useContact 一次（推荐：详情类页面别让列表 hook 背锅）
  */
+// ⚠️ 别往这里加列。2026-08-21 实测：加一个 fb_lead_id 就是 +172 KB/次，
+// 按每人每天 12 次全量刷新 × 3 人 = +182 MB/月，占免费额度 5 GB 的 3.5%。
+// 需要「哪些客户是广告线索」时单独查一次 id 列表（23 KB/次，25 MB/月），
+// 见 fetchAdLeadIds —— 便宜 7 倍。
 const CONTACT_LIST_COLS =
   'id, phone, group_jid, wa_name, name, country, language, budget_usd, customer_stage, quality, destination_port';
 
@@ -81,6 +85,9 @@ export interface CrmContact {
   classification: ChatClassification | null;
   /** 当前 user 是否置顶了这个客户（contact_pins 表） */
   pinned: boolean;
+  /** 来自 Facebook 广告表单（contacts.fb_lead_id 非空）。单独查 id 列表得来，
+   *  不把 fb_lead_id 塞进 CONTACT_LIST_COLS——那样每次全量刷新多 172 KB。 */
+  isAdLead: boolean;
 }
 
 export interface CrmData {
@@ -161,6 +168,8 @@ interface DbState {
   tagsByContactId: Map<string, string[]>;
   msgDirections: Map<string, MsgDirection>;
   pinnedIds: Set<string>;
+  /** 带 fb_lead_id 的客户 id —— 单独查，不往 CONTACT_LIST_COLS 里塞列（省 egress） */
+  adLeadIds: Set<string>;
   loading: boolean;
   error: string | null;
 }
@@ -186,6 +195,7 @@ const EMPTY_DB: DbState = {
   tagsByContactId: new Map(),
   msgDirections: new Map(),
   pinnedIds: new Set(),
+  adLeadIds: new Set(),
   loading: true,
   error: null,
 };
@@ -393,6 +403,28 @@ async function fetchAllContactTags(org: string): Promise<ContactTagRow[]> {
   return out;
 }
 
+/**
+ * 只取 id 的广告线索名单（23 KB/次）。
+ * 走 contacts 的 (org_id, fb_lead_id) 唯一索引，比给全量查询加一列便宜 7 倍。
+ */
+async function fetchAdLeadIds(org: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase
+      .from('contacts')
+      .select('id')
+      .eq('org_id', org)
+      .not('fb_lead_id', 'is', null)
+      .order('id')
+      .range(from, from + 999);
+    if (error) return out;
+    const rows = data ?? [];
+    rows.forEach((r) => out.add(r.id));
+    if (rows.length < 1000) break;
+  }
+  return out;
+}
+
 async function fetchPinnedIds(org: string): Promise<Set<string>> {
   const { data: auth } = await supabase.auth.getUser();
   const userId = auth.user?.id;
@@ -434,9 +466,12 @@ function applyContactChange(
   payload: RealtimePostgresChangesPayload<ContactRow>,
 ): DbState {
   const next = new Map(prev.contactsById);
+  // Realtime payload 带全部列（不受我们 select 的限制），顺手维护广告线索名单，
+  // 这样 webhook 推进来的新线索不用等下一次全量刷新就能进「广告线索」桶
+  const nextAdLeads = new Set(prev.adLeadIds);
   if (payload.eventType === 'DELETE') {
     const old = (payload as RealtimePostgresDeletePayload<ContactRow>).old;
-    if (old.id) next.delete(old.id);
+    if (old.id) { next.delete(old.id); nextAdLeads.delete(old.id); }
   } else {
     const row = (
       payload as
@@ -444,8 +479,10 @@ function applyContactChange(
         | RealtimePostgresUpdatePayload<ContactRow>
     ).new;
     next.set(row.id, row);
+    if (row.fb_lead_id) nextAdLeads.add(row.id);
+    else nextAdLeads.delete(row.id);
   }
-  return { ...prev, contactsById: next };
+  return { ...prev, contactsById: next, adLeadIds: nextAdLeads };
 }
 
 function applyVehicleInterestChange(
@@ -522,13 +559,14 @@ export function useCrmData(orgId: string | null): CrmData {
     }
     void (async () => {
       try {
-        const [contacts, vehicles, tags, msgDirections, pinnedIds] =
+        const [contacts, vehicles, tags, msgDirections, pinnedIds, adLeadIds] =
           await Promise.all([
             fetchAllContacts(org),
             fetchAllVehicleInterests(org),
             fetchAllContactTags(org),
             fetchMessageDirections(org),
             fetchPinnedIds(org),
+            fetchAdLeadIds(org),
           ]);
         if (cancelled) return;
         lastDbFetchRef.current = Date.now();
@@ -541,6 +579,7 @@ export function useCrmData(orgId: string | null): CrmData {
           tagsByContactId: indexTagsByContact(tags),
           msgDirections,
           pinnedIds,
+          adLeadIds,
           loading: false,
           error: null,
         });
@@ -794,6 +833,7 @@ export function useCrmData(orgId: string | null): CrmData {
       tagsByContactId,
       msgDirections,
       pinnedIds,
+      adLeadIds,
     } = dbState;
     const {
       chats,
@@ -860,6 +900,7 @@ export function useCrmData(orgId: string | null): CrmData {
           region: countryToRegion(c.country),
           classification,
           pinned: pinnedIds.has(c.id),
+          isAdLead: adLeadIds.has(c.id),
         };
       });
 
@@ -881,6 +922,7 @@ export function useCrmData(orgId: string | null): CrmData {
         tags: [],
         region: 'other',
         pinned: false,
+        isAdLead: false,
         classification: classifyChat(
           chat,
           { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
@@ -899,10 +941,14 @@ export function useCrmData(orgId: string | null): CrmData {
       mergedList.filter((m) => m.contact).map((m) => m.contact!.id),
     );
     for (const c of contacts) {
-      if (!pinnedIds.has(c.id)) continue;
+      // 除了置顶，广告线索也要进来：2026-08-20 回填了 274 个只填过 Facebook
+      // 表单、从没在 WhatsApp 说过话的客户。他们没有 chat，原来这个循环只放
+      // 置顶的进来，导致他们在聊天 tab 里**完全不显示**——塞进库了却没人看得见。
+      const isAdLead = adLeadIds.has(c.id);
+      if (!pinnedIds.has(c.id) && !isAdLead) continue;
       if (alreadyMergedIds.has(c.id)) continue;
       // 这条 push 没 chat → classification 也置 null（matchTodoBucket /
-      // todoCounts 对 'pinned' 的判定都在 classification 之前，不影响）
+      // todoCounts 对 'pinned' / 'ad_lead' 的判定都在 classification 之前，不影响）
       mergedList.push({
         contact: c,
         chat: null,
@@ -914,7 +960,8 @@ export function useCrmData(orgId: string | null): CrmData {
         vehicleInterests: vehicleInterestsByContactId.get(c.id) ?? [],
         tags: tagsByContactId.get(c.id) ?? [],
         region: countryToRegion(c.country),
-        pinned: true,
+        pinned: pinnedIds.has(c.id),
+        isAdLead,
         classification: null,
       });
     }

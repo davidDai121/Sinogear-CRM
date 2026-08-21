@@ -4,6 +4,7 @@ import { GemTemplatesModal } from './GemTemplatesModal';
 import { GPTTemplatesModal } from './GPTTemplatesModal';
 import { AIReplyLogModal } from './AIReplyLogModal';
 import { TeamMembersModal } from './TeamMembersModal';
+import { LeadRoutingModal } from './LeadRoutingModal';
 import { ScopePicker } from './ScopePicker';
 import { DomHealthBadge } from './DomHealthBadge';
 import { useScope } from '../contexts/ScopeContext';
@@ -79,6 +80,7 @@ export function TopNav({
   const [showGptTemplates, setShowGptTemplates] = useState(false);
   const [showAiLog, setShowAiLog] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
+  const [showRouting, setShowRouting] = useState(false);
   const [allCount, setAllCount] = useState<number | undefined>();
 
   // 拉一次 org 总客户数（30s 一次跟着 ScopeContext 节奏）
@@ -173,6 +175,14 @@ export function TopNav({
         <button
           type="button"
           className="sgc-topnav-toggle"
+          onClick={() => setShowRouting(true)}
+          title="广告线索按表单分给业务员 —— 新建广告表单之后来这里设归属"
+        >
+          📣 线索分配
+        </button>
+        <button
+          type="button"
+          className="sgc-topnav-toggle"
           onClick={() => setShowTeam(true)}
           title="管理团队成员（邀请同事 / 改角色 / 移除）"
         >
@@ -208,6 +218,10 @@ export function TopNav({
           orgId={orgId}
           onClose={() => setShowTeam(false)}
         />
+      )}
+
+      {showRouting && (
+        <LeadRoutingModal orgId={orgId} onClose={() => setShowRouting(false)} />
       )}
     </div>
   );

@@ -888,7 +888,22 @@ div[style*="translate"]:has(> [role="menu"] button[aria-label="Bold"]) {
 }
 
 /* sticky header：modal 滚动时表头保持可见 + 关闭按钮总在右上角 */
-.sgc-modal .sgc-modal-header {
+.sgc-modal /* ⚠️ WhatsApp Web 有一条全局规则把模态框里的 <strong> 染成白色，白字白底看不见。
+   2026-08-21 实测：模态标题（"📣 线索分配"）和模态里的横幅标题 computed color
+   都是 rgb(255,255,255)，而客户卡里同样的 class 是 rgb(17,27,33) 正常。
+   所有模态框的标题都中招（AI 日志那个也只显示图标），一直没人发现。
+   这里显式定死颜色，别依赖继承。 */
+.sgc-modal-header strong,
+.sgc-modal .sgc-sales-signal strong,
+.sgc-modal .sgc-sales-signal span {
+  color: #111b21;
+}
+
+.sgc-modal .sgc-sales-signal span {
+  color: #54656f;
+}
+
+.sgc-modal-header {
   position: sticky;
   top: 0;
   background: #fff;

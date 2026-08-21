@@ -11,7 +11,8 @@ export type TodoBucket =
   | 'new'      // ≤ 1 天
   | 'active'   // 1-3 天（NEW）
   | 'stalled'  // 3-7 天
-  | 'lost';    // > 7 天（NEW）
+  | 'lost'     // > 7 天（NEW）
+  | 'ad_lead'; // 广告线索且从没在 WhatsApp 聊过（2026-08-20 新增）
 
 /**
  * 标记某客户是"重点客户"——基于真实业务信号 + 近期活跃：
@@ -165,9 +166,25 @@ export function isFilterEmpty(f: FilterState): boolean {
   );
 }
 
+/**
+ * 广告来的、且从来没在 WhatsApp 说过话的线索。
+ *
+ * 2026-08-20 实测：8 个 Facebook 即时表单的「感谢页」都配了「Chat on WhatsApp」
+ * 按钮，但只有 42% 的客户会去点。剩下 58% 填完表就走了——资料在 Meta 手里，
+ * 你们这边一条消息都没有。这个桶就是那批人。
+ * 他们一旦回消息（有了 chat），自动从桶里消失，进正常的「我该回」流程。
+ */
+function isUncontactedAdLead(c: CrmContact): boolean {
+  return c.isAdLead && !c.chat;
+}
+
 function matchTodoBucket(c: CrmContact, bucket: TodoBucket): boolean {
   if (bucket === 'pinned') return c.pinned;
   if (bucket === 'all') return true;
+  // ⚠️ ad_lead 必须判在 classification 之前：这批人正是「没有 WhatsApp 会话」
+  // 的客户，classification 来自聊天记录，对他们恒为 null。放在下面那行
+  // `if (!cls) return false` 之后就永远匹配不上。
+  if (bucket === 'ad_lead') return isUncontactedAdLead(c);
   const cls = c.classification;
   if (!cls) return false;
   if (bucket === 'needs_reply') return cls.needsReply;
@@ -278,12 +295,14 @@ export function todoCounts(contacts: CrmContact[]): Record<TodoBucket, number> {
     active: 0,
     stalled: 0,
     lost: 0,
+    ad_lead: 0,
   };
   for (const c of contacts) {
     if (c.chat?.archive) continue;
     if (c.contact?.quality === 'spam') continue;
     if (c.pinned) counts.pinned++;
     counts.all++;
+    if (isUncontactedAdLead(c)) counts.ad_lead++;
     if (!c.classification) continue;
     if (c.classification.needsReply) counts.needs_reply++;
     if (c.contact && NEGOTIATING_STAGES.has(c.contact.customer_stage)) {

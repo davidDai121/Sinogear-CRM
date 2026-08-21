@@ -935,6 +935,50 @@ npm run package
 
 **教训**：① **「配置对了」不等于「链路通了」**——本次五处断点里有三处（Purchase currency、Page 层订阅、business 归属）光看配置界面完全看不出来，必须端到端打一次真实事件。修完 token 就宣布完成的话，成交事件仍然一条都进不去。② **Meta 的 webhook 是两层订阅**：App Dashboard 勾 Subscribe 只是 app 层，Page 层要 `POST /{page-id}/subscribed_apps`，新版后台无界面。③ **自定义 CAPI 事件不能预先注册**——必须先发出去、Meta 收到后才出现在 Events Manager 的 Custom Conversion 事件列表里，所以「先在后台注册再发」的顺序是错的。④ **回填历史线索时手机号必须规范化**：表单里有本地格式号（`078xxx`/`099xxx`），直接存 `+078...` 是废号，永远匹配不上 WhatsApp；表单名前缀（`RW-`/`PL-`/`AZ-`）自带国家，用它补区号。⑤ 手机号模糊匹配要求**候选唯一**才认，多候选宁可新建——错配会把 A 的 lead_id 写到 B 身上，事后极难发现。
 
+### 近期补完（2026-08-21）— 广告线索按表单落到业务员 + 回填踩的三个「身份推断」坑
+
+**起点**：boss 看到回填进来的 274 个广告线索「在聊天 tab 里根本看不见」，以及「我哪知道来了新客户」。顺着查下去，暴露出一整串问题——既有产品缺口，也有我前一天回填时犯的错。
+
+#### 一、按表单分配（而不是按国家）
+
+boss 原话：「按照表单归属，给到对应的业务员上，别用国家分类了」。**这个判断是对的，数据证明了**：卢旺达同时跑着两个表单，`RW-Nammi01` 归 daimenglong、`RW-B2B-QINPLUS` 归 2064026258——同一个国家两个人，按国家分必然分错。
+
+**归属从哪来**：Meta **不给读**表单绑的 WhatsApp 号。实测排除了 7 条路——`thank_you_page` 完整对象（只有文案和 button_type）、`follow_up_action_url`（空）、`tracking_parameters`（空）、表单 metadata 自省（返回 0 字段）、`/{page}/whatsapp_numbers`（端点不存在）、主页 `whatsapp_number` 字段（不返回）、广告 creative（CTA 是 `GET_QUOTE` + `lead_gen_form_id`，链接 `http://fb.me/`）。表单库 UI 和 6 页表单预览也都不显示号码，整页 DOM 全文搜索也搜不到。
+
+**解法：从已发生的事实反推。** 客户点「Chat on WhatsApp」就被真实路由到某个业务员的号上，而每个业务员用自己的 WhatsApp 登录扩展，`contact_handlers` 自动登记。按表单统计主理人分布，纯度 91%–100%（杂音是别人临时点开过聊天）。
+
+- **migration `0037_lead_routing_rules.sql`**：`(org_id, form_name) → user_id` + `apply_lead_routing(org_id)` RPC。RPC 必须 security definer——`contact_handlers` 的 RLS 是「只能写自己」（0014 定的防抢单），而分配天然是「把线索指给别人」。只动「有 fb_lead_id 且没有任何主理人」的客户，**已经在跟的绝不抢走**。
+- **`lib/lead-routing.ts` + `LeadRoutingModal`**：顶栏「📣 线索分配」。boss 原话「我哪知道什么时候跑」——所以推断逻辑不能只做成命令行脚本，做成页面：打开就看见「N 个表单没归属、M 条线索没人跟」，一键处理。新表单攒够 3 条「客户点过按钮」的样本、纯度 ≥70% 就出推断，低于阈值提示人工指定。
+- **`scripts/route-fb-leads.mjs`**：命令行版，批量核对用，读写同一张表。
+
+#### 二、让 274 个「没有 WhatsApp 会话」的客户可见
+
+回填把人塞进库了，但他们在聊天 tab 里**完全不显示**——`useCrmData` 的第 3 路循环只放置顶的进来，而「今日待办」8 个桶全依赖 `classification`（来自聊天记录），对没有会话的客户恒为 null。
+
+- `useCrmData`：merge 循环放行广告线索；`filters.ts` 新增 `ad_lead` 桶，**判定必须写在 `if (!cls) return false` 之前**
+- **`AdLeadBanner.tsx`**：卡上显示表单作答（用途/台数/多久买）+「💬 发起首次联系」+「👤 我来跟」。字段翻译扫了全库 489 条线索的全部变体，含波兰表单的波兰语选项（`1_sztuka` / `6_i_więcej`）
+- `FilteredChatList`：广告线索且无会话时**不自动 deep link**。boss 实测反馈「点完以后会有聊天框，过几秒又跳转，又显示电话没注册」——`/send?phone=` 会让 WA Web 整页重载（约 14 秒），327 个挨个点等于重载几百次
+
+#### 三、回填踩的三个坑（都是同一类错误）
+
+1. **按表单填的号码匹配客户 → 造出 74 个重复。** 客户填的号跟他实际发 WhatsApp 的号经常不是一个（填座机 / 旧号 / 手滑，实测一对只差两位：`+250728304062` vs `+250788403062`）。归因挂在从没说过话的号上，真实对话反而显示「没有广告标识」。修法：FB 自动消息正文带着表单填的号码和邮箱，**发出这条消息的 contact 才是真人**。
+2. **重号识别的正则只认 `filled in your form` → 漏掉三分之二。** 全库 1,922 条自动消息里 `filled out` 有 1,174 条（主流）、`filled in` 只有 609 条。第一版只修了 17 个，改成 `/filled\s+(?:in|out)\s+your\s+form/i` 之后是 **57 个**。
+3. **按 ad_id 反推表单 → 2 条错。** 有广告先后指向过两个表单，而这两个表单归属不同的人。改成用 `fb_lead_id` 回 Graph API 拿权威 form_id。
+
+预防：`message-sync.ts` 加 `reconcileFbLeadDuplicate`，跟已有的三个自愈函数（补时间戳 / 覆盖已删除 / 方向纠正）并列。删除条件极保守——占位记录必须同时满足「有 fb_lead_id + 零消息 + 无主理人」。
+
+#### 四、webhook 丢事件（影响每一条未来线索）
+
+`fb-lead-webhook` 里三处 `void supabase.from('contact_events').insert(...)` 没 await。**Edge Function 跑在 Deno Deploy 上，handler 一返回 Response，未完成的 promise 就被杀掉**——实测 8 条真实线索的 contact 建出来了、`fb_lead_id`/`fb_ad_id` 也写了，但事件一条没落库。而线索分配页和 `apply_lead_routing` 都靠 `payload->>'form_name'` 找线索，**没事件 = 这条线索永远分不出去**。已全部改成 await（`conversions-api` 里同款写法一并改）。⚠️ **要重新部署才生效**，已丢的 8 条用 `scripts/repair-missing-lead-events.mjs` 回 Graph API 补回。
+
+#### 五、egress
+
+`CONTACT_LIST_COLS` 加一个 `fb_lead_id` 实测 +172 KB/次 → 每人每天 12 次全量刷新 × 3 人 = **+182 MB/月，占免费额度 3.5%**。改成单独查 id 列表（23 KB/次，25 MB/月），**省 157 MB/月**。顺带量出更大的问题：**9,411 行全量刷新里只有约 930 行（10%）真正进了列表**，其余 8,481 行只被用来做「这个 WA 聊天有没有对应客户」这一个布尔判断。改成「先拉 id+phone，再按需拉完整行」可省 62%（2.41 GB/月 → 0.93 GB/月），**未做，排期待定**。
+
+**验证（Chrome MCP 实测，全程 boss 在旁）**：AdLeadBanner 渲染正确（Nammi 01 / 出租车网约车 / 1 台 / 30 天内）；点「🎯 合格」→ `lead_qualified` 事件 + `QualifiedLead` 回传 `meta_status 200`，**`identifiers: ["ph","fn","lead_id"]`——带 lead_id 的高精度归因，今天之前全库 fb_lead_id 为 0 时不可能做到**；线索分配页正常加载（超时已修）；「一键分配」RPC 落 6 条并自动刷新；点无会话线索不再整页跳转。
+
+**教训**：① **三个坑是同一个模式——用间接信号推断身份，然后只验数量不验正确性。** 手机号、ad_id、单一文案变体，每次 dry-run 我都看了「匹配多少条」，没随机抽几条人工核对。boss 让我「多点点」比跑三轮 dry-run 有用——点开一个客户看一眼当场就发现了。**批量回填前先问「这个字段是不是稳定身份」，dry-run 要抽样核对而不是只看计数。** ② **Deno Deploy 上任何 `void promise` 都可能被杀**，Edge Function 里的 DB 写入一律 await。③ 处理外部平台的自动文案时，**先统计全库有几种变体**再写正则，别照着看到的第一条写。④ 「对整表加过滤」的客户端查询要先确认那一列有索引——`contact_events` 90 万行、`event_type` 无索引，直接 `.eq()` 就是 8 秒超时（0032 的教训第二次重演）。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1059,6 +1103,14 @@ WhatsApp 绿色主题：
 - **System user token 生成时默认是 60 天**，要手动选 **Never**。过期后 CAPI 和 lead webhook **同时静默失效**（错误码 190），面板上什么都看不出来。本次连续两次踩到，第三次才选对
 - **`/{page}/leadgen_forms` 要 Page access token，但 `GET /{lead_id}` 用 system user token 就行**（有 `leads_retrieval`）。所以 `fb-lead-webhook` 只存 system user token 是够的，Page token 可以随时从 `GET /me/accounts?fields=access_token` 现换
 - **回填历史线索时手机号要按表单国家补区号**（`scripts/backfill-fb-leads.mjs`）：表单里有本地格式号（`078xxx` 卢旺达 / `099xxx` 阿塞拜疆），直接存 `+078...` 是**废号，永远匹配不上 WhatsApp 聊天**。表单名前缀 `RW-`/`PL-`/`AZ-` 自带国家。模糊匹配要求**候选唯一**才认，多候选宁可新建——错配会把 A 的 `fb_lead_id` 写到 B 身上，事后极难发现
+- **Edge Function 里的 DB 写入一律 `await`，不能 `void`**（2026-08-21 修，`fb-lead-webhook` + `conversions-api`）：Deno Deploy 在 handler 返回 Response 之后会杀掉未完成的 promise。实测 8 条真实线索的 contact 建出来了、`fb_lead_id` 也写了，但 `fb_lead_received` 事件一条没落库——而线索分配页和 `apply_lead_routing` 都靠 `payload->>'form_name'` 找线索，没事件 = 这条线索永远分不出去，而且**完全静默**。写完这类代码要真发一条测试事件确认落库
+- **批量回填前先问「用来匹配的字段是不是稳定身份」**（2026-08-21，三次踩同一个坑）：① 按 FB 表单填的手机号匹配 → 造出 74 个重复（客户填的号跟他发 WhatsApp 的号经常不同，实测一对只差两位）；② 按 `ad_id` 反推表单 → 2 条错（广告先后指向过两个表单，归属不同的人）；③ 按单一文案变体匹配 → 漏三分之二。**dry-run 只看「匹配了多少条」没用，必须随机抽几条人工核对**——数量对不代表匹配对
+- **处理外部平台的自动文案先统计全库变体**（2026-08-21）：Meta 的表单预填消息有 `filled in your form`（609 条）和 `filled out your form`（**1,174 条，主流**）两种。照着看到的第一条写正则会认了少数派。`message-sync.ts` 的 `reconcileFbLeadDuplicate` 现在用 `/filled\s+(?:in|out)\s+your\s+form/i`
+- **Meta 不提供「表单 → WhatsApp 号」的绑定**（2026-08-21 排除 7 条路）：`thank_you_page` / `follow_up_action_url` / `tracking_parameters` / 表单 metadata 自省 / `/{page}/whatsapp_numbers` / 主页 `whatsapp_number` / 广告 creative 全都拿不到，表单库 UI 和预览也不显示。归属只能**从已发生的对话反推**——按表单统计 `contact_handlers` 分布（实测纯度 91%–100%）。新表单攒够 3 条样本再推断，低于阈值人工指定
+- **`contact_handlers` 的 RLS 只允许写自己**（0014 防抢单），所以「把线索指给别人」必须走 security definer RPC（`apply_lead_routing`）。任何批量指派功能都会撞这条
+- **WhatsApp Web 有全局规则把模态框里的 `<strong>` 染成白色**（2026-08-21 修，`styles.css`）：白字白底，**所有模态框的标题都中招**（AI 日志那个也只显示图标），一直没人发现。模态里的文字颜色要显式定死，别依赖继承
+- **`CONTACT_LIST_COLS` 加一列的代价是 172 KB/次**（2026-08-21 实测）：×12 次/天 ×3 人 = 182 MB/月，占免费额度 3.5%。需要「哪些客户属于某一类」时**单独查 id 列表**（23 KB/次）比加列便宜 7 倍。更大的问题：这个全量查询 9,411 行里**只有约 930 行（10%）真正进了列表**，其余只用来做一个布尔判断——改成「先拉 id+phone 再按需取完整行」可省 62%，未做
+- **`/send?phone=` deep link 会让 WA Web 整页重载（约 14 秒）**，号码没注册还会弹错误框。列表里点「没有会话」的客户不能无条件 deep link——327 个广告线索挨个点等于重载几百次。现在改成搜索优先、搜不到先问一句（`FilteredChatList`）
 - **Egress 预算意识：数据涨、周期性拉取、分析脚本三个都会烧免费额度**（2026-07-16 修，21 天烧掉 4.11GB/5GB）：① useCrmData 头部 egress 模型是数据量快照，contacts 明显增长后要重算；② 新加"周期性 / 用户行为触发"的 DB 拉取（interval、visibilitychange、focus 等）先算"次数 × 单次体积 × 3 销售 × 25 天"，visibility 类节流对齐 60min；③ 全量拉大表的查询一律 slim select + `contacts!inner()` 空 embed（只 join 过滤不回传字段）；④ 一次性分析脚本别每轮迭代重拉 messages 全表（~21MB/次），dump 一次存本地文件复用
 
 ## 用户偏好

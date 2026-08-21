@@ -44,6 +44,8 @@ export function FilteredChatList({
   const { handlersByContact, membersById, myUserId } = useScope();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 广告线索没有会话时，搜不到不直接重载，先问一句（存 phone） */
+  const [confirmOpen, setConfirmOpen] = useState<string | null>(null);
   const [menu, setMenu] = useState<
     | { x: number; y: number; contact: CrmContact }
     | null
@@ -99,13 +101,25 @@ export function FilteredChatList({
     }
   }, [activePhone]);
 
-  const go = async (c: CrmContact) => {
+  const go = async (c: CrmContact, forceDeepLink = false) => {
     setBusyId(c.jid ?? c.phone);
     setError(null);
+    setConfirmOpen(null);
     try {
       const query = c.phone.replace(/^\+/, '');
-      const ok = await jumpToChat(query, { allowDeepLink: true });
-      if (!ok) setError('未找到聊天，可能需要手动打开');
+      // ⚠️ 广告线索且没有会话时不自动 deep link。
+      // 2026-08-21 boss 实测反馈：点一下会弹出聊天框、几秒后整页跳转、
+      // 然后提示「电话没注册 WhatsApp」。原因是 /send?phone= 会让 WA Web
+      // 整个重新加载（实测约 14 秒），号码没注册还会弹错误框。
+      // 这批人有 327 个，挨个点一遍等于反复重载几百次，不能用。
+      // 改成搜索优先；搜不到就问一句，确认了才走 deep link。
+      const noChatLead = c.isAdLead && !c.chat;
+      const allowDeepLink = forceDeepLink || !noChatLead;
+      const ok = await jumpToChat(query, { allowDeepLink });
+      if (!ok) {
+        if (noChatLead && !forceDeepLink) setConfirmOpen(c.phone);
+        else setError('未找到聊天，可能需要手动打开');
+      }
     } catch (err) {
       setError(stringifyError(err));
     } finally {
@@ -161,6 +175,36 @@ export function FilteredChatList({
         </button>
       </div>
       {error && <div className="sgc-filtered-list-error">{error}</div>}
+      {confirmOpen && (
+        <div className="sgc-sales-signal sgc-sales-signal-warning" style={{ margin: 8 }}>
+          <strong>这个客户还没有 WhatsApp 会话</strong>
+          <span style={{ fontSize: 12 }}>
+            他填过广告表单但没点「Chat on WhatsApp」。强行打开会让 WhatsApp Web
+            整页重载（约 14 秒），号码没注册的话还会报错。
+            建议直接用客户卡上的「💬 发起首次联系」——那里会带上表单作答起草第一条消息。
+          </span>
+          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+            <button
+              type="button"
+              className="sgc-btn-secondary"
+              style={{ fontSize: 12, padding: '3px 10px' }}
+              onClick={() => {
+                const target = sorted.find((x) => x.phone === confirmOpen);
+                if (target) void go(target, true);
+              }}
+            >
+              仍然打开（会重载页面）
+            </button>
+            <button
+              type="button"
+              className="sgc-btn-mini"
+              onClick={() => setConfirmOpen(null)}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
       <div className="sgc-filtered-list-body">
         {sorted.length === 0 && (
           <div className="sgc-empty">没有匹配的客户</div>

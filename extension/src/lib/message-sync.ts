@@ -94,7 +94,90 @@ export async function syncMessages(
   // 用本次重新读到的 direction 把 DB 里方向不符的行 UPDATE 回来。
   void fixDirectionMismatch(contactId, rows);
 
+  // 广告线索重号自愈：客户在 FB 表单里填的号码，跟他实际发 WhatsApp 的号经常不是
+  // 同一个（填座机 / 填旧号 / 手滑打错，实测有一对只差两位）。fb-lead-webhook 按
+  // 表单号建 contact，客户后来用另一个号来聊，就成了两条记录，而且归因挂在那个
+  // 从没说过话的号上——真实对话反而显示「没有广告标识、不回传 Meta」。
+  // 客户点「Chat on WhatsApp」发来的首条消息正文里带着他填的表单内容，
+  // 这是唯一能把两个号对上的时刻，所以在这里认。
+  void reconcileFbLeadDuplicate(contactId, rows);
+
   return { inserted: count ?? 0 };
+}
+
+// ⚠️ Meta 的预填文案有多个变体，实测全库：
+//   "filled out your form"  1,174 条  ← 主流
+//   "filled in  your form"    609 条
+// 2026-08-21 第一版只写了 "filled in"，漏掉三分之二的重号没认出来。
+const FB_FORM_MSG = /filled\s+(?:in|out)\s+your\s+form/i;
+const FB_FORM_PHONE = /phone\s*number\s*:?\s*\n?\s*(\+?[\d][\d\s\-()]{6,})/i;
+
+/**
+ * 把「表单号」占位客户合并到「真正在聊的」客户身上。
+ *
+ * 只在这条聊天里出现 FB 表单自动消息、且正文里的号码跟当前客户的号**不一样**时才动。
+ * 删除条件非常保守——占位记录必须同时满足：有 fb_lead_id、没有任何消息、没有主理人。
+ * 少删一个只是留个重复，误删一个会丢真实对话。
+ */
+async function reconcileFbLeadDuplicate(
+  contactId: string,
+  rows: { direction: string; text: string }[],
+): Promise<void> {
+  try {
+    const hit = rows.find((r) => r.direction === 'inbound' && FB_FORM_MSG.test(r.text));
+    if (!hit) return;
+    const m = FB_FORM_PHONE.exec(hit.text);
+    if (!m) return;
+    const formDigits = m[1].replace(/\D/g, '');
+    if (formDigits.length < 8) return;
+
+    const { data: me } = await supabase
+      .from('contacts')
+      .select('id, org_id, phone, fb_lead_id')
+      .eq('id', contactId)
+      .maybeSingle();
+    if (!me) return;
+    // 表单号跟当前号一致 → 没有重号问题
+    if ((me.phone ?? '').replace(/\D/g, '') === formDigits) return;
+
+    const { data: dup } = await supabase
+      .from('contacts')
+      .select('id, phone, fb_lead_id, fb_ad_id')
+      .eq('org_id', me.org_id)
+      .eq('phone', '+' + formDigits)
+      .maybeSingle();
+    if (!dup || dup.id === contactId || !dup.fb_lead_id) return;
+
+    // 占位记录必须是「干净的」才敢删
+    const [{ count: msgCount }, { count: handlerCount }] = await Promise.all([
+      supabase.from('messages').select('id', { count: 'exact', head: true }).eq('contact_id', dup.id),
+      supabase.from('contact_handlers').select('contact_id', { count: 'exact', head: true }).eq('contact_id', dup.id),
+    ]);
+    if ((msgCount ?? 0) > 0 || (handlerCount ?? 0) > 0) return;
+
+    // 先摘归因腾出 (org_id, fb_lead_id) 唯一约束，再搬到真人身上
+    await supabase.from('contacts').update({ fb_lead_id: null, fb_ad_id: null }).eq('id', dup.id);
+    if (!me.fb_lead_id) {
+      await supabase
+        .from('contacts')
+        .update({ fb_lead_id: dup.fb_lead_id, fb_ad_id: dup.fb_ad_id })
+        .eq('id', contactId);
+      await supabase.from('contact_events').insert({
+        contact_id: contactId,
+        event_type: 'fb_lead_received',
+        payload: {
+          fb_lead_id: dup.fb_lead_id,
+          repaired_from_phone: dup.phone,
+          repaired_at: new Date().toISOString(),
+          source: 'reconcile-on-message',
+        },
+      });
+    }
+    await supabase.from('contacts').delete().eq('id', dup.id);
+    console.warn('[fb-lead] 合并重号占位客户', dup.phone, '→', me.phone);
+  } catch (err) {
+    console.warn('[fb-lead] reconcile failed', err);
+  }
 }
 
 /**

@@ -379,6 +379,36 @@ export interface Database {
         };
         Relationships: [];
       };
+      lead_routing_rules: {
+        Row: {
+          id: string;
+          org_id: string;
+          form_name: string;
+          user_id: string;
+          auto_detected: boolean;
+          confidence: number | null;
+          note: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          org_id: string;
+          form_name: string;
+          user_id: string;
+          auto_detected?: boolean;
+          confidence?: number | null;
+          note?: string | null;
+        };
+        Update: {
+          form_name?: string;
+          user_id?: string;
+          auto_detected?: boolean;
+          confidence?: number | null;
+          note?: string | null;
+        };
+        Relationships: [];
+      };
       contact_events: {
         Row: {
           id: string;
@@ -705,6 +735,10 @@ export interface Database {
     };
     Views: Record<string, never>;
     Functions: {
+      apply_lead_routing: {
+        Args: { p_org_id: string };
+        Returns: number;
+      };
       create_organization: {
         Args: { org_name: string };
         Returns: string;

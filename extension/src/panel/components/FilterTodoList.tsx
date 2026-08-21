@@ -12,6 +12,7 @@ const BUCKETS: { id: TodoBucket; icon: string; label: string }[] = [
   { id: 'active', icon: '🔄', label: '进行中（1-3 天）' },
   { id: 'stalled', icon: '💤', label: '长期未联系（3-7 天）' },
   { id: 'lost', icon: '🪦', label: '已流失（> 7 天）' },
+  { id: 'ad_lead', icon: '📣', label: '广告线索 · 未联系' },
 ];
 
 interface Props {

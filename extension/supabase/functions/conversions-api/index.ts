@@ -190,7 +190,9 @@ serve(async (req) => {
   // 写时间轴（失败 / 成功都写，便于事后排查）
   // 注：用 service role 写入避免 Edge Function 拿不到完整 RLS 上下文。
   // 这里如果想严格按 RLS 走，可以保持用同一个 supabase client；下面也 OK
-  void supabase
+  // 同样必须 await：Deno Deploy 在 handler 返回后会杀掉未完成的 promise。
+  // fb-lead-webhook 里的同款写法已经实测丢过事件（2026-08-21）。
+  await supabase
     .from('contact_events')
     .insert({
       contact_id: body.contact_id,

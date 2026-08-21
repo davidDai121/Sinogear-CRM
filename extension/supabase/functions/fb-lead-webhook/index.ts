@@ -405,8 +405,8 @@ serve(async (req) => {
         }
         contactId = created.id;
 
-        // 'created' 事件
-        void supabase.from('contact_events').insert({
+        // 'created' 事件（必须 await，理由见下方 fb_lead_received 处注释）
+        await supabase.from('contact_events').insert({
           contact_id: contactId,
           event_type: 'created',
           payload: {
@@ -421,7 +421,12 @@ serve(async (req) => {
       const formName = await fetchFormName(lead.form_id);
 
       // ── fb_lead_received 事件 ──
-      void supabase.from('contact_events').insert({
+      // ⚠️ 必须 await。Edge Function 跑在 Deno Deploy 上，handler 一旦返回
+      // Response，没 await 的 promise 会被直接杀掉——2026-08-21 实测：6 条真实
+      // 线索的 contact 建出来了、fb_lead_id 也写了，但 fb_lead_received 事件
+      // 一条都没落库。而线索分配页和 apply_lead_routing 都靠
+      // payload->>'form_name' 找线索，没事件 = 这条线索永远分不出去。
+      await supabase.from('contact_events').insert({
         contact_id: contactId,
         event_type: 'fb_lead_received',
         payload: {
@@ -444,7 +449,7 @@ serve(async (req) => {
         fbLeadId: leadId,
       });
 
-      void supabase.from('contact_events').insert({
+      await supabase.from('contact_events').insert({
         contact_id: contactId,
         event_type: 'fb_conversion_sent',
         payload: {
