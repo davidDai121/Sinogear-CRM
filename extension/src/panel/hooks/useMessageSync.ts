@@ -32,6 +32,8 @@ export interface MessageSyncIdentity {
   phone?: string | null;
   name?: string | null;
   waName?: string | null;
+  /** 群聊必传：群 contact 的 phone 恒为 NULL，只剩群名文本可比 */
+  groupJid?: string | null;
 }
 
 /** 持续同步 polling 间隔（ms） */
@@ -89,6 +91,7 @@ export function useMessageSync(
           phone: identity.phone ?? null,
           name: identity.name ?? null,
           waName: identity.waName ?? null,
+          groupJid: identity.groupJid ?? null,
         });
         if (!ok) return; // header 不匹配 → 当前可见聊天不是这个 contact，跳过
       }
@@ -131,7 +134,7 @@ export function useMessageSync(
       if (pollTimer !== null) window.clearInterval(pollTimer);
     };
     // identity 的具体值（primitive）也进 dep，防销售改名后老 closure 用旧值校验
-  }, [contactId, needsJump, identity?.phone, identity?.name, identity?.waName]);
+  }, [contactId, needsJump, identity?.phone, identity?.name, identity?.waName, identity?.groupJid]);
 
   const triggerSync = async () => {
     if (!contactId) return;
@@ -145,6 +148,7 @@ export function useMessageSync(
           phone: identity.phone ?? null,
           name: identity.name ?? null,
           waName: identity.waName ?? null,
+          groupJid: identity.groupJid ?? null,
         });
         if (!ok) {
           console.warn(

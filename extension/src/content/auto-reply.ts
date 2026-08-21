@@ -132,6 +132,7 @@ async function executeAutoReply(contactId: string): Promise<void> {
       phone: contact.phone,
       name: contact.name,
       waName: contact.wa_name,
+      groupJid: contact.group_jid,
     };
     const jumped = await jumpToChat(query, {
       allowDeepLink: true,
@@ -453,6 +454,7 @@ async function buildPrompt(
     phone: contact.phone,
     name: contact.name,
     waName: contact.wa_name,
+    groupJid: contact.group_jid,
   });
   if (messages.length > 0 && onRightChat) {
     void syncMessages(contact.id, messages);

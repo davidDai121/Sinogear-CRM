@@ -220,6 +220,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
       phone: contact.phone,
       name: contact.name,
       waName: contact.wa_name,
+      groupJid: contact.group_jid,
     };
     let messages: ChatMessage[] = [];
     if (needsJump) {

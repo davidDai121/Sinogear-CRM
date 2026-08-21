@@ -375,6 +375,21 @@ function readChatFromBridge(main: Element): {
   return { name, phone, rawJid: p.rawJid, groupJid: null };
 }
 
+/**
+ * 当前聊天的**标题文本**（只有名字，不含 "最后上线时间…" / 按钮 aria 文案）。
+ *
+ * 跟 `header.textContent` 的区别很关键：后者实测长这样
+ *   "@DonSyekei最后上线时间：今天凌晨3:32list-people添加到列表ic-arrow-drop-down…"
+ * 里面混着状态行和一堆图标名，只能拿来做 `includes` 模糊比对；标题是干净的
+ * "@DonSyekei"，可以做**全等**比对 —— 这是短名 / 纯 emoji 名唯一安全的匹配方式
+ * （见 verifyHeaderMatches 档 3）。
+ */
+export function readChatTitle(): string | null {
+  const main = findMainPane();
+  if (!main) return null;
+  return readNameFromHeader(main) || readNameFromHeader(document);
+}
+
 function readNameFromHeader(scope: ParentNode): string | null {
   const header = scope.querySelector('header');
   if (!header) return null;

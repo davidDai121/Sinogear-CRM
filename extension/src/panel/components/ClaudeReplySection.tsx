@@ -164,6 +164,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
           phone: contact.phone,
           name: contact.name,
           waName: contact.wa_name,
+          groupJid: contact.group_jid,
         };
         let dom: ChatMessage[] = [];
         if (needsJump) {
@@ -389,6 +390,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
           phone: contact.phone,
           name: contact.name,
           waName: contact.wa_name,
+          groupJid: contact.group_jid,
         };
         let dom: ChatMessage[] = [];
         if (verifyHeaderMatches(requireMatch)) {

@@ -979,6 +979,45 @@ boss 原话：「按照表单归属，给到对应的业务员上，别用国家
 
 **教训**：① **三个坑是同一个模式——用间接信号推断身份，然后只验数量不验正确性。** 手机号、ad_id、单一文案变体，每次 dry-run 我都看了「匹配多少条」，没随机抽几条人工核对。boss 让我「多点点」比跑三轮 dry-run 有用——点开一个客户看一眼当场就发现了。**批量回填前先问「这个字段是不是稳定身份」，dry-run 要抽样核对而不是只看计数。** ② **Deno Deploy 上任何 `void promise` 都可能被杀**，Edge Function 里的 DB 写入一律 await。③ 处理外部平台的自动文案时，**先统计全库有几种变体**再写正则，别照着看到的第一条写。④ 「对整表加过滤」的客户端查询要先确认那一列有索引——`contact_events` 90 万行、`event_type` 无索引，直接 `.eq()` 就是 8 秒超时（0032 的教训第二次重演）。
 
+### 近期补完（2026-08-21）— 名字太短 / 纯 emoji 的客户：读消息喂 AI + 消息同步双双静默停摆
+
+**起点**：boss 发截图，"@DonSyekei 这个客户，聊天记录传不到 gpt 里"。GPT 回复卡下面写着「✅ 基于导入的历史记录（11 条）」，而 WhatsApp 上这段对话有 20 多条、客户刚说完 `so i need to put up 25000usd`。
+
+**根因（Chrome MCP 在 boss 的 Chrome 上实测，不靠猜）**：`verifyHeaderMatches` 判定"当前聊天不是这个客户"，把 DOM 整条路径掐了。
+
+这个 contact（`+17215544721`）的 `name` 和 `wa_name` **都是 `"S"`**（一个字符，2026-07-23 GPT 抽字段时写进去的——去年 10 月问过 "May I have your name?" 没人答，AI 硬抽了个 S）。两档信号逐一落空：
+
+- `.filter(s => s.length >= 2)` 把两个候选全过滤光 → 名字档空
+- WA 通讯录里这个号存了资料名，header 文本是 `@DonSyekei最后上线时间：今天凌晨3:32…`，数字只有 `332`，不含 `17215544721` → phone 档不命中
+- 于是 fail closed，且**完全静默**
+
+后果是双向的，这才是它能潜伏一个季度的原因：`GPTReplySection.loadChatMessages` 跳过 DOM 直接吃 messages 表；`useMessageSync`（4s 自动轮询 + 手动「💾 同步当前」）同一个校验 → **新消息从来没写进过 DB**。两边一起坏 = messages 表冻结在 2025-10 的 11 条（全是 Miles 单方面冷开发，客户当时没理）。实测 04:42 那次生成，prompt 的 `[Recent Chat History]` 只有 4 行、全是 10-26~10-29 的出站消息，GPT 因此写出 `Customer reply in current history: None` → "No need to send a new WhatsApp message now"。
+
+**实测证据链**：
+
+- 页面里按 `readChatMessages` 逻辑逐条重跑 → 23 条全部拿到 id 和正文，一条没跳过（**DOM 解析本身是好的**，排除又一次 WA DOM 漂移）
+- 客户卡「📜 历史消息」显示"已存 11 条"，手点「💾 同步当前」→ 计数不变，console 打出 `[useMessageSync] triggerSync skipped: WA header 不匹配当前 contact`
+- AI 日志那条：`11 条上下文 · 来源 db`
+- boss 把 `name` 从 `"S"` 改成 `"@DonSyekei"` 后，**messages 立刻从 11 涨到 34**，`so i need to put up 25000usd` 等 inbound 全部入库 —— 端到端反证根因
+
+**全库影响面（service_role 全表扫，9,355 个 contact）**：
+
+- **113 个** name/wa_name 剥 emoji 后都 < 2 字符 → 文本档必然落空（67 个 1 字符名如 `G`/`E`/`C`/`~`，46 个纯 emoji 名如 `🛸`/`🦅`/`♥️♥️🫶🫶…`）。其中 28 个名字本身就是号码（phone 档救得了），真正靠新增档的 ~85 个
+- **3,473 个（37.1%）** `wa_name` 为空 —— 同类问题的潜在人群
+- 113 个的阶段分布 `lost` 63 / `stalled` 22 / `new` 24，活跃漏斗里只剩 4 个。**因果可能是反的**：AI 长期看不到真实聊天，本来就容易把人推成 stalled / lost
+
+**修法**（`jump-to-chat.ts` 从 2 档扩到 5 档 + 一条自愈）：
+
+- **档 3 —— 跟干净标题做全等**：新导出 `readChatTitle()`（`whatsapp-dom.ts`，包 `readNameFromHeader`），返回纯标题 `"@DonSyekei"`，不是 `header.textContent` 那坨带 `list-people添加到列表ic-arrow-drop-down` 的噪音。**全等没有子串误撞风险，所以 1 个字符也能安全比**。两种比法：剥 emoji 后全等（名字带 emoji 而标题不带）、原样全等（纯 emoji 名，剥完两边都空只能带着 emoji 比）。上面 113 个里绝大多数 `name === wa_name`（`"🛸"`/`"🛸"`、`"G"`/`"G"`），存的就是 WA 标题本身，档 3 直接全命中
+- **档 4 —— `readCurrentChat().phone` 数字全等**：完全不依赖名字文本。@DonSyekei 这种"名字跟标题也对不上"的（`S` ≠ `@DonSyekei`）只能靠它
+- **档 5 —— `readCurrentChat().groupJid` 全等**：群 contact 的 `phone` 恒为 NULL，档 1/4 全废，群名一改就没救。`RequireMatch` 加 `groupJid`，调用点全部传上（三个 ReplySection + auto-reply + useMessageSync ← MessagesHistorySection ← ContactCard / ContactDetailDrawer）
+- **`wa_name` 自愈**（`useContact.ts`）：`wa_name` 以前只有 `useContact` 的 insert 路径写过，bulk-sync / .txt 导入 / FB 线索回填 / label-sync 建的 contact 永远是 NULL 且补不上（这就是那 3,473 个的来源）。现在按 phone / groupJid 查到 contact 后，若 WA 标题跟存的 `wa_name` 不一致就写回。**安全性来自查询本身**：existingData 是用 `readCurrentChat()` 的 phone / groupJid 查出来的，身份跟名字文本无关——"这个标题属于这个 contact"已由更强信号确定，存下来只是留给下次的档 3 用。按 waName 查出来的那条分支不走自愈（它本来就是拿名字查的，没有新信息）
+- **失败不再静默**（`logVerifyFailure`，throttled 5s）：五档全落空时 console.warn 打出标题、header 数字、解析出的 phone / groupJid、四个候选名，一行就能看出是哪一档没过
+
+**验证**：`npm run typecheck` + `npm run build` 通过。档 3 逻辑拿真实 DOM 值跑过：名字 == 标题 ✓、名字 == 标题+emoji ✓、`"+"`（标题 `"+598 93 444 200"` 的前缀）**不**命中 ✓ —— 最后这条是关键，证明全等不会像 `includes` 那样误撞。端到端由 boss 改名后 messages 11 → 34 反证。
+
+**教训**：① **fail-closed 的身份校验必须打日志**——这个函数返 false 会同时掐掉「读消息喂 AI」和「写 DB」，而两边都只是安静走 fallback，销售看到的只有一句"基于导入的历史记录（N 条）"，察觉不到 AI 正拿几个月前的老消息回话。任何"拒绝执行"的分支都要留一行能直接看出是哪一档没过。② **模糊匹配（includes）和精确匹配（===）要用不同的数据源**：`header.textContent` 混着状态行和图标 aria 文案，只能 includes，所以被迫加 `length >= 2` 下限；`readNameFromHeader()` 是干净标题，可以全等，1 个字符也安全。以前只有前者，短名和纯 emoji 名就无解。③ **AI 抽取写进 `name` 的值可能是垃圾**，而 `name` 又被身份校验当信号用——AI 写的字段不要单独进身份判定链，至少要有不依赖它的兜底档。④ **一个字段"只在 insert 时写一次"就等于大部分行永远是 NULL**（`wa_name` 37.1% 为空、`vehicles.created_by` 曾 100% 为空）——凡是会被别的路径建行的表，字段都要有自愈路径
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1078,6 +1117,11 @@ WhatsApp 绿色主题：
 - **`usePersistedReplyStatus` async get race**（`panel/hooks/usePersistedReplyStatus.ts`）：useEffect 启动 async get 后，如果用户立刻点 generate 改了 state，async get 完成时**不能用 stale 直接覆盖**——必须 functional setState 判 `current.kind === initial.kind` 才用 stale 恢复。早期 bug：generate 跑完几秒后 async get 回调把 new done 覆盖回 stale done，UI 显示 stale 状态用户以为没点中
 - **删除占位识别 + DB 覆盖**（`DELETED_PLACEHOLDER_PATTERNS` + `isDeletedPlaceholderText`）：DOM 抓到"你已删除这条消息" / "This message was deleted" → text 改 `[已删除]`，`syncMessages` 用 onConflict 覆盖之前抓过的原文（用户后来在 WA 端撤回的）。**先 `stripTrailingMeta` 再判删除占位**（防"你已删除这条消息中午11:31"因尾巴匹配不上而失败）
 - **`verifyHeaderMatches` 比对 name/wa_name 时必须两侧 strip emoji**（`lib/jump-to-chat.ts`）：销售在 WA 通讯录给客户起带 emoji 爱称（`"K-lonchito 🥰🥰🥰"` / `"🌸🌸Zouhour🌸🌸"` / `"Banks💎👑🌟"`）非常常见，org 内 **~2.7% contact 中招**。但 WA Web header 文本一般不含这些 emoji 或位置不同 → **整串 `header.includes(candidate)` 永远不命中** → DOM 路径被锁死 → AI 生成抛 cold-start 错（DB 空时硬挂）或冻结 DB 历史（DB 有时隐性失效，销售察觉不到只觉得 AI 智商低）。修法 `stripEmojiAndNormalize`：`[\p{Extended_Pictographic}\p{Emoji_Modifier}️‍]` 一次 strip + normalize 空格 + lowercase，两侧都过再 includes。**不要用 `\p{Emoji}`** —— 它把 `# * 0-9` 也算 emoji-candidate，会误剥客户名里的数字。**任何新加"比对 contact 名 vs DOM 文本"的逻辑都先剥 emoji**（销售爱用 emoji 给重要客户做视觉标记，这是常态不是边缘 case）
+- **`verifyHeaderMatches` 现在是 5 档，前三档比文本、后两档比身份；短名 / 纯 emoji 名只能靠全等那档**（2026-08-21 修，`lib/jump-to-chat.ts`）：档 2 拿 `header.textContent` 做 `includes`，而 header 里混着 `最后上线时间…list-people添加到列表ic-arrow-drop-down` 这堆噪音，所以必须有 `length >= 2` 下限防子串误撞 —— 代价是 **1 个字符的名字（`"S"`/`"G"`）和纯 emoji 名（`"🛸"`）在这档必然落空**。档 3 改用 `readChatTitle()`（干净标题，不含状态行和图标 aria 文案）做**全等**，全等没有误撞问题所以 1 个字符也安全，剥 emoji 后 / 原样两种都比一遍。**新加任何名字匹配逻辑，先想清楚用的是 header 全文（只能模糊 + 长度下限）还是标题（可以全等）**
+- **群聊必须传 `groupJid` 给 `verifyHeaderMatches`**（2026-08-21，`RequireMatch.groupJid`）：群 contact 的 `phone` 恒为 NULL，档 1（header 数字）和档 4（`readCurrentChat().phone`）全部落空，只剩群名文本 —— 群名被改或是纯 emoji 就彻底没救。档 5 比 `readCurrentChat().groupJid`，是群聊唯一的强身份。**新加调用 `verifyHeaderMatches` 的地方，`contact.group_jid` 别忘了传**
+- **fail-closed 的身份校验必须打日志**（2026-08-21，`logVerifyFailure`）：`verifyHeaderMatches` 返 false 会**同时**掐掉「DOM 读消息喂 AI」和「useMessageSync 写 DB」，而两边都只是安静走 fallback —— 销售看到的只有一句"基于导入的历史记录（N 条）"，不会察觉 AI 正拿几个月前的老消息回话（@DonSyekei 就这么潜伏了一个季度，messages 表冻结在 11 条而 WA 上有 23 条）。现在五档全落空会 console.warn 打出标题 / header 数字 / 解析出的 phone+groupJid / 四个候选名。**任何"拒绝执行"的分支都要留一行能直接看出是哪一档没过**
+- **AI 抽取写进 `name` 的值可能是垃圾，而 `name` 又是身份校验的信号**（2026-08-21）：`+17215544721` 的 `name`/`wa_name` 都是 `"S"` —— 来自 2025-10 那次 "May I have your name?" 客户根本没答，2026-07-23 GPT 抽字段时硬填的。它直接导致这个客户的身份校验全年失效。**AI 写的字段不要单独进身份判定链**，至少要有不依赖它的兜底档（现在是档 4/5 的 phone / groupJid）
+- **`wa_name` 以前只在 insert 时写一次 → 37.1% 的 contact 是 NULL**（2026-08-21 修，`useContact.ts` 自愈）：只有 `useContact` 的 insert 路径写 `wa_name`，bulk-sync / .txt 导入 / FB 线索回填 / label-sync 建出来的 contact 永远为空且补不上（9,355 个里 3,473 个），身份校验因此少一个候选。现在按 phone/groupJid 查到 contact 后，WA 标题跟存的 `wa_name` 不一致就写回 —— 安全性来自"查询本身是用 `readCurrentChat()` 的 phone/groupJid 做的"，身份跟名字文本无关。**跟 `vehicles.created_by` 曾 100% 为空是同一个模式：凡是会被多条路径建行的表，字段都要有自愈路径，别指望 insert 那一次**
 - **`vehicles.created_by` 之前长期全 NULL**（2026-05-29 才补，`VehicleModal.tsx` + 回填脚本）：FK 早就建了（→ auth.users, ON DELETE SET NULL）但插入代码从没写。任何新加"按上传人/创建人排序、过滤、归属"的功能前，**先 SQL 确认该列真有数据**，别假设 FK 存在 = 有值。回填历史用 service_role 脚本时一律分页拉全集 + PATCH filter 带 `created_by=is.null`（幂等，不重复改已填行）
 - **own-first 排序复用 ScopeContext 不另发 RPC**（`UploaderBadge` / VehiclePicker / VehiclesPage）：自己的排前面 + 上传人徽标都从 `useScope()` 的 `myUserId` + `membersById` 取数据。新加"按主理人/上传人"的列表入口直接 `const { myUserId, membersById } = useScope()`，**别再单独 `useOrgMembers` 调 list_org_members RPC**（ScopeContext 已经维护这两个 map）。⚠️ `useScope()` 必须在 `<ScopeProvider>` 内（AppShell 已包住全部 6 tab）
 - **自动逻辑永远不写 won/lost**（2026-07 起，`stage-sync.ts` + `label-sync.ts`）：autoStage `lost` 映射到 `stalled`，`AUTO_MANAGED` 不含 `lost`；WA 标签"成交/签约/订单"只打「WhatsApp 成交待核实」tag 不写 won。**won 和 lost 都是销售手动确认的业务事实**，新加任何自动分类/同步逻辑不要碰这两个 stage（sticky 保护依然在：quoted/won 不被自动降级）

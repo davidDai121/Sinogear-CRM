@@ -80,6 +80,38 @@ export function useContact(
         }
 
         if (existingData) {
+          // ── wa_name 自愈 ──
+          // wa_name 以前只有下面那条 insert 路径会写。凡是别的路径建出来的
+          // contact（bulk-sync / .txt 导入 / FB 线索回填 / label-sync 自动建）
+          // wa_name 一直是 NULL，而且永远不会被补上。
+          //
+          // 后果不是"少个字段"这么轻：verifyHeaderMatches 的文本档要靠
+          // name / wa_name 去对 WA header，wa_name 空就少一个候选。碰上 name
+          // 又是 1 个字符（AI 抽取出的 "S"）或纯 emoji 时，文本档全灭 —— DOM
+          // 读消息和 useMessageSync 写 DB 会一起被静默跳过，AI 从此拿着几个月前
+          // 的老消息回话（@DonSyekei 就是这么潜伏了一个季度）。
+          //
+          // 这里补上是安全的：existingData 是按 groupJid / phone 查出来的，
+          // 而这俩来自 readCurrentChat()（WA 自己的会话模型），身份跟名字文本
+          // 无关 —— 也就是说"当前标题属于这个 contact"这件事已经由更强的信号
+          // 确定了，把标题存进 wa_name 只是把它记下来给下次用。
+          // 按 waName 查出来的那条分支不走这里：它本来就是拿名字查的，没有新信息。
+          const titleNow = (waName ?? '').trim();
+          if (
+            (groupJid || phone) &&
+            titleNow &&
+            titleNow !== (existingData.wa_name ?? '').trim()
+          ) {
+            const healed = { ...existingData, wa_name: titleNow };
+            void supabase
+              .from('contacts')
+              .update({ wa_name: titleNow })
+              .eq('id', existingData.id);
+            if (!cancelled) {
+              setState({ contact: healed, loading: false, error: null });
+            }
+            return;
+          }
           if (!cancelled) {
             setState({ contact: existingData, loading: false, error: null });
           }

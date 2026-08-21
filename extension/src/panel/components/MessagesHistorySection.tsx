@@ -9,6 +9,7 @@ interface Props {
   /** 给 useMessageSync 做 header 校验用，防 cross-contamination */
   contactPhone?: string | null;
   contactWaName?: string | null;
+  contactGroupJid?: string | null;
 }
 
 export function MessagesHistorySection({
@@ -17,11 +18,13 @@ export function MessagesHistorySection({
   needsJump,
   contactPhone,
   contactWaName,
+  contactGroupJid,
 }: Props) {
   const sync = useMessageSync(contactId, needsJump, {
     phone: contactPhone,
     name: contactName,
     waName: contactWaName,
+    groupJid: contactGroupJid,
   });
   const [showModal, setShowModal] = useState(false);
 
