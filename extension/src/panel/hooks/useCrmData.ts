@@ -101,6 +101,10 @@ export interface CrmData {
    * 这样右键置顶后 UI 不用等几秒重拉所有 contacts。
    */
   setPinned: (contactId: string, pinned: boolean) => Promise<void>;
+  /** 车型兴趣是否已加载。false 时「🚗 车型」维度为空是"还没拉"，不是"没数据" */
+  vehicleLoaded: boolean;
+  /** 按需拉车型兴趣 —— 它不在初次加载里，展开「🚗 车型」筛选区时才调 */
+  loadVehicleInterests: () => Promise<void>;
 }
 
 function buildLabelAssocMap(
@@ -335,72 +339,101 @@ async function fetchMessageDirections(
   return out;
 }
 
-/** 突破 Supabase 1000 行默认上限：分页拉。
- *  必须加 .order(...) — 否则 PostgREST 不保证 range 跨页稳定，并发写入
- *  时同一行可能在 page N 和 page N+1 都返回，导致 contacts 数组重复。 */
-async function fetchAllContacts(org: string): Promise<ContactRow[]> {
-  const PAGE = 1000;
-  const out: ContactRow[] = [];
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase
+/** 分页上限。Supabase 默认单次最多返回 1000 行。 */
+const PAGE = 1000;
+
+/**
+ * 并行分页 —— 不管多少行都只有 2 个往返。
+ *
+ * 原来三个 fetchAll* 都是 `for (from += PAGE)` 翻一页等一页。国内访新加坡单页
+ * 实测约 1 秒，contacts 9,444 行 = 10 页 ≈ 10 秒，而 setDbState 是一次性写，
+ * 整个左栏要等最慢的那个跑完才渲染。实测同样 10 页并行只要 1.4 秒。
+ *
+ * 做法：第 1 个请求带 count: 'exact'，一次拿到首页数据 + 总行数；剩下的页
+ * 按总行数算好 range 一轮并行发。
+ *
+ * 取舍：count 和后续并行请求之间如果有并发写入，尾部可能差几行。Realtime
+ * 增量订阅 + 60 分钟兜底 refetch 会补上，比多花 8 秒划算。
+ */
+async function fetchAllParallel<T>(
+  page: (
+    from: number,
+    to: number,
+    withCount: boolean,
+  ) => PromiseLike<{
+    data: unknown[] | null;
+    error: { message: string } | null;
+    count?: number | null;
+  }>,
+): Promise<T[]> {
+  const first = await page(0, PAGE - 1, true);
+  if (first.error) throw first.error;
+  const out = ((first.data ?? []) as T[]).slice();
+  const total = first.count ?? out.length;
+  if (total <= PAGE) return out;
+
+  const rest = await Promise.all(
+    Array.from({ length: Math.ceil(total / PAGE) - 1 }, (_, i) =>
+      page((i + 1) * PAGE, (i + 2) * PAGE - 1, false),
+    ),
+  );
+  for (const r of rest) {
+    if (r.error) throw r.error;
+    out.push(...((r.data ?? []) as T[]));
+  }
+  return out;
+}
+
+/** 必须加 .order(...) — 否则 PostgREST 不保证 range 跨页稳定，并发写入时
+ *  同一行可能在 page N 和 page N+1 都返回，导致 contacts 数组重复。 */
+function fetchAllContacts(org: string): Promise<ContactRow[]> {
+  // slim select：CONTACT_LIST_COLS 之外的列实际是 undefined。
+  // 当 ContactRow 用是该 hook 的约定（外部消费方都只读 list 列）。
+  return fetchAllParallel<ContactRow>((from, to, withCount) =>
+    supabase
       .from('contacts')
-      .select(CONTACT_LIST_COLS)
+      .select(CONTACT_LIST_COLS, withCount ? { count: 'exact' } : undefined)
       .eq('org_id', org)
       .order('id', { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) throw error;
-    // slim select：CONTACT_LIST_COLS 之外的列实际是 undefined。
-    // 当 ContactRow 用是该 hook 的约定（外部消费方都只读 list 列）。
-    const rows = (data ?? []) as unknown as ContactRow[];
-    out.push(...rows);
-    if (rows.length < PAGE) break;
-  }
-  return out;
+      .range(from, to),
+  );
 }
 
-async function fetchAllVehicleInterests(
+function fetchAllVehicleInterests(
   org: string,
 ): Promise<VehicleInterestRow[]> {
-  const PAGE = 1000;
-  const out: VehicleInterestRow[] = [];
-  for (let from = 0; ; from += PAGE) {
-    // slim select：列表路径只用 model / condition / target_price_usd（筛选 +
-    // FilteredChatList 展示）。contacts!inner() 空 embed 只做 join 过滤不回传
-    // org_id，7900+ 行时省 ~35% egress。详情卡走 useContact 单查全列。
-    const { data, error } = await supabase
+  // slim select：列表路径只用 model / condition / target_price_usd（筛选 +
+  // FilteredChatList 展示）。contacts!inner() 空 embed 只做 join 过滤不回传
+  // org_id。详情卡走 useContact 单查全列。
+  return fetchAllParallel<VehicleInterestRow>((from, to, withCount) =>
+    supabase
       .from('vehicle_interests')
-      .select('id, contact_id, model, condition, target_price_usd, contacts!inner()')
+      .select(
+        'id, contact_id, model, condition, target_price_usd, contacts!inner()',
+        withCount ? { count: 'exact' } : undefined,
+      )
       .eq('contacts.org_id', org)
       .order('id', { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) throw error;
-    const rows = (data ?? []) as unknown as VehicleInterestRow[];
-    out.push(...rows);
-    if (rows.length < PAGE) break;
-  }
-  return out;
+      .range(from, to),
+  );
 }
 
-async function fetchAllContactTags(org: string): Promise<ContactTagRow[]> {
-  const PAGE = 1000;
-  const out: ContactTagRow[] = [];
-  for (let from = 0; ; from += PAGE) {
-    // contact_tags PK 是 (contact_id, tag) 复合主键，没单列 id；
-    // 用复合 order 保证完全稳定
-    // slim select：created_at 列表路径不用；contacts!inner() 空 embed 只过滤不回传
-    const { data, error } = await supabase
+function fetchAllContactTags(org: string): Promise<ContactTagRow[]> {
+  // contact_tags PK 是 (contact_id, tag) 复合主键，没单列 id；
+  // 用复合 order 保证完全稳定
+  // slim select：created_at 列表路径不用；contacts!inner() 空 embed 只过滤不回传
+  return fetchAllParallel<ContactTagRow>((from, to, withCount) =>
+    supabase
       .from('contact_tags')
-      .select('contact_id, tag, contacts!inner()')
+      .select(
+        'contact_id, tag, contacts!inner()',
+        withCount ? { count: 'exact' } : undefined,
+      )
       .eq('contacts.org_id', org)
       .order('contact_id', { ascending: true })
       .order('tag', { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) throw error;
-    const rows = (data ?? []) as unknown as ContactTagRow[];
-    out.push(...rows);
-    if (rows.length < PAGE) break;
-  }
-  return out;
+      .range(from, to),
+  );
 }
 
 /**
@@ -548,6 +581,40 @@ export function useCrmData(orgId: string | null): CrmData {
   const [msgDirNonce, setMsgDirNonce] = useState(0);
   const lastDbFetchRef = useRef(0);
 
+  /**
+   * 车型兴趣（vehicle_interests）**按需加载**，不进初次加载。
+   *
+   * 为什么单独拎出来：它是所有表里最慢的一张，而只服务两个地方 ——
+   * 左栏「🚗 车型」筛选维度，和 isPriorityContact 里"有车型兴趣"这一个信号。
+   * 销售原话："我觉得没必要每次刷新都拉车型，改成手动触发吧"。
+   *
+   * 触发时机：用户展开「🚗 车型」筛选区（FilterSidebar 调 loadVehicleInterests）。
+   * 拉过一次后 vehicleLoadedRef 置位，之后的手动 refresh / 60 分钟兜底 refetch
+   * 会顺带刷新它，不用再点。
+   */
+  const vehicleLoadedRef = useRef(false);
+  const vehicleLoadingRef = useRef(false);
+  const [vehicleLoaded, setVehicleLoaded] = useState(false);
+
+  const loadVehicleInterests = useCallback(async () => {
+    if (!orgId || vehicleLoadingRef.current) return;
+    vehicleLoadingRef.current = true;
+    try {
+      const vehicles = await fetchAllVehicleInterests(orgId);
+      vehicleLoadedRef.current = true;
+      setVehicleLoaded(true);
+      setDbState((prev) => ({
+        ...prev,
+        vehicleInterestsByContactId: indexVehiclesByContact(vehicles),
+      }));
+    } catch (err) {
+      // 只 warn 不抛：列表其余部分已经渲染出去了，不该因为它回滚
+      console.warn('[useCrmData] vehicle_interests 加载失败', err);
+    } finally {
+      vehicleLoadingRef.current = false;
+    }
+  }, [orgId]);
+
   // ----- Effect 1: 初次加载 + 手动 refresh / 兜底 refetch -----
   useEffect(() => {
     if (!orgId) return;
@@ -559,10 +626,17 @@ export function useCrmData(orgId: string | null): CrmData {
     }
     void (async () => {
       try {
-        const [contacts, vehicles, tags, msgDirections, pinnedIds, adLeadIds] =
+        // ── 两批加载 ──
+        // 第 1 批：列表渲染真正必需的东西。客户/标签/置顶/广告线索/消息方向
+        // 到齐，左栏 8 个桶（含「广告线索·未联系」）和筛选结果就能用了。
+        //
+        // vehicle_interests 挪到第 2 批：它只喂「车型」这一个筛选维度和
+        // isPriorityContact 的一个判定信号，却是最慢的一张表。销售的原话是
+        // "重新加载要等好久未联系才会有数据" —— 因为原来六个查询虽然
+        // Promise.all 并行，但 setDbState 一次性写，最慢的那个卡住全部渲染。
+        const [contacts, tags, msgDirections, pinnedIds, adLeadIds] =
           await Promise.all([
             fetchAllContacts(org),
-            fetchAllVehicleInterests(org),
             fetchAllContactTags(org),
             fetchMessageDirections(org),
             fetchPinnedIds(org),
@@ -573,16 +647,24 @@ export function useCrmData(orgId: string | null): CrmData {
         const contactsById = new Map<string, ContactRow>(
           contacts.map((c) => [c.id, c]),
         );
-        setDbState({
+        setDbState((prev) => ({
           contactsById,
-          vehicleInterestsByContactId: indexVehiclesByContact(vehicles),
+          // 车型还没到 —— 保留上一轮的（手动 refresh / 兜底 refetch 时不闪空），
+          // 初次加载时它本来就是空 Map。
+          vehicleInterestsByContactId: prev.vehicleInterestsByContactId,
           tagsByContactId: indexTagsByContact(tags),
           msgDirections,
           pinnedIds,
           adLeadIds,
           loading: false,
           error: null,
-        });
+        }));
+
+        // 第 2 批（vehicle_interests）**不自动拉** —— 见 loadVehicleInterests()。
+        // 它只喂「车型」这一个筛选维度和 isPriorityContact 的一个判定信号，
+        // 而销售明确说过车型分类没人点。已经拉过一次的话，下面的 refetch
+        // 会顺带刷新（vehicleLoadedRef），没拉过就一直不拉。
+        if (vehicleLoadedRef.current) void loadVehicleInterests();
       } catch (err) {
         if (cancelled) return;
         setDbState((s) => ({
@@ -1028,5 +1110,9 @@ export function useCrmData(orgId: string | null): CrmData {
     error: dbState.error,
     refresh: () => setRefetchNonce((n) => n + 1),
     setPinned,
+    /** 车型兴趣是否已加载（没加载时「🚗 车型」维度是空的，不是真的没数据） */
+    vehicleLoaded,
+    /** 按需拉车型兴趣。展开「🚗 车型」筛选区时调 */
+    loadVehicleInterests,
   };
 }

@@ -243,7 +243,15 @@ export function useAutoExtract({ contact, save, enabled }: Args) {
         }
 
         if (vehiclesToInsert.length > 0) {
-          await supabase.from('vehicle_interests').insert(vehiclesToInsert);
+          // upsert + ignoreDuplicates：0038 加了 UNIQUE (contact_id, model)。
+          // 内存里那份 existingKeys 去重照留（省一次往返），但 DB 才是最终防线 ——
+          // label-sync 的同款去重就失效过，攒出 38,320 行重复。
+          await supabase
+            .from('vehicle_interests')
+            .upsert(vehiclesToInsert, {
+              onConflict: 'contact_id,model',
+              ignoreDuplicates: true,
+            });
           for (const v of vehiclesToInsert) {
             void logContactEvent(c.id, 'vehicle_added', {
               model: v.model,

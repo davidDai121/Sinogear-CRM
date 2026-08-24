@@ -174,6 +174,8 @@ export function ChatPage({ orgId }: Props) {
           onCollapse={() => toggleSidebar(true)}
           clearSignal={clearSignal}
           selectAllSignal={selectAllSignal}
+          vehicleLoaded={crm.vehicleLoaded}
+          onLoadVehicles={() => void crm.loadVehicleInterests()}
         />
       )}
       {sidebarCollapsed && (

@@ -288,9 +288,13 @@ export async function runBulkExtract(opts: RunOptions): Promise<void> {
           if (error) throw new Error(stringifyError(error));
         }
         if (result.vehiclesToInsert.length > 0) {
+          // upsert + ignoreDuplicates：DB 侧唯一约束（0038）兜底，防去重失效
           const { error } = await supabase
             .from('vehicle_interests')
-            .insert(result.vehiclesToInsert);
+            .upsert(result.vehiclesToInsert, {
+              onConflict: 'contact_id,model',
+              ignoreDuplicates: true,
+            });
           if (error) throw new Error(stringifyError(error));
         }
         await markExtracted(contact.id, result.applied);

@@ -65,7 +65,15 @@ export function VehicleInterestsSection({ contactId }: Props) {
     });
     setBusy(false);
     if (error) {
-      setError(error.message);
+      // 23505 = 撞上 0038 的 UNIQUE (contact_id, model)。这里**不能**像三条 AI
+      // 路径那样 ignoreDuplicates 静默吞掉 —— 那是自动流程，重复本来就该丢弃；
+      // 这是销售手填的，静默失败等于按钮没反应，得明确告诉他已经有了。
+      const code = (error as { code?: string }).code;
+      setError(
+        code === '23505'
+          ? `这个客户已经有「${cleanModel}」了，不用重复添加`
+          : error.message,
+      );
       return;
     }
     void logContactEvent(contactId, 'vehicle_added', {

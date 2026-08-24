@@ -503,9 +503,17 @@ export async function syncWhatsAppLabels(
     if (error) throw new Error(stringifyError(error));
   }
   if (vehiclesToInsert.length) {
+    // ⚠️ 这里就是攒出 38,320 行重复的那条路径：syncWhatsAppLabels 每 10 分钟
+    // 跑一次，existingVehicleSet 去重不知为何没命中，于是每跑一次就给同一个
+    // contact 再插一条同样的车型（实测某客户 1,476 条 "Toyota Corolla"，插入
+    // 间隔正好 10 分钟）。改 upsert 让 0038 的 UNIQUE (contact_id, model) 生效 ——
+    // 就算内存去重再失效，DB 也不会再涨第二条。
     const { error } = await supabase
       .from('vehicle_interests')
-      .insert(vehiclesToInsert);
+      .upsert(vehiclesToInsert, {
+        onConflict: 'contact_id,model',
+        ignoreDuplicates: true,
+      });
     if (error) throw new Error(stringifyError(error));
   }
 

@@ -114,17 +114,64 @@ export function FilteredChatList({
       // 这批人有 327 个，挨个点一遍等于反复重载几百次，不能用。
       // 改成搜索优先；搜不到就问一句，确认了才走 deep link。
       const noChatLead = c.isAdLead && !c.chat;
-      const allowDeepLink = forceDeepLink || !noChatLead;
-      const ok = await jumpToChat(query, { allowDeepLink });
-      if (!ok) {
-        if (noChatLead && !forceDeepLink) setConfirmOpen(c.phone);
-        else setError('未找到聊天，可能需要手动打开');
+
+      // ⚠️ 2026-08-23：这种线索**根本不要去搜**，直接问。
+      // 「广告线索·未联系」桶的判定就是 isUncontactedAdLead = isAdLead && !chat
+      // （filters.ts），也就是说 WA 缓存里压根没有这个会话 —— 这一搜必然搜不到，
+      // 但代价一样不少：
+      //   - 号码被打进 WA 搜索框 → WhatsApp Web 拿它全库搜一遍（9,000+ 会话）
+      //   - 列表重排触发 observeCurrentChat（监听整个 document.body 的
+      //     childList+subtree）→ 每帧一次 readCurrentChat()，这段窗口里最多 ~340 次
+      //   - readCurrentChat 缓存未命中还会触发 refreshChatNameCache() 全量读 WA IDB
+      //   - jumpToChat 搜不到要走满 80+600+20×150+10×200 = 5,680ms 才 return false
+      // boss 实测反馈"左边刷新特别特别慢"。这批有 141 个，挨个点一遍 = 141 次全库
+      // 搜索 + 13 分钟纯等待，全是白烧。
+      // 下面那个确认框的文案本来就是"这个客户还没有 WhatsApp 会话"，当即弹出即可，
+      // 真要打开就点「仍然打开」走 forceDeepLink（deep link 能创建会话，搜索不能）。
+      if (noChatLead && !forceDeepLink) {
+        setConfirmOpen(c.phone);
+        return;
       }
+
+      const ok = await jumpToChat(query, { allowDeepLink: true });
+      if (!ok) setError('未找到聊天，可能需要手动打开');
     } catch (err) {
       setError(stringifyError(err));
     } finally {
       setBusyId(null);
     }
+  };
+
+  /**
+   * 点客户行 → 延迟 600ms 再真正跳转。
+   *
+   * 2026-08-23 监控实测：10 分钟 53 次点击里 34 次是点客户行，相邻间隔中位数
+   * **4 秒**，最短 1 秒 —— 销售是在「翻找」（点开、扫一眼、下一个），不是每个
+   * 都要处理。但每点一次都会立刻付出全套代价：jumpToChat 把号码打进 WA 搜索框
+   * 全库搜（最长 5.7 秒）+ 右侧客户卡整块重载（消息历史 / 销售信号 / 车源推荐 /
+   * AI 分析对话）。为了 4 秒的一瞥付一整套加载。
+   *
+   * 600ms 的取舍：比人「看一眼判断不是他」的最快节奏（实测 1 秒）短，所以真正
+   * 停下来的那一个不会被延迟感知到；而连着划过的中间项全部被取消。
+   * 按实测节奏能砍掉约 70% 的跳转 + 客户卡加载，操作习惯完全不用改。
+   */
+  const pendingGoRef = useRef<number | null>(null);
+  const cancelPendingGo = () => {
+    if (pendingGoRef.current !== null) {
+      window.clearTimeout(pendingGoRef.current);
+      pendingGoRef.current = null;
+    }
+  };
+  useEffect(() => cancelPendingGo, []);
+
+  const goDebounced = (c: CrmContact) => {
+    cancelPendingGo();
+    // 立刻给视觉反馈（行高亮 + busy），不然 600ms 里像是没点中
+    setBusyId(c.contact?.id ?? c.jid ?? c.phone);
+    pendingGoRef.current = window.setTimeout(() => {
+      pendingGoRef.current = null;
+      void go(c);
+    }, 600);
   };
 
   const ackReminder = async (c: CrmContact, e: React.MouseEvent) => {
@@ -228,7 +275,7 @@ export function FilteredChatList({
             >
               <button
                 className="sgc-filtered-row-clickable"
-                onClick={() => go(c)}
+                onClick={() => goDebounced(c)}
                 disabled={isBusy}
               >
                 <div className="sgc-filtered-row-main">

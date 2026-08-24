@@ -180,9 +180,13 @@ export function AdLeadBanner({ contact }: Props) {
     setError(null);
     try {
       if (!contact.phone) throw new Error('这个客户没有手机号');
-      // allowDeepLink：搜不到就走 /send?phone= 让 WA 重载进 chat。
-      // 这批人本来就没有会话，搜索框一定搜不到，deep link 是唯一入口。
-      const ok = await jumpToChat(contact.phone, { allowDeepLink: true });
+      // skipSearch：这批人本来就没有会话，搜索框一定搜不到，deep link 是唯一
+      // 入口（只有它能给没有会话的号码创建会话）。以前不跳过搜索，白白先烧
+      // 5.7 秒 + 让 WA Web 全库搜一遍才走到这里。
+      const ok = await jumpToChat(contact.phone, {
+        allowDeepLink: true,
+        skipSearch: true,
+      });
       if (!ok) throw new Error('打不开聊天，可能是号码没注册 WhatsApp');
       setBusy('填入草稿…');
       const filled = fillWhatsAppCompose(draftFirstMessage(contact, info));

@@ -37,6 +37,10 @@ interface Props {
    * 给 ChatPage 用——当 WA 切到一个不在当前 bucket 里的客户时让他可见。
    */
   selectAllSignal?: number;
+  /** 车型兴趣是否已加载。false 时「🚗 车型」区展示"点击加载"而不是"暂无数据" */
+  vehicleLoaded?: boolean;
+  /** 展开「🚗 车型」区时按需拉车型兴趣（见 useCrmData.loadVehicleInterests） */
+  onLoadVehicles?: () => void;
 }
 
 const QUALITIES: { id: CustomerQuality; label: string; icon: string }[] = [
@@ -68,6 +72,8 @@ export function FilterSidebar({
   onCollapse,
   clearSignal,
   selectAllSignal,
+  vehicleLoaded,
+  onLoadVehicles,
 }: Props) {
   const [filter, setFilter] = useState<FilterState>(emptyFilter);
   const [filterLoaded, setFilterLoaded] = useState(false);
@@ -358,9 +364,17 @@ export function FilterSidebar({
         icon="🚗"
         count={filter.vehicleModels.size}
         open={openSections.has('vehicle')}
-        onToggle={() => toggleSection('vehicle')}
+        onToggle={() => {
+          // 展开时才拉 vehicle_interests —— 它不在初次加载里（见
+          // useCrmData.loadVehicleInterests）。收起不用管，拉过就缓存着。
+          if (!openSections.has('vehicle')) onLoadVehicles?.();
+          toggleSection('vehicle');
+        }}
       >
-        {availableModels.length === 0 && (
+        {!vehicleLoaded && availableModels.length === 0 && (
+          <div className="sgc-filter-empty">车型数据加载中…</div>
+        )}
+        {vehicleLoaded && availableModels.length === 0 && (
           <div className="sgc-filter-empty">暂无车型数据</div>
         )}
         {availableModels.map(({ brand, models }) => {

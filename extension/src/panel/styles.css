@@ -2086,12 +2086,20 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
   padding: 0 14px 8px;
 }
 
+/* 「✓ 已处理」「🔇 不提醒」的点击热区。
+   2026-08-23 监控实测：这两个按钮所在的容器被点了 6 次，**一次都没命中按钮
+   本体** —— 原来是 padding 3px 8px + font-size 11px，实高约 17px，而容器左右
+   还各有 14px 内边距，点击全落在死区里。
+   改法：flex: 1 让两个按钮平分整行宽度，纵向 padding 加到 6px（实高 ~28px），
+   死区只剩容器两侧的 14px。 */
 .sgc-row-action {
+  flex: 1;
   background: transparent;
   border: 1px solid #d1d7db;
   border-radius: 4px;
-  padding: 3px 8px;
-  font-size: 11px;
+  padding: 6px 8px;
+  min-height: 28px;
+  font-size: 12px;
   cursor: pointer;
   color: #667781;
   font-family: inherit;
@@ -4390,4 +4398,44 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
 .sgc-assign-item select {
   font-size: 11px;
   padding: 2px 4px;
+}
+
+/* ── 顶栏「⋯ 更多」下拉 ── */
+.sgc-topnav-more {
+  position: relative;
+}
+
+.sgc-topnav-more-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 100001;
+  min-width: 172px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid #e9edef;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sgc-topnav-more-menu button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  /* WA Web 有全局规则会把面板里的文字染色，这里显式定死 */
+  color: #111b21;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.sgc-topnav-more-menu button:hover {
+  background: #f0f2f5;
 }

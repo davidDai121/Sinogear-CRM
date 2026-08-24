@@ -1018,6 +1018,62 @@ boss 原话：「按照表单归属，给到对应的业务员上，别用国家
 
 **教训**：① **fail-closed 的身份校验必须打日志**——这个函数返 false 会同时掐掉「读消息喂 AI」和「写 DB」，而两边都只是安静走 fallback，销售看到的只有一句"基于导入的历史记录（N 条）"，察觉不到 AI 正拿几个月前的老消息回话。任何"拒绝执行"的分支都要留一行能直接看出是哪一档没过。② **模糊匹配（includes）和精确匹配（===）要用不同的数据源**：`header.textContent` 混着状态行和图标 aria 文案，只能 includes，所以被迫加 `length >= 2` 下限；`readNameFromHeader()` 是干净标题，可以全等，1 个字符也安全。以前只有前者，短名和纯 emoji 名就无解。③ **AI 抽取写进 `name` 的值可能是垃圾**，而 `name` 又被身份校验当信号用——AI 写的字段不要单独进身份判定链，至少要有不依赖它的兜底档。④ **一个字段"只在 insert 时写一次"就等于大部分行永远是 NULL**（`wa_name` 37.1% 为空、`vehicles.created_by` 曾 100% 为空）——凡是会被别的路径建行的表，字段都要有自愈路径
 
+### 近期补完（2026-08-23）— 启动 44 秒的元凶是 88% 重复的 vehicle_interests；顺带按实测行为改交互
+
+**起点**：boss 报「重新加载要等好久未联系才会有数据，有没有什么其他办法」，并提议「实在不行拆成俩端口呢？我们目前就用客户筛选，车型国家分类啥的很傻没有人点」。
+
+**根因（全部实测，不靠猜）**：
+
+| 表 | 行数 | 页数 | 方式 | 耗时 |
+|---|---|---|---|---|
+| `contacts` | 9,444 | 10 | **串行**翻页 | ~10 秒 |
+| `vehicle_interests` | **43,569** | **44** | **串行**翻页 | **~44 秒** / 6.9 MB |
+| 同样 10 页**并行** | — | — | — | **1.4 秒** |
+
+`useCrmData` Effect 1 里六个查询虽然是 `Promise.all` 并行的，但每个 `fetchAll*` 内部是 `for (from += PAGE)` 翻一页等一页；而且 `setDbState` 一次性写 —— **必须等最慢的那个（44 秒）跑完才渲染任何东西**。国内访新加坡单页实测约 1 秒。
+
+而 43,569 行里 **38,320 行（88%）是 (contact_id, model) 完全重复**。最严重的一个客户身上挂了 **1,476 条一模一样的 "Toyota Corolla"**，插入时刻间隔**正好 10 分钟** —— 对应 `useCrmData` 里每 10 分钟一次的 `syncWhatsAppLabels`，即每跑一次插一条。
+
+不是 AI 抽取干的：那个客户的 `contact_events('vehicle_added')` 是 **0 条**，而 `useAutoExtract` / `bulk-extract` 每插一条都记事件；只有 `label-sync` 不记事件，它的 `existingVehicleSet` 去重没起作用（`canonicalizeModel` 实测幂等、`fetchAllPaged` 会抛错不吞、`vehicleInterestKey` 两侧一致 —— 读路径为什么失效没有继续追）。
+
+**修法**：
+
+- **migration 0038（已跑在生产库上）**：去重 38,320 行（保留每组 condition 非空 > 价格非空 > 最早创建的那条）+ 归一化 `btrim(model)` + `UNIQUE (contact_id, model)`。三个插入点（`useAutoExtract` / `bulk-extract` / `label-sync`）改 `upsert(onConflict:'contact_id,model', ignoreDuplicates:true)`。
+  **故意不去修 label-sync 的读逻辑** —— 与其追一条读路径，不如让 DB 兜底：哪条路径将来又失效都不会再涨第二条。约束用普通列而非 `lower(model)` 表达式索引，因为 PostgREST 的 `on_conflict` 只接列名。
+  手工添加那个入口（`VehicleInterestsSection`）**不**用 ignoreDuplicates —— 那是销售自己填的，静默吞掉等于按钮没反应，改成提示「这个客户已经有「X」了」。
+- **`fetchAllParallel`**：第 1 个请求带 `count: 'exact'` 一次拿到首页 + 总行数，剩下的页按总数算好 range 一轮并行发。**不管多少行都只有 2 个往返**。三个 `fetchAll*` 全部改用它。取舍：count 和后续并行请求之间若有并发写入，尾部可能差几行 —— Realtime 增量 + 60 分钟兜底 refetch 会补上。
+- **`vehicle_interests` 改按需加载**（boss 拍板）：完全不进初次加载，只有展开左栏「🚗 车型」筛选区时才拉（`useCrmData.loadVehicleInterests`）。拉过一次后 `vehicleLoadedRef` 置位，后续手动 refresh / 兜底 refetch 会顺带刷新。没展开过就一直不拉。
+
+**结果**：初次加载 ~44 秒 → **1.5 秒**（实测；只剩 contacts + tags + 置顶 + 广告线索 + 消息方向）。
+
+**同一批修的三个交互问题**（来自下面的行为监控）：
+
+- **点客户行加 600ms 防抖**（`FilteredChatList.goDebounced`）：点下去立刻高亮给反馈，真正的 `jumpToChat` + 客户卡加载延后 600ms，期间点了别的行就取消。
+- **跳转后清空 WA 搜索框**（`jump-to-chat.clearSearchInput`）：命中和搜不到时都清。
+- **「✓ 已处理」「🔇 不提醒」热区**：`flex: 1` 平分整行 + 纵向 padding 6px（实高 17px → 28px）。
+- **顶栏 6 个工具按钮收进「⋯ 更多」**（重译 / Gem / GPT / AI 日志 / 线索分配 / 团队）。翻译开关留在外面（带状态要一眼看见）；**7 个页面 tab 也留在外面** —— 见下面教训 ③。
+- **`AdLeadBanner` 的 deep link 从来没触发过**：它传 `contact.phone`（带 `+`），而守卫是 `ONLY_DIGITS.test(query)` = `/^\d+$/`，`+250…` 一测就 false → 白等 5.7 秒再抛「打不开聊天，可能是号码没注册 WhatsApp」，而号码其实好好的。其余 18 个调用点都自己剥过 `+`，就这一处漏了 —— 改成在 `jumpToChat` 内部归一化。
+- **`jumpToChat` 加 `skipSearch`**：给「调用方已确定没有会话」的场景（广告线索）直接走 deep link。
+
+**行为监控（2026-08-23，boss 要求"监管一下我的电脑，看看我实际回几个客户的操作"）**
+
+往 boss 的 WA 标签页注入了点击埋点（只记 UI 元素 class + 按钮文字，**不记客户名和消息内容**，写 localStorage 防刷新丢失），分两段共约 18 分钟有效样本：
+
+*第一段 11 分钟，53 次点击 —— 翻找模式*
+- **34 次（64%）是点客户行，相邻间隔中位数 4 秒**，最短 1 秒。是"点开、扫一眼、不是他、下一个"，不是每个都要处理。但每点一次都付全套：`jumpToChat` 全库搜（最长 5.7 秒）+ 客户卡整块重载（消息历史 / 销售信号 / 车源推荐 / AI 分析）。→ 600ms 防抖按这个节奏定的，能砍约 70%。
+- **实时量到 WA 搜索框残留 `"243971942509"`、`#pane-side` 可见条数 = 1** —— `jumpToChat` 打进搜索框后从不清，每点一个客户 WA 自己的聊天列表就被锁死在那一个号上，10 分钟被锁 34 次。
+- `sgc-filtered-row-actions` 被点 6 次，**一次都没命中按钮本体**（原按钮实高 ~17px，容器左右各 14px 死区）。
+
+*第二段 7 分钟 —— 深耕模式*
+- 客户行只点 1 次。改成锁定一个人反复生成：`18:55:23 续聊生成 → 18:56:01 点销售指令框 → 18:56:38 再次续聊生成 → 18:57:27 填入聊天框`。**第一次生成不满意就要再赔 40-50 秒**。
+- **生成期间是纯真空**：38 秒 / 49 秒两段零操作，光等生成耗掉 87 秒，而有效操作时间才 7 分钟。
+- 「查看全部」历史消息 modal 开了 9 秒就关 —— 是扫一眼不是读。
+- 「🌐 翻译」被点、待办桶切换 1 次 —— **推翻了第一段"顶栏全没人点"的结论**。
+
+*未做（boss 说先发版）*：生成改后台不阻塞 + 销售指令框前置。boss 补充的约束：「同时处理多个客户很容易忘了哪个没回哪个回了」—— 所以生成一旦放到后台，必须同时给出"哪个客户已生成/已填入/已发出"的可见状态，否则并发会更乱。
+
+**教训**：① **"对整表分页拉"默认要并行**：`count: 'exact'` 拿总数 + 一轮并行 = 2 个往返，跟行数无关。串行翻页在跨境链路上是按页数线性挨打（实测 10 页 10 秒 vs 并行 1.4 秒）。② **一次性 `setDbState` 会让最慢的查询卡住整个渲染** —— 分批 set，先渲染能渲染的。③ **短样本的"没人用"不能当结论**：第一段 10 分钟里顶栏 12 个按钮零点击，第二段就出现了翻译开关和待办桶切换。按第一段的结论把页面 tab 全收进下拉就错了 —— 只收了确实低频的工具按钮。④ **去重靠内存里的 existing 集合不可靠，DB 唯一约束才是防线**：`useAutoExtract` / `bulk-extract` / `label-sync` 三处写的是同一套去重逻辑，其中一处失效就攒出 38,320 行，而且完全静默（没人会去数 vehicle_interests 有多少行）。⑤ **埋点要能归因**：这次 49 次点击里 31 次落到「?」（元素没有 `sgc-` class 或在扫描的 6 层之外），按钮级归因是不完整的 —— 要精确得给 CRM 按钮统一加 `data-sgc-action`。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1156,6 +1212,13 @@ WhatsApp 绿色主题：
 - **`CONTACT_LIST_COLS` 加一列的代价是 172 KB/次**（2026-08-21 实测）：×12 次/天 ×3 人 = 182 MB/月，占免费额度 3.5%。需要「哪些客户属于某一类」时**单独查 id 列表**（23 KB/次）比加列便宜 7 倍。更大的问题：这个全量查询 9,411 行里**只有约 930 行（10%）真正进了列表**，其余只用来做一个布尔判断——改成「先拉 id+phone 再按需取完整行」可省 62%，未做
 - **`/send?phone=` deep link 会让 WA Web 整页重载（约 14 秒）**，号码没注册还会弹错误框。列表里点「没有会话」的客户不能无条件 deep link——327 个广告线索挨个点等于重载几百次。现在改成搜索优先、搜不到先问一句（`FilteredChatList`）
 - **Egress 预算意识：数据涨、周期性拉取、分析脚本三个都会烧免费额度**（2026-07-16 修，21 天烧掉 4.11GB/5GB）：① useCrmData 头部 egress 模型是数据量快照，contacts 明显增长后要重算；② 新加"周期性 / 用户行为触发"的 DB 拉取（interval、visibilitychange、focus 等）先算"次数 × 单次体积 × 3 销售 × 25 天"，visibility 类节流对齐 60min；③ 全量拉大表的查询一律 slim select + `contacts!inner()` 空 embed（只 join 过滤不回传字段）；④ 一次性分析脚本别每轮迭代重拉 messages 全表（~21MB/次），dump 一次存本地文件复用
+- **`vehicle_interests` 有 `UNIQUE (contact_id, model)`（0038 起）**：任何新增的插入路径一律用 `upsert(onConflict:'contact_id,model', ignoreDuplicates:true)`，别用 `insert`。背景：三个写入点（useAutoExtract / bulk-extract / label-sync）各写了一套「先查 existing 再去重」的内存逻辑，其中 label-sync 那套失效后攒出 **38,320 行重复**（88%），单个客户 1,476 条同样的 Toyota Corolla，每 10 分钟涨一条，**完全静默**（没人会去数这张表有多少行）。**内存去重不是防线，DB 约束才是。** 例外：手工添加入口要把 23505 翻译成人话，不能 ignoreDuplicates 静默吞掉（销售填了没反应比报错更糟）
+- **「对整表分页拉」一律用 `fetchAllParallel`**（`useCrmData`）：第 1 个请求带 `count: 'exact'` 拿首页 + 总行数，剩下的页一轮并行发，**不管多少行都只有 2 个往返**。串行 `for (from += PAGE)` 在国内→新加坡链路上按页数线性挨打（实测单页 ~1 秒，10 页串行 10 秒 vs 并行 1.4 秒；44 页就是 44 秒）。新加任何全表拉取都走它
+- **一次性 `setDbState` 会让最慢的查询卡住整个渲染**：Effect 1 里六个查询 `Promise.all` 是并行的，但只要 set 一次，最慢那个（曾是 44 秒的 vehicle_interests）就卡住左栏所有内容。**分批 set，先渲染能渲染的**。`vehicle_interests` 现在更进一步 —— 完全按需（展开「🚗 车型」筛选区才拉，见 `loadVehicleInterests`）
+- **`jumpToChat` 打进 WA 搜索框的号码必须清掉**（2026-08-23 修，`clearSearchInput`）：以前从不清，实时量到搜索框残留 `243971942509`、`#pane-side` 可见条数 = 1 —— 每点一个客户，WhatsApp 自己的聊天列表就被锁死在那一个号上，销售得手动点 ×。命中和搜不到时都要清
+- **`jumpToChat` 的 deep-link 守卫会被 `+` 打败**（2026-08-23 修）：以前是 `ONLY_DIGITS.test(query)` 直接测原串，而 `AdLeadBanner` 传的是 `contact.phone`（带 `+`），一测就 false → deep link **从来没触发过**，「💬 发起首次联系」白等 5.7 秒再抛「号码没注册 WhatsApp」，而号码好好的。现在在 `jumpToChat` 内部归一化（剥 `+` / 空格 / 括号 / 连字符）
+- **已知没会话就传 `skipSearch`**：广告线索（`isAdLead && !chat`）搜必然失败，代价却是 WA 全库搜一遍 + `observeCurrentChat`（监听整个 `document.body`）每帧一次 `readCurrentChat` + 缓存未命中还全量读一次 WA IDB + 走满 5,680ms。只有 deep link 能给没会话的号码创建会话
+- **短样本的「没人用」不能当结论**（2026-08-23 行为监控踩到）：第一段 10 分钟顶栏 12 个按钮零点击，差点据此把 7 个页面 tab 全收进下拉；第二段 7 分钟就出现了翻译开关和待办桶切换。**收纳 UI 只收确实低频的工具按钮，导航别动**。同理埋点要能归因才有价值 —— 这次 49 次点击有 31 次落到「?」（元素没有 `sgc-` class），要精确得给按钮统一加 `data-sgc-action`
 
 ## 用户偏好
 

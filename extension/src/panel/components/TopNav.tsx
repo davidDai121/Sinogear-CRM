@@ -82,6 +82,7 @@ export function TopNav({
   const [showTeam, setShowTeam] = useState(false);
   const [showRouting, setShowRouting] = useState(false);
   const [allCount, setAllCount] = useState<number | undefined>();
+  const [showMore, setShowMore] = useState(false);
 
   // 拉一次 org 总客户数（30s 一次跟着 ScopeContext 节奏）
   useEffect(() => {
@@ -99,8 +100,23 @@ export function TopNav({
     };
   }, [orgId, scope.handlersByContact]);
 
+  // 点别处 / Esc 收起「更多」
+  useEffect(() => {
+    if (!showMore) return;
+    const close = () => setShowMore(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowMore(false);
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [showMore]);
+
   return (
-    <div className="sgc-topnav">
+    <div className="sgc-topnav" onClick={(e) => e.stopPropagation()}>
       <div className="sgc-topnav-brand">
         <span className="sgc-topnav-logo">SG</span>
         <span className="sgc-topnav-title">
@@ -135,59 +151,86 @@ export function TopNav({
         >
           🌐 {translate.on ? '翻译·开' : '翻译'}
         </button>
-        <button
-          type="button"
-          className="sgc-topnav-toggle"
-          onClick={() => {
-            const n = manualRetranslate();
-            if (n === 0) {
-              alert('当前没有打开聊天 / 没有可翻译消息');
-            }
-          }}
-          title="手动重译当前聊天的所有可见消息（不论开关状态）"
-        >
-          🔁 重译
-        </button>
-        <button
-          type="button"
-          className="sgc-topnav-toggle"
-          onClick={() => setShowGemTemplates(true)}
-          title="管理 Gemini Gem 模板（用于 AI 回复建议）"
-        >
-          🤖 Gem
-        </button>
-        <button
-          type="button"
-          className="sgc-topnav-toggle"
-          onClick={() => setShowGptTemplates(true)}
-          title="管理 Custom GPT 模板（chatgpt.com/gpts 自建的 URL）"
-        >
-          🧠 GPT
-        </button>
-        <button
-          type="button"
-          className="sgc-topnav-toggle"
-          onClick={() => setShowAiLog(true)}
-          title="查看每次 AI 调用的完整 prompt + 响应（Claude / Gem / 自动回复）。可一键复制为 markdown 给 Claude review 质量。"
-        >
-          📊 AI 日志
-        </button>
-        <button
-          type="button"
-          className="sgc-topnav-toggle"
-          onClick={() => setShowRouting(true)}
-          title="广告线索按表单分给业务员 —— 新建广告表单之后来这里设归属"
-        >
-          📣 线索分配
-        </button>
-        <button
-          type="button"
-          className="sgc-topnav-toggle"
-          onClick={() => setShowTeam(true)}
-          title="管理团队成员（邀请同事 / 改角色 / 移除）"
-        >
-          👥 团队
-        </button>
+        {/* 「⋯ 更多」——收纳低频工具。
+            2026-08-23 监控实测：10 分钟 53 次点击里，顶栏这 6 个工具按钮
+            （重译 / Gem / GPT / AI 日志 / 线索分配 / 团队）**一次都没被点过**，
+            却横着占掉顶栏一大半宽度。翻译开关留在外面是因为它带状态
+            （"翻译·开" 要一眼看见），其余收进下拉。 */}
+        <div className="sgc-topnav-more">
+          <button
+            type="button"
+            className={`sgc-topnav-toggle ${showMore ? 'active' : ''}`}
+            onClick={() => setShowMore((v) => !v)}
+            title="重译 / Gem / GPT / AI 日志 / 线索分配 / 团队"
+          >
+            ⋯ 更多
+          </button>
+          {showMore && (
+            <div className="sgc-topnav-more-menu">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMore(false);
+                  const n = manualRetranslate();
+                  if (n === 0) alert('当前没有打开聊天 / 没有可翻译消息');
+                }}
+                title="手动重译当前聊天的所有可见消息（不论开关状态）"
+              >
+                🔁 重译当前聊天
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMore(false);
+                  setShowGemTemplates(true);
+                }}
+                title="管理 Gemini Gem 模板（用于 AI 回复建议）"
+              >
+                🤖 Gem 模板
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMore(false);
+                  setShowGptTemplates(true);
+                }}
+                title="管理 Custom GPT 模板（chatgpt.com/gpts 自建的 URL）"
+              >
+                🧠 GPT 模板
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMore(false);
+                  setShowAiLog(true);
+                }}
+                title="查看每次 AI 调用的完整 prompt + 响应"
+              >
+                📊 AI 日志
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMore(false);
+                  setShowRouting(true);
+                }}
+                title="广告线索按表单分给业务员"
+              >
+                📣 线索分配
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMore(false);
+                  setShowTeam(true);
+                }}
+                title="管理团队成员（邀请同事 / 改角色 / 移除）"
+              >
+                👥 团队
+              </button>
+            </div>
+          )}
+        </div>
         <DomHealthBadge />
         {userEmail && <span className="sgc-topnav-email">{userEmail}</span>}
         <button className="sgc-btn-link" onClick={onSignOut} type="button">

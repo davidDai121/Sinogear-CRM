@@ -49,6 +49,28 @@ function pressEnter(el: HTMLElement) {
   el.dispatchEvent(new KeyboardEvent('keyup', opts));
 }
 
+/**
+ * 跳转命中后把 WA 搜索框清空。
+ *
+ * ⚠️ 2026-08-23 监控实测发现的：jumpToChat 把号码打进 WhatsApp 自己的搜索框
+ * 之后**从来不清**。于是每点一个客户，WA 左侧聊天列表就被锁死在那一个号上 ——
+ * 当场量到搜索框残留 "243971942509"、`#pane-side` 可见条数 = 1。销售要看别的
+ * 聊天必须手动点 X，而他 10 分钟里点了 34 次客户行，等于被锁了 34 次。
+ * 这也是"左边刷新特别特别慢"里"左边看起来不对"的一部分。
+ */
+function clearSearchInput(input: HTMLInputElement | HTMLElement) {
+  try {
+    if (input instanceof HTMLInputElement) {
+      setNativeInputValue(input, '');
+    } else {
+      typeIntoEditable(input, '');
+    }
+    input.blur();
+  } catch {
+    // 清不掉不影响跳转本身，已经跳到位了
+  }
+}
+
 function getMainHeaderText(): string {
   const main = document.querySelector('div#main');
   const header = main?.querySelector('header');
@@ -270,6 +292,18 @@ export interface JumpOptions {
    * 不传时保持旧行为（用户主动点 💬 跳转用宽松判定，搜不到时 deepLink 自救）。
    */
   requireMatch?: RequireMatch;
+
+  /**
+   * 跳过 WA Web 内置搜索，直接走 deep link（需配合 allowDeepLink）。
+   *
+   * 给"调用方已经确定 WA 缓存里没有这个会话"的场景用 —— 典型是广告线索
+   * （isAdLead && !chat）。这一搜必然失败，但要付：把号码打进搜索框让 WA Web
+   * 全库搜一遍、列表重排触发 observeCurrentChat（监听整个 document.body）每帧
+   * 一次 readCurrentChat、缓存未命中还会全量读一次 WA IDB，最后走满
+   * 80+600+20×150+10×200 = 5,680ms 才 return false。
+   * 只有 deep link 能给没有会话的号码创建会话，搜索做不到，所以这一步纯属白烧。
+   */
+  skipSearch?: boolean;
 }
 
 export async function jumpToChat(
@@ -289,7 +323,7 @@ export async function jumpToChat(
   // 记下点 💬 之前的 header 文本——之后用来判断"聊天面板有没有切到新的"
   const initialHeader = getMainHeaderText();
 
-  const input = findSearchInput();
+  const input = opts.skipSearch ? null : findSearchInput();
   if (input) {
     input.focus();
 
@@ -307,22 +341,37 @@ export async function jumpToChat(
 
     for (let i = 0; i < 20; i++) {
       await sleep(150);
-      if (isMatch(initialHeader)) return true;
+      if (isMatch(initialHeader)) {
+        clearSearchInput(input);
+        return true;
+      }
     }
 
     pressEnter(input);
     for (let i = 0; i < 10; i++) {
       await sleep(200);
-      if (isMatch(initialHeader)) return true;
+      if (isMatch(initialHeader)) {
+        clearSearchInput(input);
+        return true;
+      }
     }
+    // 没搜到也要清 —— 否则列表一直被一个搜不到的号锁成空
+    clearSearchInput(input);
   }
 
   // Fallback：WA Web 内置搜索找不到，但号码可能在 WhatsApp 注册过（手机端能搜到、
   // 或我们已经导入过该客户的 .txt 聊天历史）。走 WA Web 官方的 click-to-chat 协议
   // (/send?phone=...) 让服务端解析号码 + 创建会话。会触发当前 tab 内 reload，
   // 所以仅在调用方明确允许时启用。
-  if (opts.allowDeepLink && ONLY_DIGITS.test(query)) {
-    window.location.href = `${location.origin}/send?phone=${query}`;
+  // ⚠️ 守卫要先归一化再判：以前是 `ONLY_DIGITS.test(query)` 直接测原串，
+  // 而 AdLeadBanner 传的是 `contact.phone`（**带 `+`**，如 "+250795767663"），
+  // 一测就 false → deep link 从来没触发过 → 「💬 发起首次联系」白等 5.7 秒
+  // 再抛"打不开聊天，可能是号码没注册 WhatsApp"，而号码其实好好的。
+  // 其余调用方都自己 `.replace(/^\+/, '')` 过，就这一处漏了 —— 与其要求每个
+  // 调用方记得剥，不如在这里归一化。
+  const dialDigits = query.replace(/[\s\-().+]/g, '');
+  if (opts.allowDeepLink && ONLY_DIGITS.test(dialDigits) && dialDigits.length >= 7) {
+    window.location.href = `${location.origin}/send?phone=${dialDigits}`;
     // navigate 已经发起，页面即将 reload — 这里 await 一段时间让浏览器走完，
     // 永远不会真的 resolve（reload 中断了 JS 执行）。返回 true 表达"已触发跳转"。
     await sleep(5000);
