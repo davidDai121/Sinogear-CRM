@@ -58,6 +58,33 @@ function normalizePhone(raw: string): string {
   return raw.replace(/\D+/g, '');
 }
 
+/**
+ * 国家全名 → ISO 3166-1 alpha-2（小写）。
+ * contacts.country 存的是 backfill-fb-leads.mjs 那套全名（按手机区号推出来的），
+ * 而 Meta 的 user_data.country 只认两位码。查不到就不发这个字段 —— 宁可少一个
+ * 匹配信号，也不要发一个 Meta 解不开的值。
+ */
+const COUNTRY_ISO2: Record<string, string> = {
+  Rwanda: 'rw', Poland: 'pl', Azerbaijan: 'az', China: 'cn', Nigeria: 'ng',
+  Ghana: 'gh', Cameroon: 'cm', Kenya: 'ke', Tanzania: 'tz', Uganda: 'ug',
+  Zambia: 'zm', Zimbabwe: 'zw', Senegal: 'sn', "Côte d'Ivoire": 'ci',
+  'Burkina Faso': 'bf', Togo: 'tg', Benin: 'bj', Guinea: 'gn', Mali: 'ml',
+  Niger: 'ne', Chad: 'td', 'DR Congo': 'cd', Angola: 'ao', Mozambique: 'mz',
+  Madagascar: 'mg', Lesotho: 'ls', Botswana: 'bw', Eswatini: 'sz', Egypt: 'eg',
+  Morocco: 'ma', Algeria: 'dz', Tunisia: 'tn', Libya: 'ly', 'Saudi Arabia': 'sa',
+  UAE: 'ae', 'United States': 'us', 'United Kingdom': 'gb', France: 'fr',
+  Germany: 'de', Italy: 'it', Russia: 'ru', Turkey: 'tr', Pakistan: 'pk',
+  India: 'in', Indonesia: 'id', Malaysia: 'my', Philippines: 'ph', Vietnam: 'vn',
+  Thailand: 'th', Australia: 'au', 'South Africa': 'za', Turkmenistan: 'tm',
+  Uzbekistan: 'uz', Kyrgyzstan: 'kg', Tajikistan: 'tj', Georgia: 'ge',
+  Armenia: 'am', Liberia: 'lr', Ukraine: 'ua', 'South Sudan': 'ss', Sudan: 'sd',
+  Ethiopia: 'et', 'Sierra Leone': 'sl', Yemen: 'ye', Brazil: 'br', Somalia: 'so',
+  Burundi: 'bi', Malawi: 'mw', Namibia: 'na', Gabon: 'ga', Congo: 'cg',
+  'Guinea-Bissau': 'gw', Gambia: 'gm', Mauritania: 'mr', Mauritius: 'mu',
+  'São Tomé': 'st', 'Equatorial Guinea': 'gq', Seychelles: 'sc', Djibouti: 'dj',
+  Comoros: 'km', Eritrea: 'er',
+};
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -113,12 +140,40 @@ serve(async (req) => {
     );
   }
 
+  // 表单里填的 email —— contacts 表没有这一列，只能从线索事件的 field_data 里捞。
+  //
+  // 2026-08-25 实测：事件管理工具里 QualifiedLead / Purchase / AddPaymentInfo 的
+  // 匹配质量全是 0.0/10，Lead 5.2、InitiateCheckout 3.4（合格线是 8.0）。
+  // 原因就是 user_data 只有 ph + fn/ln + lead_id 三样，而广告表单其实收了 email，
+  // 一直没往外发。匹配质量 0 意味着 Meta 收到了事件但认不出是谁 —— 发了等于没发。
+  //
+  // 走 contact_events 而不是给 contacts 加列，是为了不动表结构（DDL 要 boss 那边跑）。
+  const leadEmail = await (async (): Promise<string | null> => {
+    const { data } = await supabase
+      .from('contact_events')
+      .select('payload')
+      .eq('contact_id', body.contact_id)
+      .eq('event_type', 'fb_lead_received')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const fields = (data?.[0]?.payload as Record<string, unknown> | undefined)
+      ?.field_data as Array<{ name?: string; values?: string[] }> | undefined;
+    if (!Array.isArray(fields)) return null;
+    const hit = fields.find((f) => /email/i.test(f?.name ?? ''));
+    const raw = hit?.values?.[0];
+    return typeof raw === 'string' && raw.includes('@') ? raw : null;
+  })();
+
   // 构造 user_data —— Meta 需要至少一个 identifier，没有就拒发
   const userData: Record<string, unknown> = {};
 
   if (contact.phone) {
     const normalized = normalizePhone(contact.phone);
     if (normalized) userData.ph = [await sha256Hex(normalized)];
+  }
+  if (leadEmail) {
+    // Meta 要求 email 去空格 + 小写再 hash
+    userData.em = [await sha256Hex(leadEmail.trim().toLowerCase())];
   }
   if (contact.name) {
     // Meta 要求 fn/ln 小写、去掉标点、再 hash
@@ -127,11 +182,19 @@ serve(async (req) => {
     if (parts[0]) userData.fn = [await sha256Hex(parts[0])];
     if (parts.length > 1) userData.ln = [await sha256Hex(parts[parts.length - 1])];
   }
+  if (contact.country) {
+    // Meta 要的是 ISO 3166-1 alpha-2 小写码，库里存的是国家全名，认不出就不发
+    const iso = COUNTRY_ISO2[contact.country.trim()];
+    if (iso) userData.country = [await sha256Hex(iso)];
+  }
   if (contact.fb_lead_id) {
     // Meta 要求 lead_id 是 number 不是 string
     const asInt = Number(contact.fb_lead_id);
     if (Number.isFinite(asInt)) userData.lead_id = asInt;
   }
+  // external_id：我们自己的客户 ID。同一个人多次事件用同一个值，
+  // Meta 靠它把事件串成一个人，对匹配质量有独立加分。
+  userData.external_id = [await sha256Hex(contact.id)];
 
   if (Object.keys(userData).length === 0) {
     return jsonResponse(

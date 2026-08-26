@@ -390,7 +390,12 @@ serve(async (req) => {
             phone: normalizedPhone,
             name: fullName ?? null,
             country: country ?? null,
-            customer_stage: 'qualifying', // FB lead 至少是 qualified（填了表）
+            // ⚠️ 不要改回 'qualifying'。2026-08-25 实测：填表这个动作的筛选力约等于零 ——
+            // 505 条表单线索里 57% 从没进过 CRM，进来的深聊率 33%，人工判定过的
+            // 16 个里 15 个是「不合格」。默认打 qualifying 等于把「销售看过、认为
+            // 值得跟」这个字段变成常量，看板漏斗虚高，而这个字段本该是整条
+            // Meta 回传闭环要表达的东西。合格与否走 contact_events('lead_qualified')。
+            customer_stage: 'new',
             quality: 'potential',
             fb_lead_id: leadId,
             fb_ad_id: lead.ad_id ?? null,

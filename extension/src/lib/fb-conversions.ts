@@ -91,6 +91,37 @@ export function triggerFbConversion(
   const eventName = mapStageToFbEvent(toStage);
   if (!eventName) return;
 
+  // 只回传带广告标识的客户 —— 跟 lead-qualification.recordJudgment 同一条规矩。
+  //
+  // 2026-08-25 实测：像素里躺着 4,155 条历史 CAPI 事件，成功的约 3,100 条里
+  // 只有 2 条来自广告线索，其余全是老客户簿的阶段变化（Lead 1,665 /
+  // InitiateCheckout 1,265 / AddPaymentInfo 152）。老客户的手机号哈希照样能
+  // 匹配到某个 FB 用户，于是 Meta 学到的「优质客户长相」是这本簿子的样子，
+  // 不是广告人群的样子 —— 广告信号被稀释了三个数量级。
+  //
+  // 查一次 contact 换一条干净的训练数据，值。查不到就不发（fail closed）。
+  void (async () => {
+    const { data: contact, error } = await supabase
+      .from('contacts')
+      .select('fb_lead_id, ctwa_clid, fb_ad_id')
+      .eq('id', contactId)
+      .maybeSingle();
+    if (error) {
+      console.warn('[fb-conversions] 查广告标识失败，跳过回传:', error.message);
+      return;
+    }
+    if (!contact?.fb_lead_id && !contact?.ctwa_clid && !contact?.fb_ad_id) {
+      return; // 不是广告来的客户，不污染数据集
+    }
+    sendToConversionsApi(contactId, eventName, opts);
+  })();
+}
+
+function sendToConversionsApi(
+  contactId: string,
+  eventName: string,
+  opts?: { value?: number; testEventCode?: string },
+): void {
   void supabase.functions
     .invoke('conversions-api', {
       body: {

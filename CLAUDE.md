@@ -1074,6 +1074,61 @@ boss 原话：「按照表单归属，给到对应的业务员上，别用国家
 
 **教训**：① **"对整表分页拉"默认要并行**：`count: 'exact'` 拿总数 + 一轮并行 = 2 个往返，跟行数无关。串行翻页在跨境链路上是按页数线性挨打（实测 10 页 10 秒 vs 并行 1.4 秒）。② **一次性 `setDbState` 会让最慢的查询卡住整个渲染** —— 分批 set，先渲染能渲染的。③ **短样本的"没人用"不能当结论**：第一段 10 分钟里顶栏 12 个按钮零点击，第二段就出现了翻译开关和待办桶切换。按第一段的结论把页面 tab 全收进下拉就错了 —— 只收了确实低频的工具按钮。④ **去重靠内存里的 existing 集合不可靠，DB 唯一约束才是防线**：`useAutoExtract` / `bulk-extract` / `label-sync` 三处写的是同一套去重逻辑，其中一处失效就攒出 38,320 行，而且完全静默（没人会去数 vehicle_interests 有多少行）。⑤ **埋点要能归因**：这次 49 次点击里 31 次落到「?」（元素没有 `sgc-` class 或在扫描的 6 层之外），按钮级归因是不完整的 —— 要精确得给 CRM 按钮统一加 `data-sgc-action`。
 
+### 近期补完（2026-08-26）— Meta 回传的事件匹配质量是 0：邮箱一直没发；加 EngagedLead 自动事件保住学习期量
+
+**起点**：boss 问「现在客户数据能回传了，应该怎么优化广告」。查完线上数据发现回传管道是通的（8/21–8/24 成功 168 条、失败 0），但**信号是空的** —— 155 条广告事件里 91 条是每来一条线索自动发的 `Lead` 回声，真正有判别力的 `QualifiedLead` **累计只有 1 条**。boss 让打开 Events Manager 自己看，又挖出两个更要命的问题。
+
+#### 一、事件匹配质量全线不及格（Events Manager 实测）
+
+| 事件 | 匹配质量 | 数量 |
+|---|---:|---:|
+| Lead | 5.2/10（Meta 标注"建议更新"） | 132 |
+| InitiateCheckout | 3.4/10 | 60 |
+| DisqualifiedLead | 3.4/10 | 14 |
+| Purchase | **0.0/10** | 8 |
+| AddPaymentInfo | **0.0/10** | 1 |
+| **QualifiedLead** | **0.0/10** | **1** |
+
+行业标准 ≥8.0 合格、<6.0 严重。**匹配质量 0 = Meta 收到了事件但认不出是谁，发了等于没发。**
+
+根因：`conversions-api` 的 `user_data` 只有 `ph` + `fn`/`ln` + `lead_id` 三样，而**广告表单其实收了邮箱，614 个广告客户 100% 都有，一条都没往外发过**。
+
+修法（`conversions-api/index.ts`）：加 `em`（从 `contact_events('fb_lead_received')` 的 `field_data` 里读 —— **不动表结构**，`contacts` 没有 email 列，加列要跑 DDL）、`country`（新增国家全名 → ISO 3166-1 alpha-2 映射表，查不到就不发，宁可少一个信号也不发 Meta 解不开的值）、`external_id`（客户 UUID，把同一个人的多次事件串成一条线）。标识符 **3 个 → 7 个**。
+
+端到端验证：拿 Meta 自己生成的验证线索（`sales@sinogear-auto.com`）在 CRM 建临时客户走完整链路，`identifiers = ["ph","em","fn","ln","country","lead_id","external_id"]`、`events_received: 1`，临时客户和事件已删干净。⚠️ **匹配质量分数是按窗口重算的，24–48 小时才刷新**。
+
+#### 二、Meta 的硬门槛：线索覆盖率必须 ≥60%
+
+Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% to use conversion lead optimization.`
+
+覆盖率 = 有多少比例的线索收到了配对的 CRM 事件。实测曲线：8/12–8/18 是 0%（归因链断着），8/20 回填后 ~45%，8/23 峰值 ~80%，8/24 之后回落到 0%（**大概率是报表延迟 —— 事件列表显示 Lead "2 天前收到"而库里 8/24 确实成功发了 11 条；要 8/27 再看一次确认**）。
+
+**这条推翻了「`Lead` 回声没用」的判断**：它对优化确实没有判别力（每条线索都会收到），但**它正是覆盖率的来源**，是 CLO 的入场券，不能停。
+
+#### 三、`QualifiedLead` 量差 28 倍 → 加 `EngagedLead` 自动事件
+
+学习期门槛约 50 条/周，`QualifiedLead` 是 1.75 条/周。线索约 210 条/周 × 聊起来的一半 × 现在 22% 的合格比例 ≈ 理论上限 46 条/周 —— **必须每一条线索都判掉才勉强够**，靠人点补不上。
+
+- **migration `0039_engaged_lead_candidates.sql`**：`engaged_lead_candidates(max_rows)` RPC，给出「客户主动聊过 ≥3 句」的广告线索。三条硬规则写在 SQL 里不靠调用方自觉：只发带广告标识的 / 排除表单自动首句（全库 1,199 条，不是客户说的话）/ **人工判定优先** —— 销售点过合格或不合格的一律不再发自动事件（否则销售判了「同行来套价」，系统还在给 Meta 发「这人不错」）
+- **Edge Function `engaged-lead-scan`**：只认 service role（比对 JWT 里的 `role` 而不是整串相等），实际发事件复用 `conversions-api` 不重复实现哈希逻辑；一次最多 40 条（每条要等 Meta 一个来回 ~300ms）
+- **pg_cron + pg_net 每小时 7 分跑一次**（jobname `engaged-lead-scan`），存量靠它慢慢排空
+- **存量补发已完成：169 条 EngagedLead 全部 200，待发队列归零**
+
+⚠️ 它是**垫的砖不是地基** —— 聊三句不等于会买。等人工判定攒够 50/周，优化目标要换回 `QualifiedLead`，这个降级成参考信号。
+
+#### 四、顺手修的两处
+
+- **回传加广告线索门槛**（`fb-conversions.ts` `triggerFbConversion`）：像素里躺着 4,155 条历史 CAPI 事件，成功的约 3,100 条里**只有 2 条来自广告线索**，其余全是老客户簿的阶段变化（Lead 1,665 / InitiateCheckout 1,265 / AddPaymentInfo 152）。老客户的手机号哈希照样能匹配到某个 FB 用户，于是 Meta 学到的「优质客户长相」是这本簿子的样子。现在跟 `lead-qualification.recordJudgment` 同一条规矩：查一次 contact，没有广告标识就不发（查不到也不发，fail closed）
+- **`fb-lead-webhook` 建客户默认阶段 `qualifying` → `new`**：填表这个动作的筛选力约等于零（505 条线索 57% 从没进过 CRM，进来的深聊率 33%，人工判定过的 16 个里 15 个不合格）。默认打 `qualifying` 等于把「销售看过、认为值得跟」这个字段变成常量，看板漏斗虚高
+
+#### 五、分析产物
+
+`广告与CRM联合分析_2026-08-25.md`：第一份**真归因**的广告分析（8/19 那版靠手机区号硬拼）。同窗口 CRM 数出来的线索数 vs Meta 报告**误差 3% 以内**，归因链验证通过。要点：$227 买到 169 个真人对话（每个 $1.35）；广告端指标全部达标（CTR 1.19–1.96%、CPM $0.64–2.23），**钱不是浪费在买流量上**；`customer_stage` 因 webhook 默认值污染，全文漏斗一律不用该字段；**真正的瓶颈是 52% 的付费线索我方从没发过消息**，阿塞拜疆深聊率 46%（全场最高）却只触达 34%、首响 17.7 小时。
+
+⚠️ 报告里推翻了自己前一天基于 `customer_stage` 给出的「关广告 2、加广告 3」——用消息口径重算两者深聊率 33% vs 32%，没有区别，那个 8 倍差距是阶段污染造成的假象。
+
+**教训**：① **「Meta 返回 200」只代表收下了请求，不代表这条数据可用** —— 匹配质量是独立的一层，必须去 Events Manager 看分数。任何回传集成上线后都要过一遍 EMQ，别看 `events_received: 1` 就宣布完成。② **手里已有的识别字段要全发**：邮箱躺在 `field_data` 里几个月没人用，而它是把 0.0 拉起来最便宜的一步。③ **Edge Function 之间互调不能用注入的 `SUPABASE_SERVICE_ROLE_KEY`** —— edge runtime 注入的是新版 `sb_secret_` 格式不是 JWT，下游拿它建 supabase client 直接报「Expected 3 parts in JWT」；转发调用方的 `Authorization` 既能用语义也更对。④ **Management API 手跑通了 ≠ PostgREST 线上通**：管理接口超时更宽，`engaged_lead_candidates` 第一版直接对整张 messages 聚合，手跑正常、线上 57014（跟 0032 同一个坑第三次重演 —— 正则读 `text` 肥字段让覆盖索引的 index-only scan 作废）。新写聚合类 RPC 一律先用汇总表压候选集，再对小集合精确算。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1219,6 +1274,16 @@ WhatsApp 绿色主题：
 - **`jumpToChat` 的 deep-link 守卫会被 `+` 打败**（2026-08-23 修）：以前是 `ONLY_DIGITS.test(query)` 直接测原串，而 `AdLeadBanner` 传的是 `contact.phone`（带 `+`），一测就 false → deep link **从来没触发过**，「💬 发起首次联系」白等 5.7 秒再抛「号码没注册 WhatsApp」，而号码好好的。现在在 `jumpToChat` 内部归一化（剥 `+` / 空格 / 括号 / 连字符）
 - **已知没会话就传 `skipSearch`**：广告线索（`isAdLead && !chat`）搜必然失败，代价却是 WA 全库搜一遍 + `observeCurrentChat`（监听整个 `document.body`）每帧一次 `readCurrentChat` + 缓存未命中还全量读一次 WA IDB + 走满 5,680ms。只有 deep link 能给没会话的号码创建会话
 - **短样本的「没人用」不能当结论**（2026-08-23 行为监控踩到）：第一段 10 分钟顶栏 12 个按钮零点击，差点据此把 7 个页面 tab 全收进下拉；第二段 7 分钟就出现了翻译开关和待办桶切换。**收纳 UI 只收确实低频的工具按钮，导航别动**。同理埋点要能归因才有价值 —— 这次 49 次点击有 31 次落到「?」（元素没有 `sgc-` class），要精确得给按钮统一加 `data-sgc-action`
+- **Meta CAPI 事件要看「匹配质量（EMQ）」，`events_received: 1` 不代表数据可用**（2026-08-26 实测）：Purchase / AddPaymentInfo / **QualifiedLead 全是 0.0/10**（合格线 8.0，<6.0 严重），因为 `user_data` 只有 `ph`+`fn`/`ln`+`lead_id`。匹配质量 0 = Meta 认不出这是谁 = 发了等于没发。现在补到 7 个标识符（加 `em` / `country` / `external_id`）。**新加任何回传字段或新事件后，去 Events Manager 看分数，别看返回码**；分数按窗口重算，24–48 小时才刷新
+- **广告表单的邮箱在 `contact_events('fb_lead_received').payload.field_data` 里，`contacts` 表没有 email 列**：614 个广告客户 100% 都有邮箱。`conversions-api` 从那里读（不动表结构）。新加「按邮箱找客户」类需求要走这条路，或者先加列
+- **`user_data.country` 必须是 ISO 3166-1 alpha-2 小写码**，而 `contacts.country` 存的是全名（backfill 按区号推的）。`conversions-api` 里有映射表，**查不到就不发这个字段** —— 宁可少一个匹配信号，也不要发一个 Meta 解不开的值
+- **Meta 的合格线索优化有硬门槛：线索覆盖率 ≥60%**（Events Manager → CRM 诊断报告）。覆盖率 = 多少比例的线索收到了配对 CRM 事件。**所以 `fb-lead-webhook` 每条线索自动发的那条 `Lead` 回声不能停** —— 它对优化没判别力（人人都有），但它就是覆盖率的来源、是入场券。诊断报表滞后 2–3 天，最近几天掉到 0% 先别当故障
+- **Edge Function 之间互调不能用注入的 `SUPABASE_SERVICE_ROLE_KEY`**（2026-08-26 实测）：edge runtime 注入的是新版 `sb_secret_` 格式**不是 JWT**，下游函数拿它建 supabase client 会报「Expected 3 parts in JWT」并返回 404。转发调用方的 `Authorization` header（`callerAuth`）既能用、语义也更对。同理鉴权别做整串相等比对（网关会重签），解 JWT 看 `role` claim
+- **新写「对整表聚合」的 RPC 先用 `contact_sales_signals` 压候选集**（2026-08-26，0032 的坑第三次重演）：`engaged_lead_candidates` 第一版直接 group by 整张 messages，Management API 手跑正常（超时更宽），PostgREST 线上 8 秒 **57014**。根因是 `text !~* '...'` 正则必须回堆读肥字段，覆盖索引的 index-only scan 作废。改成两段：汇总表把候选压到几百个 → 只对这几百个回 messages 精确数。**Management API 跑通不算验证，必须走 PostgREST 真调一次**
+- **`triggerFbConversion` 只回传带广告标识的客户**（2026-08-26，`fb-conversions.ts`）：跟 `lead-qualification.recordJudgment` 同一条规矩。像素里 3,100 条成功历史事件只有 2 条来自广告线索，其余是老客户簿 —— 老客户手机号哈希照样匹配得到 FB 用户，把广告信号稀释了三个数量级。**新加任何回传路径都要过这道门，查不到 contact 也不发（fail closed）**
+- **`fb-lead-webhook` 建客户的阶段是 `new`，不要改回 `qualifying`**（2026-08-26）：填表的筛选力约等于零（57% 从没进过 CRM、深聊率 33%、判定过的 16 个里 15 个不合格）。默认打 `qualifying` 会把「销售看过、认为值得跟」这个字段变成常量，看板漏斗虚高，而这正是整条 Meta 回传闭环要表达的东西。合格与否走 `contact_events('lead_qualified')`
+- **`customer_stage` 不能当广告漏斗指标用**（2026-08-25 分析踩到）：webhook 默认值 + `stage-sync` 的 chat-classifier（`active` → `negotiating`）都会写它，实测 46 个 `negotiating`/`quoted` 的新广告客户里 25 个库里零消息。**做广告/线索质量分析一律用消息数口径**（入站 ≥3 = 深聊），别用 stage。基于 stage 得出的「某条广告议价率 20% vs 另一条 2.5%」被证伪，消息口径下是 33% vs 32%
+- **`EngagedLead` 是过渡信号不是终点**（`engaged-lead-scan` + pg_cron `7 * * * *`）：聊三句 ≠ 会买。等 `QualifiedLead` 攒够 50 条/周，广告组优化目标要换成它，`EngagedLead` 降级成参考。**人工判定绝不能因为有了自动事件就不做** —— 自动事件对已判定过的客户会主动让路（SQL 里的第 3 条规则）
 
 ## 用户偏好
 
