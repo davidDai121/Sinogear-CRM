@@ -41,6 +41,8 @@
  *   - 严格匹配会 miss "改了一两个字"；宽松匹配会误判 manual 为 AI —— 60% 是折中
  */
 
+import { setReplyProgress } from './reply-progress';
+
 const STORAGE_KEY = 'aiReplyFills';
 const WINDOW_MS = 5 * 60 * 1000; // 5 分钟匹配窗口
 const SNIPPET_LEN = 80; // 文本快照长度（覆盖大部分回复的关键部分，又不至于太长影响相似度判断）
@@ -78,6 +80,18 @@ export async function recordFill(opts: {
     logId: opts.logId ?? null,
   });
   await chrome.storage.local.set({ [STORAGE_KEY]: fresh });
+
+  // 顺手把回复进度推到 'filled'（草稿已在 WhatsApp 输入框里，但还没点发送）。
+  // 挂在这里而不是三个 ReplySection 各写一遍：recordFill 本来就是那三处
+  // fillReply 成功后的唯一汇合点，参数里 contactId + source 都是现成的。
+  // gem_auto（无人值守自动回复）不算 —— 它自己会发出去，不需要提醒人去发。
+  if (
+    opts.source === 'gpt' ||
+    opts.source === 'gem' ||
+    opts.source === 'claude'
+  ) {
+    void setReplyProgress(opts.contactId, 'filled', opts.source);
+  }
 }
 
 /**

@@ -88,6 +88,13 @@ export interface CrmContact {
   /** 来自 Facebook 广告表单（contacts.fb_lead_id 非空）。单独查 id 列表得来，
    *  不把 fb_lead_id 塞进 CONTACT_LIST_COLS——那样每次全量刷新多 172 KB。 */
   isAdLead: boolean;
+  /**
+   * 最后一条**出站**消息时间（unix 秒，messages 表 + WA IDB 两路合并）。
+   * 给回复进度用：`isSentAfter(progress, lastOutboundT)` 判断"生成完之后到底
+   * 发出去了没有"。不能用 chat.t —— 客户发消息也会推进它，会把"客户又来了"
+   * 误判成"我已经回了"。
+   */
+  lastOutboundT: number | null;
 }
 
 export interface CrmData {
@@ -983,6 +990,7 @@ export function useCrmData(orgId: string | null): CrmData {
           classification,
           pinned: pinnedIds.has(c.id),
           isAdLead: adLeadIds.has(c.id),
+          lastOutboundT: dir.lastOutboundT,
         };
       });
 
@@ -1005,6 +1013,8 @@ export function useCrmData(orgId: string | null): CrmData {
         region: 'other',
         pinned: false,
         isAdLead: false,
+        lastOutboundT: mergeDirection(undefined, waActivity.get(chat.id))
+          .lastOutboundT,
         classification: classifyChat(
           chat,
           { capturedAt: pendingMap[chat.id]?.capturedAt ?? null },
@@ -1044,6 +1054,9 @@ export function useCrmData(orgId: string | null): CrmData {
         region: countryToRegion(c.country),
         pinned: pinnedIds.has(c.id),
         isAdLead,
+        // 这一路没有 WA chat（导入的 / 群聊 / 广告线索），IDB 那边没活跃度，
+        // 只有 messages 表这一路
+        lastOutboundT: msgDirections.get(c.id)?.lastOutboundT ?? null,
         classification: null,
       });
     }

@@ -18,6 +18,8 @@ import {
 import { parseClaudeResponse } from '@/lib/claude-parser';
 import { fillWhatsAppCompose } from '@/content/whatsapp-compose';
 import { recordFill } from '@/lib/ai-reply-attribution';
+import { setReplyProgress, clearReplyProgress } from '@/lib/reply-progress';
+import { useReplyProgress } from '../hooks/useReplyProgress';
 import { logAiReply, markAiReplyFilled } from '@/lib/ai-reply-log';
 import { sanitizeReplyForCustomer, wasReplyDirty } from '@/lib/reply-sanitize';
 import { ReplyCard } from './ReplyCard';
@@ -314,6 +316,8 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
       return;
     }
     setStatus({ kind: 'reading' });
+    // 左栏那一行立刻显示「⏳ 生成中」——切走客户也还在，见 reply-progress
+    void setReplyProgress(contact.id, 'generating', 'gpt');
     const startedAt = Date.now();
     let promptForLog = '';
     let messageSourceForLog: MessageSource = 'dom';
@@ -411,6 +415,8 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         durationMs: Date.now() - startedAt,
       });
 
+      void setReplyProgress(contact.id, 'ready', 'gpt');
+
       setStatus({
         kind: 'done',
         mode: 'reply',
@@ -442,6 +448,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
             '需要先登录 ChatGPT。请打开 https://chatgpt.com 登录后再试（同一个 Chrome profile 即可）。',
         });
       } else {
+        void clearReplyProgress(contact.id);
         setStatus({ kind: 'error', message: msg });
       }
     }
@@ -565,6 +572,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         durationMs: Date.now() - startedAt,
       });
 
+
       setStatus({
         kind: 'done',
         mode: 'discuss',
@@ -671,7 +679,32 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
     }
   };
 
+  const replyProgress = useReplyProgress();
+
   const busy = status.kind === 'reading' || status.kind === 'sending';
+
+  /**
+
+   * 后台还在跑同一个客户的生成。
+
+   *
+
+   * usePersistedReplyStatus 只持久化 done，reading/sending 是 transient ——
+
+   * 所以切走客户再切回来，本地 status 是 idle，生成按钮又可点了，而 SW 那边
+
+   * 其实还在跑（结果会写进旧 contact 的 storage key，不会丢）。不拦的话销售
+
+   * 一并发就容易对同一个人点两次，白烧一次 40-50 秒。
+
+   * reply-progress 是跨组件、跨 mount 的，正好补这个洞。
+
+   */
+
+  const bgPhase = replyProgress[contact.id]?.phase;
+
+  const backgroundBusy = bgPhase === 'generating' && !busy;
+
 
   return (
     <section className="sgc-drawer-section">
@@ -722,7 +755,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
             <select
               value={selectedTemplateId}
               onChange={(e) => setSelectedTemplateId(e.target.value)}
-              disabled={busy}
+              disabled={busy || backgroundBusy}
             >
               {templates.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -747,7 +780,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
               type="button"
               className="sgc-btn-primary"
               onClick={() => generate()}
-              disabled={busy || !selectedTemplateId}
+              disabled={busy || backgroundBusy || !selectedTemplateId}
             >
               {busy
                 ? status.kind === 'reading'
@@ -781,7 +814,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
               placeholder="可选 · Cmd/Ctrl+Enter 直接生成
 例：用法语回 / 客气一点 / 强调 1 万定金锁车 / 直接报 35k USD / 别问太多问题"
               rows={3}
-              disabled={busy}
+              disabled={busy || backgroundBusy}
             />
           </div>
 
@@ -809,6 +842,11 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
               </button>
             </div>
           )}
+      {backgroundBusy && (
+        <div className="sgc-gem-progress">
+          ⏳ 这个客户的回复正在后台生成 —— 可以先去处理别的客户，好了左栏那一行会变成「📝 待填入」
+        </div>
+      )}
 
           {status.kind === 'sending' && (
             <div className="sgc-gem-progress">
@@ -882,14 +920,14 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
                   : '例：先帮我分析这客户 / 这单值不值得追 / 怎么破他的"再考虑考虑"'
               }
               rows={2}
-              disabled={busy}
+              disabled={busy || backgroundBusy}
             />
             <div className="sgc-gem-result-actions">
               <button
                 type="button"
                 className="sgc-btn-secondary"
                 onClick={() => sendDiscussion()}
-                disabled={busy || !discuss.trim()}
+                disabled={busy || backgroundBusy || !discuss.trim()}
               >
                 {busy ? '处理中…' : '💬 发送讨论（Cmd/Ctrl+Enter）'}
               </button>

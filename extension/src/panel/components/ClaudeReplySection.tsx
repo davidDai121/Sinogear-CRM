@@ -22,6 +22,8 @@ import {
 } from '@/lib/claude-parser';
 import { fillWhatsAppCompose } from '@/content/whatsapp-compose';
 import { recordFill } from '@/lib/ai-reply-attribution';
+import { setReplyProgress, clearReplyProgress } from '@/lib/reply-progress';
+import { useReplyProgress } from '../hooks/useReplyProgress';
 import { logContactEvent } from '@/lib/events-log';
 import type { CustomerStage } from '@/lib/database.types';
 import { logAiReply, markAiReplyFilled } from '@/lib/ai-reply-log';
@@ -140,6 +142,8 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
 
   const generate = async (chosenMode: ClaudeMode = mode) => {
     setStatus({ kind: 'reading' });
+    // 左栏那一行立刻显示「⏳ 生成中」——切走客户也还在，见 reply-progress
+    void setReplyProgress(contact.id, 'generating', 'claude');
     const startedAt = Date.now();
     let promptForLog = '';
     let messageSourceForLog: MessageSource = 'dom';
@@ -328,6 +332,8 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         durationMs: Date.now() - startedAt,
       });
 
+      void setReplyProgress(contact.id, 'ready', 'claude');
+
       setStatus({
         kind: 'done',
         mode: chosenMode,
@@ -360,6 +366,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
             '需要先登录 Claude。请打开 https://claude.ai 登录后再试（同一个 Chrome profile 即可）。',
         });
       } else {
+        void clearReplyProgress(contact.id);
         setStatus({ kind: 'error', message: msg });
       }
     }
@@ -514,6 +521,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
         durationMs: Date.now() - startedAt,
       });
 
+
       setStatus({
         kind: 'done',
         mode: 'discuss',
@@ -621,7 +629,20 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
     }
   };
 
+  const replyProgress = useReplyProgress();
   const busy = status.kind === 'reading' || status.kind === 'sending';
+  /**
+   * 后台还在跑同一个客户的生成。
+   *
+   * usePersistedReplyStatus 只持久化 done，reading/sending 是 transient ——
+   * 所以切走客户再切回来，本地 status 是 idle，生成按钮又可点了，而 SW 那边
+   * 其实还在跑（结果会写进旧 contact 的 storage key，不会丢）。不拦的话销售
+   * 一并发就容易对同一个人点两次，白烧一次 40-50 秒。
+   * reply-progress 是跨组件、跨 mount 的，正好补这个洞。
+   */
+  const bgPhase = replyProgress[contact.id]?.phase;
+  const backgroundBusy = bgPhase === 'generating' && !busy;
+
 
   return (
     <section className="sgc-drawer-section">
@@ -639,7 +660,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
           <select
             value={mode}
             onChange={(e) => setMode(e.target.value as ClaudeMode)}
-            disabled={busy}
+            disabled={busy || backgroundBusy}
             title={MODE_HINTS[mode]}
             style={{ minWidth: 130 }}
           >
@@ -665,7 +686,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
             type="button"
             className="sgc-btn-primary"
             onClick={() => generate()}
-            disabled={busy}
+            disabled={busy || backgroundBusy}
           >
             {busy
               ? status.kind === 'reading'
@@ -698,7 +719,7 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
             placeholder="想让 Claude 怎么回？(可选 · Cmd/Ctrl+Enter 直接生成)
 例：用法语回 / 客气一点 / 强调 1 万定金锁车 / 直接报 35k USD / 别问太多问题"
             rows={3}
-            disabled={busy}
+            disabled={busy || backgroundBusy}
           />
         </div>
 
@@ -727,6 +748,11 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
             </button>
           </div>
         )}
+      {backgroundBusy && (
+        <div className="sgc-gem-progress">
+          ⏳ 这个客户的回复正在后台生成 —— 可以先去处理别的客户，好了左栏那一行会变成「📝 待填入」
+        </div>
+      )}
 
         {status.kind === 'sending' && (
           <div className="sgc-gem-progress">
@@ -787,14 +813,14 @@ export function ClaudeReplySection({ orgId, contact, needsJump }: Props) {
                 : '例：先帮我分析这客户 / 这单值不值得追 / 怎么破他的"再考虑考虑" / 用这个 SKU 怎么开场'
             }
             rows={2}
-            disabled={busy}
+            disabled={busy || backgroundBusy}
           />
           <div className="sgc-gem-result-actions">
             <button
               type="button"
               className="sgc-btn-secondary"
               onClick={() => sendDiscussion()}
-              disabled={busy || !discuss.trim()}
+              disabled={busy || backgroundBusy || !discuss.trim()}
             >
               {busy ? '处理中…' : '💬 发送讨论（Cmd/Ctrl+Enter）'}
             </button>

@@ -18,6 +18,8 @@ import {
 } from '@/lib/gem-parser';
 import { fillWhatsAppCompose } from '@/content/whatsapp-compose';
 import { recordFill } from '@/lib/ai-reply-attribution';
+import { setReplyProgress, clearReplyProgress } from '@/lib/reply-progress';
+import { useReplyProgress } from '../hooks/useReplyProgress';
 import { logContactEvent } from '@/lib/events-log';
 import type { CustomerStage } from '@/lib/database.types';
 import { logAiReply, markAiReplyFilled } from '@/lib/ai-reply-log';
@@ -170,6 +172,8 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
     const isGroup = !!contact.group_jid;
 
     setStatus({ kind: 'reading' });
+    // 左栏那一行立刻显示「⏳ 生成中」——切走客户也还在，见 reply-progress
+    void setReplyProgress(contact.id, 'generating', 'gem');
     const startedAt = Date.now();
     let promptForLog = '';
     let messageSourceForLog: MessageSource = 'dom';
@@ -362,6 +366,8 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
         durationMs: Date.now() - startedAt,
       });
 
+      void setReplyProgress(contact.id, 'ready', 'gem');
+
       setStatus({
         kind: 'done',
         text: response.responseText,
@@ -393,6 +399,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
             '需要先登录 Google 账号。请打开 https://gemini.google.com 登录后再试。',
         });
       } else {
+        void clearReplyProgress(contact.id);
         setStatus({ kind: 'error', message: msg });
       }
     }
@@ -467,10 +474,23 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
     }
   };
 
+  const replyProgress = useReplyProgress();
   const busy =
     status.kind === 'reading' ||
     status.kind === 'sending' ||
     status.kind === 'waiting';
+  /**
+   * 后台还在跑同一个客户的生成。
+   *
+   * usePersistedReplyStatus 只持久化 done，reading/sending 是 transient ——
+   * 所以切走客户再切回来，本地 status 是 idle，生成按钮又可点了，而 SW 那边
+   * 其实还在跑（结果会写进旧 contact 的 storage key，不会丢）。不拦的话销售
+   * 一并发就容易对同一个人点两次，白烧一次 40-50 秒。
+   * reply-progress 是跨组件、跨 mount 的，正好补这个洞。
+   */
+  const bgPhase = replyProgress[contact.id]?.phase;
+  const backgroundBusy = bgPhase === 'generating' && !busy;
+
 
   return (
     <section className="sgc-drawer-section">
@@ -504,7 +524,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
             <select
               value={selectedTemplateId}
               onChange={(e) => setSelectedTemplateId(e.target.value)}
-              disabled={busy}
+              disabled={busy || backgroundBusy}
             >
               {templates.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -516,7 +536,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
             <select
               value={gemModel}
               onChange={(e) => changeModel(e.target.value)}
-              disabled={busy}
+              disabled={busy || backgroundBusy}
               title="Gemini 模型：Flash 快、Pro 最强但慢、Flash-Lite 最快"
             >
               {GEM_MODELS.map((m) => (
@@ -541,7 +561,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
               type="button"
               className="sgc-btn-primary"
               onClick={generate}
-              disabled={busy || !selectedTemplateId}
+              disabled={busy || backgroundBusy || !selectedTemplateId}
             >
               {busy
                 ? status.kind === 'reading'
@@ -567,7 +587,7 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
               placeholder="想让 Gem 怎么回？(可选 · Cmd/Ctrl+Enter 直接生成)
 例：用法语回 / 客气一点 / 强调 1 万定金锁车 / 直接报 35k USD / 别问太多问题"
               rows={3}
-              disabled={busy}
+              disabled={busy || backgroundBusy}
             />
           </div>
 
@@ -595,6 +615,11 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
               </button>
             </div>
           )}
+      {backgroundBusy && (
+        <div className="sgc-gem-progress">
+          ⏳ 这个客户的回复正在后台生成 —— 可以先去处理别的客户，好了左栏那一行会变成「📝 待填入」
+        </div>
+      )}
 
           {status.kind === 'sending' && (
             <div className="sgc-gem-progress">

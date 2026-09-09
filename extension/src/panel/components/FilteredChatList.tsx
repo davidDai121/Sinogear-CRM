@@ -4,6 +4,8 @@ import { jumpToChat } from '@/lib/jump-to-chat';
 import { stringifyError } from '@/lib/errors';
 import { supabase } from '@/lib/supabase';
 import { useScope } from '../contexts/ScopeContext';
+import { useReplyProgress } from '../hooks/useReplyProgress';
+import { clearReplyProgress, isSentAfter } from '@/lib/reply-progress';
 import { shortNameOf } from '../hooks/useOrgMembers';
 
 interface Props {
@@ -42,6 +44,7 @@ export function FilteredChatList({
   onSetPinned,
 }: Props) {
   const { handlersByContact, membersById, myUserId } = useScope();
+  const replyProgress = useReplyProgress();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** 广告线索没有会话时，搜不到不直接重载，先问一句（存 phone） */
@@ -312,6 +315,46 @@ export function FilteredChatList({
                     <span className="sgc-filtered-row-quality">
                       {QUALITY_ICON[q]}
                     </span>
+                    {(() => {
+                      // 回复进度徽章 —— boss 原话「同时处理多个客户很容易忘了
+                      // 哪个没回哪个回了」。三档见 lib/reply-progress.ts。
+                      const p = c.contact
+                        ? replyProgress[c.contact.id]
+                        : undefined;
+                      if (!p) return null;
+                      // 生成/填入之后真的发出去了 → 这条进度已经没意义，顺手删掉。
+                      // 判据是 lastOutboundT（messages 表 + WA IDB 合并）晚于
+                      // 进度时间戳，不是 chat.t —— 客户发消息也会推进 chat.t。
+                      if (isSentAfter(p, c.lastOutboundT)) {
+                        void clearReplyProgress(c.contact!.id);
+                        return null;
+                      }
+                      const meta = {
+                        generating: {
+                          cls: 'sgc-reply-badge-generating',
+                          text: '⏳ 生成中',
+                          tip: 'AI 正在生成回复，可以先去处理别的客户',
+                        },
+                        ready: {
+                          cls: 'sgc-reply-badge-ready',
+                          text: '📝 待填入',
+                          tip: '回复已生成，还没填进 WhatsApp 输入框',
+                        },
+                        filled: {
+                          cls: 'sgc-reply-badge-filled',
+                          text: '📝 待发送',
+                          tip: '草稿已在 WhatsApp 输入框里，还没点发送',
+                        },
+                      }[p.phase];
+                      return (
+                        <span
+                          className={`sgc-reply-badge ${meta.cls}`}
+                          title={meta.tip}
+                        >
+                          {meta.text}
+                        </span>
+                      );
+                    })()}
                     {c.chat?.unreadCount
                       ? (
                         <span className="sgc-filtered-row-unread">

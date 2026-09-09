@@ -4439,3 +4439,42 @@ body.sgc-filter-results-visible.sgc-side-panel-visible #app {
 .sgc-topnav-more-menu button:hover {
   background: #f0f2f5;
 }
+
+/* ── 回复进度徽章（左栏客户行）──
+   boss 2026-08-23：「同时处理多个客户很容易忘了哪个没回哪个回了」。
+   三档来自 lib/reply-progress.ts；「已发出」不画徽章 —— 它由 lastOutboundT
+   推导，推出来就把进度删掉了。 */
+.sgc-reply-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  /* WA Web 有全局规则会染色面板里的文字，这里显式定死 */
+  color: #111b21;
+}
+
+/* 生成中：灰蓝，"还在跑，别等它" */
+.sgc-reply-badge-generating {
+  background: #eef2f6;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+
+/* 待填入：琥珀，"生成好了，还没动" */
+.sgc-reply-badge-ready {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #b45309;
+}
+
+/* 待发送：绿色描边 + 加粗，最需要被看见的一档 —— 草稿已经在输入框里，
+   差最后一下点发送，忘了它等于这个客户白做 */
+.sgc-reply-badge-filled {
+  background: #ecfdf5;
+  border-color: #6ee7b7;
+  color: #047857;
+  font-weight: 600;
+}
