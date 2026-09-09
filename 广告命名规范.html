@@ -1,0 +1,162 @@
+<title>广告命名规范</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    --ground: #fbfaf6;
+    --surface: #ffffff;
+    --ink: #1f2a2c;
+    --ink-2: #5b6b6d;
+    --line: #dfe5e1;
+    --accent: #0b7a63;
+    --accent-soft: #e3f3ec;
+    --warn: #9a6700;
+    --warn-soft: #fff4d6;
+    --code-bg: #eef2ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #131a1c;
+      --surface: #1b2426;
+      --ink: #e6ecea;
+      --ink-2: #9fb0ad;
+      --line: #2e3b3d;
+      --accent: #45c9a2;
+      --accent-soft: #163b33;
+      --warn: #f0c464;
+      --warn-soft: #3a3010;
+      --code-bg: #232f31;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #131a1c;
+    --surface: #1b2426;
+    --ink: #e6ecea;
+    --ink-2: #9fb0ad;
+    --line: #2e3b3d;
+    --accent: #45c9a2;
+    --accent-soft: #163b33;
+    --warn: #f0c464;
+    --warn-soft: #3a3010;
+    --code-bg: #232f31;
+  }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 16px;
+    line-height: 1.7;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 20px 64px; }
+  header { padding-bottom: 20px; border-bottom: 1px solid var(--line); margin-bottom: 28px; }
+  .eyebrow { font-size: 12px; letter-spacing: .12em; color: var(--ink-2); text-transform: uppercase; }
+  h1 { font-size: 30px; line-height: 1.25; margin: 6px 0 8px; text-wrap: balance; }
+  header p { margin: 0; color: var(--ink-2); }
+  h2 { font-size: 18px; margin: 32px 0 10px; }
+  h2:first-of-type { margin-top: 0; }
+  p { margin: 0 0 12px; }
+  code {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: .9em;
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .rule {
+    background: var(--accent-soft);
+    border-left: 4px solid var(--accent);
+    padding: 16px 18px;
+    margin: 0 0 16px;
+  }
+  .rule strong { display: block; font-size: 18px; margin-bottom: 6px; }
+  .formula {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 12px 16px;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .formula span { color: var(--ink-2); font-weight: 400; }
+  .tbl { overflow-x: auto; margin: 0 0 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 500; color: var(--ink-2); font-size: 13px; }
+  ol, ul { padding-left: 22px; margin: 0 0 12px; }
+  li { margin-bottom: 6px; }
+  .note {
+    background: var(--warn-soft);
+    border-left: 4px solid var(--warn);
+    padding: 12px 16px;
+    margin: 12px 0;
+    font-size: 15px;
+  }
+  .owner { color: var(--accent); font-weight: 500; }
+  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-2); }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">Sino Gear CRM · 2026-09-09 起生效</div>
+    <h1>广告命名规范</h1>
+    <p>给投广告的人和新入职业务员看。按这个起名，线索一进 CRM 就自动落到对应业务员名下，不用再等分配。</p>
+  </header>
+
+  <h2>规则只有一条</h2>
+  <div class="rule">
+    <strong>表单名和广告名都以业务员代号开头，后面用 - 隔开。</strong>
+    系统取名字开头连续的英文字母和数字作为代号，不分大小写。中文、空格、<code>-</code>、<code>_</code> 都算分隔。
+  </div>
+  <div class="formula">代号<span>-</span>国家<span>-</span>主题或车型<span>-</span>日期或序号</div>
+
+  <h2>已经在跑的例子</h2>
+  <div class="tbl">
+    <table>
+      <tr><th>名字</th><th>系统认出的代号</th><th>归属</th></tr>
+      <tr><td><code>miles-哥伦比亚-904</code></td><td><code>miles</code></td><td class="owner">daimenglong</td></tr>
+      <tr><td><code>grant-几内亚</code></td><td><code>grant</code></td><td class="owner">wanglincheng23</td></tr>
+      <tr><td><code>Cheryl-卢旺达</code></td><td><code>cheryl</code></td><td class="owner">2064026258</td></tr>
+    </table>
+  </div>
+
+  <h2>代号要先登记</h2>
+  <p>CRM 顶栏「📣 线索分配」→ 最上面「业务员代号」→ 填代号、选人、点「登记代号」。只登记一次，之后所有以这个代号开头的表单和广告都自动归这个人。</p>
+  <div class="tbl">
+    <table>
+      <tr><th>代号</th><th>业务员</th></tr>
+      <tr><td><code>miles</code></td><td>daimenglong@gmail.com</td></tr>
+      <tr><td><code>grant</code></td><td>wanglincheng23@gmail.com</td></tr>
+      <tr><td><code>cheryl</code></td><td>2064026258@qq.com</td></tr>
+      <tr><td><code>sophia</code></td><td>3190696498@qq.com</td></tr>
+    </table>
+  </div>
+
+  <h2>新来的业务员</h2>
+  <ol>
+    <li>自己装扩展、用邮箱注册。注册后看到「创建团队」页面<strong>不要建团队</strong>，把邮箱发给经理。</li>
+    <li>经理在顶栏「👥 团队」邀请进来，角色选 member。</li>
+    <li>经理在「📣 线索分配」给他登记一个代号，英文短一点就行，比如 <code>sophia</code>。登记后不要改。</li>
+  </ol>
+  <p>三步做完，他的第一个表单上线前就能自动归属。</p>
+
+  <h2>表单名优先，广告名兜底</h2>
+  <p>一条线索归谁，按这个顺序判断：</p>
+  <ol>
+    <li>「线索分配」页里对这个<strong>表单</strong>手动指定过归属 → 以手动的为准。临时换人跟用这个。</li>
+    <li><strong>表单名</strong>开头的代号。</li>
+    <li><strong>广告名</strong>开头的代号。</li>
+  </ol>
+  <p>最省事的做法是表单名带代号，广告名只写素材，比如 <code>图片</code>、<code>视频-经销商型</code>。如果一个表单要挂给不同人的广告，就把代号写在广告名上，表单名不要带代号。</p>
+
+  <h2>老表单怎么办</h2>
+  <p><code>RW-Nammi01-…</code>、<code>AZ-B2B-QINPLUS-…</code>、<code>PL-…</code> 这些老表单归属已经在「线索分配」页配好，不用改名。Meta 也不允许改有线索的表单名。</p>
+
+  <h2>怎么确认生效</h2>
+  <p>打开「📣 线索分配」，每个表单下面会写「按表单名代号自动归 xxx」。</p>
+  <div class="note">如果写的是「名字开头是 xxx，但这个代号还没登记」，点旁边的「去登记」。顶部黄条「N 条线索没归属」为 0 就是全分完了。</div>
+
+  <footer>Sino Gear CRM 团队内部文档。规则改动以「📣 线索分配」页面显示为准。</footer>
+</main>
