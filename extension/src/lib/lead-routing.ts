@@ -10,8 +10,32 @@
  * 改成从事实反推——客户点了「Chat on WhatsApp」就被真实路由到某个业务员的号上，
  * 而每个业务员用自己的 WhatsApp 登录扩展，contact_handlers 自动登记。
  * 按表单统计主理人分布，占比最高的就是归属。实测纯度 91%–100%。
+ *
+ * 2026-09-09 起的主路径：**按命名代号归属**（migration 0040）。
+ * 表单名 / 广告名开头写业务员代号（`miles-哥伦比亚-904`、`grant-几内亚`），
+ * 代号在 lead_owner_aliases 登记过就直接归属，webhook 收到线索当场落主理人，
+ * 不用等样本。上面的样本推断保留，给老表单和没按规范命名的表单兜底。
+ *
+ * 优先级：lead_routing_rules（按表单精确指定）> 表单名代号 > 广告名代号。
+ * 这个顺序和 SQL `resolve_lead_owner` 一致，改一处要同步改另一处。
  */
 import { supabase } from './supabase';
+
+/**
+ * 从表单名 / 广告名里取业务员代号：开头连续的 ASCII 字母数字，小写。
+ * 和 SQL `lead_owner_alias_of` 同一规则。
+ *   `miles-哥伦比亚-904` → miles   `Cheryl-卢旺达` → cheryl   `视频1` → null
+ */
+export function aliasOf(name: string | null | undefined): string | null {
+  const m = /^\s*([A-Za-z0-9]+)/.exec(name ?? '');
+  return m ? m[1].toLowerCase() : null;
+}
+
+export interface OwnerAlias {
+  alias: string;
+  user_id: string;
+  note: string | null;
+}
 
 /** 样本太少推不准（谁临时点开过聊天都会被当成归属） */
 export const MIN_SAMPLE = 3;
@@ -38,6 +62,15 @@ export interface FormStat {
   formId: string;
   /** 这个表单下出现过的广告 ID（一个表单可能挂多条广告） */
   adIds: string[];
+  /** 这个表单下出现过的广告名 */
+  adNames: string[];
+  /** 按命名代号解析出的归属（表单名优先，其次广告名）；没登记的代号 → null */
+  aliasUserId: string | null;
+  aliasSource: 'form' | 'ad' | null;
+  /** 名字里有代号但没登记（提示去登记） */
+  unknownAlias: string | null;
+  /** 真正生效的归属：精确规则 > 命名代号 */
+  effectiveUserId: string | null;
   /** 这个表单进 CRM 的线索数 */
   total: number;
   /** 其中真的聊过的（有消息） */
@@ -59,11 +92,13 @@ export interface FormStat {
 
 export interface RoutingSnapshot {
   forms: FormStat[];
-  /** 没有规则的表单数 */
+  /** 已登记的代号 */
+  aliases: OwnerAlias[];
+  /** 既没有规则、名字里也没有可识别代号的表单数 */
   formsWithoutRule: number;
-  /** 有规则但还没落主理人的线索数（点一下就能分配） */
+  /** 有归属（规则或代号）但还没落主理人的线索数（点一下就能分配） */
   assignable: number;
-  /** 没有规则、因此分不出去的线索数 */
+  /** 没有归属、因此分不出去的线索数 */
   blocked: number;
 }
 
@@ -106,7 +141,7 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
   const ids = leadContacts.map((c) => c.id);
 
   // 2. 只查这批人的事件 / 主理人 / 消息数
-  const [events, handlers, signals, rules] = await Promise.all([
+  const [events, handlers, signals, rules, aliases] = await Promise.all([
     chunked(ids, 150, async (batch) => {
       const { data, error } = await supabase
         .from('contact_events')
@@ -140,6 +175,15 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
         if (r.error) throw new Error(r.error.message);
         return (r.data ?? []) as RoutingRule[];
       }),
+    supabase
+      .from('lead_owner_aliases')
+      .select('alias, user_id, note')
+      .eq('org_id', orgId)
+      .order('alias')
+      .then((r) => {
+        if (r.error) throw new Error(r.error.message);
+        return (r.data ?? []) as OwnerAlias[];
+      }),
   ]);
 
   // 一个 contact 可能有多个 handler，取最早接触的（最可能是被路由到的那个）
@@ -154,7 +198,7 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
   const str = (v: unknown) => (typeof v === 'string' ? v : '');
   const latest = new Map<
     string,
-    { form: string; formId: string; adId: string; at: string; leadAt: string; name: string; phone: string }
+    { form: string; formId: string; adId: string; adName: string; at: string; leadAt: string; name: string; phone: string }
   >();
   for (const e of events) {
     const form = str(e.payload?.form_name);
@@ -169,6 +213,7 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
       form,
       formId: str(e.payload?.form_id),
       adId: str(e.payload?.ad_id),
+      adName: str(e.payload?.ad_name),
       at: e.created_at,
       leadAt: str(e.payload?.created_time).slice(0, 10),
       name: fields.full_name ?? '',
@@ -177,6 +222,7 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
   }
 
   const ruleOf = new Map(rules.map((r) => [r.form_name, r]));
+  const aliasUser = new Map(aliases.map((a) => [a.alias, a.user_id]));
   const acc = new Map<string, FormStat>();
   for (const [contactId, info] of latest) {
     const form = info.form;
@@ -186,6 +232,11 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
         formName: form,
         formId: info.formId,
         adIds: [],
+        adNames: [],
+        aliasUserId: null,
+        aliasSource: null,
+        unknownAlias: null,
+        effectiveUserId: null,
         samples: [],
         total: 0,
         contacted: 0,
@@ -200,6 +251,7 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
     }
     st.total++;
     if (info.adId && !st.adIds.includes(info.adId)) st.adIds.push(info.adId);
+    if (info.adName && !st.adNames.includes(info.adName)) st.adNames.push(info.adName);
     const h = first.get(contactId);
     if (!h) {
       st.unassigned++;
@@ -212,6 +264,24 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
   }
 
   for (const st of acc.values()) {
+    // 命名代号：表单名优先，其次任一广告名（同一表单下广告名代号不一致时取第一个命中的）
+    const formAlias = aliasOf(st.formName);
+    if (formAlias && aliasUser.has(formAlias)) {
+      st.aliasUserId = aliasUser.get(formAlias)!;
+      st.aliasSource = 'form';
+    } else {
+      for (const ad of st.adNames) {
+        const a = aliasOf(ad);
+        if (a && aliasUser.has(a)) {
+          st.aliasUserId = aliasUser.get(a)!;
+          st.aliasSource = 'ad';
+          break;
+        }
+      }
+      if (!st.aliasUserId && formAlias) st.unknownAlias = formAlias;
+    }
+    st.effectiveUserId = st.rule?.user_id ?? st.aliasUserId;
+
     const ranked = Object.entries(st.handlers).sort((a, b) => b[1] - a[1]);
     if (ranked.length && st.contacted > 0) {
       st.suggestUserId = ranked[0][0];
@@ -223,9 +293,10 @@ export async function loadRoutingSnapshot(orgId: string): Promise<RoutingSnapsho
   const forms = [...acc.values()].sort((a, b) => b.total - a.total);
   return {
     forms,
-    formsWithoutRule: forms.filter((f) => !f.rule).length,
-    assignable: forms.filter((f) => f.rule).reduce((n, f) => n + f.unassigned, 0),
-    blocked: forms.filter((f) => !f.rule).reduce((n, f) => n + f.unassigned, 0),
+    aliases,
+    formsWithoutRule: forms.filter((f) => !f.effectiveUserId).length,
+    assignable: forms.filter((f) => f.effectiveUserId).reduce((n, f) => n + f.unassigned, 0),
+    blocked: forms.filter((f) => !f.effectiveUserId).reduce((n, f) => n + f.unassigned, 0),
   };
 }
 
@@ -251,6 +322,27 @@ export async function setRule(
 
 export async function clearRule(ruleId: string): Promise<void> {
   const { error } = await supabase.from('lead_routing_rules').delete().eq('id', ruleId);
+  if (error) throw new Error(error.message);
+}
+
+/** 登记 / 改一个代号。alias 会被规范成小写字母数字，非法直接抛错 */
+export async function setAlias(orgId: string, alias: string, userId: string): Promise<void> {
+  const norm = alias.trim().toLowerCase();
+  if (!/^[a-z0-9]+$/.test(norm)) {
+    throw new Error('代号只能是英文字母和数字，比如 miles / grant / cheryl');
+  }
+  const { error } = await supabase
+    .from('lead_owner_aliases')
+    .upsert({ org_id: orgId, alias: norm, user_id: userId }, { onConflict: 'org_id,alias' });
+  if (error) throw new Error(error.message);
+}
+
+export async function clearAlias(orgId: string, alias: string): Promise<void> {
+  const { error } = await supabase
+    .from('lead_owner_aliases')
+    .delete()
+    .eq('org_id', orgId)
+    .eq('alias', alias);
   if (error) throw new Error(error.message);
 }
 

@@ -155,6 +155,20 @@ async function reconcileFbLeadDuplicate(
     ]);
     if ((msgCount ?? 0) > 0 || (handlerCount ?? 0) > 0) return;
 
+    // 占位记录的表单名 / 广告名要带过来：删掉占位记录时它的事件会被级联删掉，
+    // 不带的话真人身上的事件就没 form_name，线索分配页和按表单统计都会把它漏掉
+    // （2026-09-09 实测 8/25 以来有 31 条这样的「无表单」事件）。
+    const { data: srcEv } = await supabase
+      .from('contact_events')
+      .select('payload')
+      .eq('contact_id', dup.id)
+      .eq('event_type', 'fb_lead_received')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const src = (srcEv?.payload ?? {}) as Record<string, unknown>;
+    const pick = (k: string) => (typeof src[k] === 'string' ? (src[k] as string) : null);
+
     // 先摘归因腾出 (org_id, fb_lead_id) 唯一约束，再搬到真人身上
     await supabase.from('contacts').update({ fb_lead_id: null, fb_ad_id: null }).eq('id', dup.id);
     if (!me.fb_lead_id) {
@@ -167,6 +181,11 @@ async function reconcileFbLeadDuplicate(
         event_type: 'fb_lead_received',
         payload: {
           fb_lead_id: dup.fb_lead_id,
+          form_id: pick('form_id'),
+          form_name: pick('form_name'),
+          ad_id: pick('ad_id') ?? dup.fb_ad_id ?? null,
+          ad_name: pick('ad_name'),
+          field_data: src.field_data ?? null,
           repaired_from_phone: dup.phone,
           repaired_at: new Date().toISOString(),
           source: 'reconcile-on-message',

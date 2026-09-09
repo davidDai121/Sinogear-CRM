@@ -11,6 +11,8 @@ import {
   loadRoutingSnapshot,
   setRule,
   clearRule,
+  setAlias,
+  clearAlias,
   applyRouting,
   MIN_SAMPLE,
   type RoutingSnapshot,
@@ -30,6 +32,8 @@ export function LeadRoutingModal({ orgId, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [newAlias, setNewAlias] = useState('');
+  const [newAliasUser, setNewAliasUser] = useState('');
 
   const nameOf = (uid: string) =>
     membersById.get(uid)?.email?.split('@')[0] ?? uid.slice(0, 8);
@@ -80,6 +84,35 @@ export function LeadRoutingModal({ orgId, onClose }: Props) {
 
   const members = [...membersById.values()];
 
+  const addAlias = async (alias: string, userId: string) => {
+    if (!alias.trim() || !userId) return;
+    setBusy('alias');
+    setError(null);
+    try {
+      await setAlias(orgId, alias, userId);
+      setNewAlias('');
+      setNewAliasUser('');
+      await refresh();
+    } catch (err) {
+      setError(stringifyError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeAlias = async (alias: string) => {
+    setBusy('alias');
+    setError(null);
+    try {
+      await clearAlias(orgId, alias);
+      await refresh();
+    } catch (err) {
+      setError(stringifyError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <>
       <div className="sgc-modal-backdrop" onClick={onClose} />
@@ -93,8 +126,10 @@ export function LeadRoutingModal({ orgId, onClose }: Props) {
         <div className="sgc-modal-body">
 
         <p style={{ fontSize: 13, color: '#54656f', margin: '0 0 12px', lineHeight: 1.6 }}>
-          一个广告表单归一个业务员。归属是按「客户点了 Chat on WhatsApp 之后被路由到谁」
-          推断的 —— Meta 不提供这个绑定，只能从已发生的对话反推。
+          一个广告表单归一个业务员。<strong>表单名或广告名开头写业务员代号</strong>
+          （如 <code>miles-哥伦比亚-904</code>、<code>grant-几内亚</code>），代号在下面登记过，
+          线索一进来就自动落到对应业务员头上，不用再等样本推断。
+          没按规范命名的老表单仍按「客户点了 Chat on WhatsApp 之后被路由到谁」反推。
         </p>
 
         {loading && <div className="sgc-empty">加载中…</div>}
@@ -107,19 +142,108 @@ export function LeadRoutingModal({ orgId, onClose }: Props) {
 
         {snap && !loading && (
           <>
+            <div
+              style={{
+                border: '1px solid #d1d7db',
+                borderRadius: 8,
+                padding: '10px 14px',
+                marginBottom: 12,
+                background: '#f7f8fa',
+              }}
+            >
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#111b21' }}>业务员代号</div>
+              <div style={{ fontSize: 12, color: '#54656f', marginTop: 2 }}>
+                只认英文字母和数字，不分大小写。新建表单 / 广告时名字以代号开头，后面用 - 隔开。
+              </div>
+              {snap.aliases.length > 0 ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                  {snap.aliases.map((a) => (
+                    <span
+                      key={a.alias}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 13,
+                        padding: '4px 8px',
+                        border: '1px solid #d1d7db',
+                        borderRadius: 6,
+                        background: '#fff',
+                      }}
+                    >
+                      <code style={{ fontWeight: 600 }}>{a.alias}</code>
+                      <span style={{ color: '#54656f' }}>→ {nameOf(a.user_id)}</span>
+                      <button
+                        type="button"
+                        aria-label={`删除代号 ${a.alias}`}
+                        title="删除代号"
+                        disabled={!!busy}
+                        onClick={() => void removeAlias(a.alias)}
+                        style={{
+                          border: 'none',
+                          background: 'none',
+                          cursor: 'pointer',
+                          color: '#8696a0',
+                          fontSize: 14,
+                          padding: 0,
+                        }}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: 13, color: '#9a6700', marginTop: 8 }}>
+                  还没登记任何代号，先在这里把每个业务员的代号登记上。
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+                <input
+                  value={newAlias}
+                  disabled={busy === 'alias'}
+                  onChange={(e) => setNewAlias(e.target.value)}
+                  placeholder="代号，如 miles"
+                  style={{ fontSize: 13, padding: '5px 8px', width: 140 }}
+                />
+                <select
+                  value={newAliasUser}
+                  disabled={busy === 'alias'}
+                  onChange={(e) => setNewAliasUser(e.target.value)}
+                  style={{ fontSize: 13, padding: '5px 8px', minWidth: 200 }}
+                >
+                  <option value="">（选业务员）</option>
+                  {members.map((m) => (
+                    <option key={m.user_id} value={m.user_id}>
+                      {m.email}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="sgc-btn-secondary"
+                  style={{ fontSize: 13, padding: '5px 12px' }}
+                  disabled={busy === 'alias' || !newAlias.trim() || !newAliasUser}
+                  onClick={() => void addAlias(newAlias, newAliasUser)}
+                >
+                  登记代号
+                </button>
+              </div>
+            </div>
+
             {(snap.assignable > 0 || snap.blocked > 0) && (
               <div
                 className={`sgc-sales-signal ${snap.blocked > 0 ? 'sgc-sales-signal-warning' : 'sgc-sales-signal-info'}`}
               >
                 <strong>
                   {snap.assignable > 0
-                    ? `${snap.assignable} 条线索有规则但还没落到人头上`
-                    : '所有有规则的线索都已分配'}
+                    ? `${snap.assignable} 条线索有归属但还没落到人头上`
+                    : '所有有归属的线索都已分配'}
                 </strong>
                 {snap.blocked > 0 && (
                   <span>
-                    另有 {snap.blocked} 条来自 {snap.formsWithoutRule} 个还没设归属的表单，
-                    设好下面的归属它们才能分出去。
+                    另有 {snap.blocked} 条来自 {snap.formsWithoutRule} 个没归属的表单
+                    （名字没带已登记的代号，也没手动指定），登记代号或指定归属后才能分出去。
                   </span>
                 )}
                 {snap.assignable > 0 && (
@@ -157,10 +281,35 @@ export function LeadRoutingModal({ orgId, onClose }: Props) {
 
                     <div style={{ fontSize: 12, color: '#54656f', marginTop: 4, fontFamily: 'monospace' }}>
                       表单 ID {f.formId || '—'}
-                      {f.adIds.length > 0 && (
-                        <> · 广告 ID {f.adIds.join('、')}</>
+                      {f.adNames.length > 0 && (
+                        <> · 广告 {f.adNames.join('、')}</>
                       )}
                     </div>
+
+                    {f.aliasUserId && (
+                      <div style={{ fontSize: 13, color: '#087966', marginTop: 6 }}>
+                        按{f.aliasSource === 'form' ? '表单名' : '广告名'}代号自动归{' '}
+                        <strong>{nameOf(f.aliasUserId)}</strong>
+                        {f.rule && f.rule.user_id !== f.aliasUserId && (
+                          <span style={{ color: '#9a6700' }}>
+                            ，但下面手动指定了 {nameOf(f.rule.user_id)}，以手动指定为准
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {!f.aliasUserId && f.unknownAlias && !f.rule && (
+                      <div style={{ fontSize: 13, color: '#9a6700', marginTop: 6 }}>
+                        名字开头是 <code>{f.unknownAlias}</code>，但这个代号还没登记 ——
+                        <button
+                          type="button"
+                          className="sgc-btn-mini"
+                          style={{ fontSize: 12, padding: '2px 8px', marginLeft: 6 }}
+                          onClick={() => setNewAlias(f.unknownAlias!)}
+                        >
+                          去登记
+                        </button>
+                      </div>
+                    )}
 
                     <div style={{ display: 'flex', gap: 14, marginTop: 8, fontSize: 14, color: '#111b21' }}>
                       <span>共 <strong>{f.total}</strong></span>
@@ -185,9 +334,11 @@ export function LeadRoutingModal({ orgId, onClose }: Props) {
                         )}
                       </div>
                     ) : (
-                      <div style={{ fontSize: 13, color: '#9a6700', marginTop: 8 }}>
-                        还没有人聊过这个表单来的客户，推断不出归属，请手动指定
-                      </div>
+                      !f.effectiveUserId && (
+                        <div style={{ fontSize: 13, color: '#9a6700', marginTop: 8 }}>
+                          还没有人聊过这个表单来的客户，推断不出归属，请登记代号或手动指定
+                        </div>
+                      )
                     )}
 
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
@@ -204,7 +355,9 @@ export function LeadRoutingModal({ orgId, onClose }: Props) {
                         }}
                         style={{ fontSize: 14, padding: '6px 8px', minWidth: 220 }}
                       >
-                        <option value="">（未指定归属）</option>
+                        <option value="">
+                          {f.aliasUserId ? `（按代号：${nameOf(f.aliasUserId)}）` : '（未指定归属）'}
+                        </option>
                         {members.map((m) => (
                           <option key={m.user_id} value={m.user_id}>
                             {m.email}

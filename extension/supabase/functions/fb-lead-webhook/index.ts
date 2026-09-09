@@ -445,6 +445,22 @@ serve(async (req) => {
         },
       });
 
+      // ── 当场落主理人（migration 0040）──
+      // 表单名 / 广告名开头的业务员代号 → lead_owner_aliases → contact_handlers。
+      // 以前要等表单攒够 3 条聊过的线索再推断，新表单头几天线索最密的时候
+      // 业务员开「只看我的」什么都看不到。RPC 只动没有任何主理人的客户，
+      // 已经有人在跟的不抢；解析不出归属返回 null，不算失败，线索分配页会提示。
+      let routedTo: string | null = null;
+      try {
+        const { data: owner, error: routeErr } = await supabase.rpc('route_lead_contact', {
+          p_contact_id: contactId,
+        });
+        if (routeErr) console.warn(`route_lead_contact failed for ${leadId}:`, routeErr.message);
+        else routedTo = (owner as string | null) ?? null;
+      } catch (err) {
+        console.warn(`route_lead_contact threw for ${leadId}:`, err);
+      }
+
       // ── 立刻发 Lead 事件到 Conversions API（带 lead_id 高精度归因）──
       const fireRes = await fireLeadEvent({
         contactId,
@@ -467,7 +483,11 @@ serve(async (req) => {
         },
       });
 
-      results.push({ leadId, ok: true });
+      results.push({
+        leadId,
+        ok: true,
+        reason: routedTo ? `routed to ${routedTo}` : `unrouted (form=${formName ?? '?'}, ad=${lead.ad_name ?? '?'})`,
+      });
     }
   }
 

@@ -19,6 +19,10 @@
  *
  * 新建广告表单之后，等它攒够几条「客户点了按钮」的线索，跑一次 --detect 就能
  * 推出归属；纯度低于 MIN_PURITY 或样本太少的会跳过，需要人工指定。
+ *
+ * 2026-09-09 起主路径改成按命名代号（migration 0040，见 广告命名规范.md）：
+ * --assign 走 DB 的 resolve_lead_owner(org, form_name, ad_name)，
+ * 精确规则 > 表单名代号 > 广告名代号，和面板「一键分配」同一套解析。
  */
 import { createClient } from '@supabase/supabase-js';
 import { config } from 'dotenv';
@@ -125,14 +129,22 @@ if (DETECT) {
 }
 
 if (ASSIGN) {
-  const { data: rules, error } = await sb.from('lead_routing_rules').select('form_name, user_id').eq('org_id', ORG);
-  if (error) { console.log('读规则失败:', error.message); process.exit(1); }
-  const ruleOf = Object.fromEntries((rules || []).map((r) => [r.form_name, r.user_id]));
-  console.log(`\n=== 按 ${rules?.length ?? 0} 条规则分配未认领的线索 ===`);
+  console.log('\n=== 按「精确规则 > 表单名代号 > 广告名代号」分配未认领的线索 ===');
   const rows = []; let noRule = 0, already = 0;
+  // 同一个 (form_name, ad_name) 只解析一次
+  const cache = new Map();
+  const resolve = async (form, ad) => {
+    const k = `${form ?? ''}\u0000${ad ?? ''}`;
+    if (!cache.has(k)) {
+      const { data, error } = await sb.rpc('resolve_lead_owner', { p_org_id: ORG, p_form_name: form ?? null, p_ad_name: ad ?? null });
+      if (error) throw new Error(`resolve_lead_owner: ${error.message}`);
+      cache.set(k, data ?? null);
+    }
+    return cache.get(k);
+  };
   for (const e of evs) {
     if (firstHandler.has(e.contact_id)) { already++; continue; }   // 已经有人跟了，不动
-    const uid = ruleOf[e.payload?.form_name];
+    const uid = await resolve(e.payload?.form_name, e.payload?.ad_name);
     if (!uid) { noRule++; continue; }
     rows.push({ contact_id: e.contact_id, user_id: uid, last_seen_at: new Date().toISOString() });
   }

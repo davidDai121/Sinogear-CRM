@@ -409,6 +409,28 @@ export interface Database {
         };
         Relationships: [];
       };
+      lead_owner_aliases: {
+        Row: {
+          org_id: string;
+          alias: string;
+          user_id: string;
+          note: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          org_id: string;
+          alias: string;
+          user_id: string;
+          note?: string | null;
+        };
+        Update: {
+          alias?: string;
+          user_id?: string;
+          note?: string | null;
+        };
+        Relationships: [];
+      };
       contact_events: {
         Row: {
           id: string;
@@ -738,6 +760,14 @@ export interface Database {
       apply_lead_routing: {
         Args: { p_org_id: string };
         Returns: number;
+      };
+      resolve_lead_owner: {
+        Args: { p_org_id: string; p_form_name: string | null; p_ad_name: string | null };
+        Returns: string | null;
+      };
+      route_lead_contact: {
+        Args: { p_contact_id: string };
+        Returns: string | null;
       };
       create_organization: {
         Args: { org_name: string };

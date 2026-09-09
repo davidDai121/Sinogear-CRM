@@ -951,6 +951,15 @@ boss 原话：「按照表单归属，给到对应的业务员上，别用国家
 - **`lib/lead-routing.ts` + `LeadRoutingModal`**：顶栏「📣 线索分配」。boss 原话「我哪知道什么时候跑」——所以推断逻辑不能只做成命令行脚本，做成页面：打开就看见「N 个表单没归属、M 条线索没人跟」，一键处理。新表单攒够 3 条「客户点过按钮」的样本、纯度 ≥70% 就出推断，低于阈值提示人工指定。
 - **`scripts/route-fb-leads.mjs`**：命令行版，批量核对用，读写同一张表。
 
+**2026-09-09 追加：按命名代号归属（migration `0040_lead_owner_aliases.sql`）。** 样本推断在实际运行两周后暴露了时序问题：新表单上线头几天线索最密、但没人聊过 → 推不出来 → 业务员开「只看我的」什么都看不到，以为 CRM 又漏单了（9/7 上线的 4 个表单 97 条里 85 条没归属）。boss 拍板「以后拿广告名称做判断」，改成**表单名 / 广告名开头写业务员代号**（`miles-哥伦比亚-904` → `miles`），代号在 `lead_owner_aliases (org_id, alias) → user_id` 登记一次，webhook 收到线索当场调 `route_lead_contact(contact_id)` 落主理人。
+- 解析规则：开头连续 ASCII 字母数字转小写。SQL `lead_owner_alias_of` 和客户端 `lead-routing.ts aliasOf` 各一份，**改一处要同步改另一处**。
+- 优先级 `resolve_lead_owner`：`lead_routing_rules` 精确规则 > 表单名代号 > 广告名代号。精确规则放最前是为了保留人工改判（某表单临时给别人跟）。`apply_lead_routing` 改用同一解析，面板「一键分配」对只有代号没规则的表单也能分。
+- `route_lead_contact` 是 security definer，service_role（webhook）直接放行，业务员身份要是 org 成员；只动没有任何主理人的客户。
+- 面板 `LeadRoutingModal` 顶部加了代号登记区；表单卡显示「按表单名代号自动归 xxx」或「代号 xxx 没登记 → 去登记」。
+- 团队文档：`广告命名规范.md`（给投广告的人）+ 团队使用手册 三·五 新增小节。
+- 顺手修：`message-sync.ts` 合并重号占位客户时补写的 `fb_lead_received` 事件原来不带 `form_name/ad_name`（8/25 起 31 条），现在从占位记录的事件里复制过来，否则这些线索在表单统计和分配页里消失。
+- 上线当天用 `resolve_lead_owner` 回填了 263 条没主理人的线索（daimenglong 204 / 2064026258 38 / wanglincheng23 21，其中 193 条是老表单有规则但一直没人点「一键分配」）。`cheryl` → 2064026258 是 boss 当天指定的，登记后剩下的 15 条也分完，未分配归零。
+
 #### 二、让 274 个「没有 WhatsApp 会话」的客户可见
 
 回填把人塞进库了，但他们在聊天 tab 里**完全不显示**——`useCrmData` 的第 3 路循环只放置顶的进来，而「今日待办」8 个桶全依赖 `classification`（来自聊天记录），对没有会话的客户恒为 null。
