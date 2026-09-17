@@ -1,0 +1,4 @@
+interface:
+  display_name: "整车报价核算"
+  short_description: "按本单授权重算成本和报价，比较一台多台节省与新增采购预算"
+  default_prompt: "请用 $sino-gear-quote 处理当前客户需求，复用已确认信息并保存结果。"

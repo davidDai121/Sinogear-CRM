@@ -2,13 +2,12 @@ import { useEffect, useState } from 'react';
 import type { Database } from '@/lib/database.types';
 import { TranslateReplyPanel } from './TranslateReplyPanel';
 import { GemReplySection } from './GemReplySection';
-import { ClaudeReplySection } from './ClaudeReplySection';
 import { GPTReplySection } from './GPTReplySection';
 import { VehicleRecommendations } from './VehicleRecommendations';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 
-type Mode = 'translate' | 'gem' | 'claude' | 'gpt';
+type Mode = 'translate' | 'gem' | 'gpt';
 
 const STORAGE_KEY = 'aiReplyMode';
 
@@ -23,7 +22,7 @@ interface Props {
  * 顶部下拉切换三种模式：
  *   - translate: 直接翻译（输入中文 → 翻译成客户语言 → 填入聊天框）
  *   - gem: Gemini Gem AI 回复（结构化）
- *   - claude: Claude AI 回复（多模式 / 续聊 / 讨论 / 分析 / 变体 / 报价）
+ *   - gpt: GPT AI 回复与销售工作记忆
  *
  * 模式选择持久化在 chrome.storage.local（per-user 偏好）
  */
@@ -33,7 +32,11 @@ export function AIReplyTab({ orgId, contact, needsJump }: Props) {
   useEffect(() => {
     void chrome.storage.local.get(STORAGE_KEY).then((s) => {
       const v = s[STORAGE_KEY];
-      if (v === 'translate' || v === 'gem' || v === 'claude' || v === 'gpt') setMode(v);
+      if (v === 'translate' || v === 'gem' || v === 'gpt') setMode(v);
+      else if (v === 'claude') {
+        setMode('gpt');
+        void chrome.storage.local.set({ [STORAGE_KEY]: 'gpt' });
+      }
     });
   }, []);
 
@@ -57,9 +60,6 @@ export function AIReplyTab({ orgId, contact, needsJump }: Props) {
             <option value="gpt">
               🧠 GPT-5 Thinking 回复（Miles 第一人称 · 灵活）
             </option>
-            <option value="claude">
-              ✨ Claude AI 回复（多模式 · 续聊 · 讨论 · 推荐）
-            </option>
             <option value="translate">
               🌐 直接翻译（输入文字 → 翻成客户语言）
             </option>
@@ -77,14 +77,6 @@ export function AIReplyTab({ orgId, contact, needsJump }: Props) {
 
       {mode === 'gem' && (
         <GemReplySection
-          orgId={orgId}
-          contact={contact}
-          needsJump={needsJump}
-        />
-      )}
-
-      {mode === 'claude' && (
-        <ClaudeReplySection
           orgId={orgId}
           contact={contact}
           needsJump={needsJump}

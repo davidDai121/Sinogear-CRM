@@ -18,6 +18,8 @@ import type { Database } from './database.types';
 import type { GptApprovedKnowledge } from './gpt-template-knowledge';
 import { isSalesPitch } from './sales-pitch';
 import { collapseMediaRuns, isMediaOnly } from './chat-media-utils';
+import { SALES_WORKFLOW } from './gpt-sales-workflow';
+import { renderSalesWorkMemory, type SalesWorkMemory } from './sales-work-memory';
 // customer-signals 注入 GPT prompt 已去掉（feedback_gpt_skip_reference_data.md）—
 // 仅 Claude 继续保留信号注入
 
@@ -52,6 +54,7 @@ export interface GptPromptContext {
   salesGuidance?: string;
   /** 当前选中模板本轮从 CRM 读取的知识快照，不来自客户聊天。 */
   approvedKnowledge?: GptApprovedKnowledge;
+  workMemory?: SalesWorkMemory;
   /** true = 走用户自建的 Custom GPT（system prompt 已是 Miles 角色），跳过 ROLE_PROMPT 避免重复 */
   useCustomGpt?: boolean;
 }
@@ -74,6 +77,7 @@ export function buildFirstMessage(ctx: GptPromptContext): string {
   }
 
   appendApprovedKnowledge(sections, ctx.approvedKnowledge);
+  sections.push(renderSalesWorkMemory(ctx.workMemory));
 
   // 销售自定义指令 —— 最高优先级
   if (ctx.salesGuidance?.trim()) {
@@ -81,7 +85,7 @@ export function buildFirstMessage(ctx: GptPromptContext): string {
       '',
       `[Sales Guidance — TOP PRIORITY]`,
       ctx.salesGuidance.trim(),
-      `The guidance above OVERRIDES default behavior. Apply it strictly to the [WhatsApp Reply].`,
+      `The guidance above overrides default behavior. Interpret its intended recipient and task using [Sales Workflow]; do not automatically turn it into customer text.`,
     );
   }
 
@@ -92,7 +96,7 @@ export function buildFirstMessage(ctx: GptPromptContext): string {
   sections.push('', isGroup ? buildGroupContext(ctx) : buildIndividualContext(ctx));
 
   // 不依赖默认角色或 Custom GPT 的旧 instructions；每次生成都重申语言依据。
-  sections.push('', buildReplyLanguageContext(ctx.messages, ctx.contact.language, isGroup));
+  sections.push('', SALES_WORKFLOW, '', buildReplyLanguageContext(ctx.messages, ctx.contact.language, isGroup));
 
   // 最后再强调一次输出格式（GPT 容易忘记三段格式，结尾重申比开头有效）
   sections.push('', OUTPUT_REMINDER);
@@ -108,6 +112,7 @@ export function buildFollowUpMessage(opts: {
   isGroup?: boolean;
   salesGuidance?: string;
   approvedKnowledge?: GptApprovedKnowledge;
+  workMemory?: SalesWorkMemory;
   /**
    * 续聊也带精简版客户档案 —— 老 GPT thread 跑久了 / context 被截断后，
    * 客户 anchor（预算、国家、stage）容易丢；每次续聊重申一遍才稳。
@@ -122,12 +127,13 @@ export function buildFollowUpMessage(opts: {
   sections.push(formatCurrentTimeBlock(), '');
 
   appendApprovedKnowledge(sections, opts.approvedKnowledge);
+  sections.push(renderSalesWorkMemory(opts.workMemory));
 
   if (opts.salesGuidance?.trim()) {
     sections.push(
       `[Sales Guidance — TOP PRIORITY]`,
       opts.salesGuidance.trim(),
-      `Apply it strictly to the [WhatsApp Reply].`,
+      `Apply the guidance to the intended task using [Sales Workflow]; do not automatically turn it into customer text.`,
       '',
     );
   }
@@ -149,6 +155,8 @@ export function buildFollowUpMessage(opts: {
   }
 
   sections.push(
+    SALES_WORKFLOW,
+    '',
     buildReplyLanguageContext(opts.newMessages ?? [], opts.contact?.language, opts.isGroup ?? false),
     '',
     OUTPUT_REMINDER,
@@ -176,6 +184,7 @@ export function buildDiscussionMessage(opts: {
   contact?: GptPromptContext['contact'];
   vehicleInterests?: GptPromptContext['vehicleInterests'];
   approvedKnowledge?: GptApprovedKnowledge;
+  workMemory?: SalesWorkMemory;
 }): string {
   const sections: string[] = [];
 
@@ -183,6 +192,7 @@ export function buildDiscussionMessage(opts: {
   sections.push(formatCurrentTimeBlock(), '');
 
   appendApprovedKnowledge(sections, opts.approvedKnowledge ?? opts.ctx?.approvedKnowledge);
+  sections.push(renderSalesWorkMemory(opts.workMemory ?? opts.ctx?.workMemory));
 
   if (opts.ctx) {
     // 第一条 discuss — 角色 + 客户档案 + 历史（同 buildFirstMessage 哲学：不喂车型/市场参考数据）
@@ -212,6 +222,7 @@ export function buildDiscussionMessage(opts: {
   }
 
   sections.push(
+    SALES_WORKFLOW,
     `[Discussion — NOT a customer reply request]`,
     opts.question.trim(),
     '',
@@ -219,6 +230,7 @@ export function buildDiscussionMessage(opts: {
     `Reply in Chinese (中文) with concrete tactical analysis. Be direct, give your read on the customer, suggest a move.`,
     `For THIS discussion message ONLY, you may break the standard [Client Record] / [WhatsApp Reply] / [Full Translation & Strategy] output format — just give a useful Chinese answer.`,
     `When Miles next asks for a customer reply, return to the standard three-section format.`,
+    `For any document or product link, write the full approved https:// URL as visible plain text, never only a linked filename or a Markdown named link. Do not invent a URL.`,
   );
 
   return sections.join('\n');
@@ -358,7 +370,8 @@ Recommended Strategy:
 （推荐推进策略：本轮怎么打，下一轮预案是什么。包括语气选择、是否报价、是否发图、是否引入紧迫感/损失厌恶、是否给小让步。两三句话讲清打法。）`;
 
 const OUTPUT_REMINDER = `Reminder: output exactly three sections in this order — [Client Record], [WhatsApp Reply], [Full Translation & Strategy]. Nothing before, between, or after them.
-Before finishing, check that the ENTIRE [WhatsApp Reply] uses the language selected from [Reply Language]. Keep the headings unchanged and Chinese translation/analysis only in [Full Translation & Strategy].`;
+Before finishing, check that the ENTIRE [WhatsApp Reply] uses the language selected from [Reply Language]. Keep the headings unchanged and Chinese translation/analysis only in [Full Translation & Strategy].
+For any document or product link, write the full approved https:// URL as visible plain text, never only a linked filename or a Markdown named link. Do not invent a URL.`;
 
 /**
  * 英文销售出站和旧 CRM language 经常压过客户的西语入站。
@@ -563,8 +576,10 @@ function formatCurrentTimeBlock(): string {
   const hour = String(now.getHours()).padStart(2, '0');
   const minute = String(now.getMinutes()).padStart(2, '0');
   const weekday = WEEKDAY_EN[now.getDay()];
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return `[Current Time]
-${year}-${month}-${day} ${weekday} ${hour}:${minute} (boss's local time, Asia/Shanghai)
+${year}-${month}-${day} ${weekday} ${hour}:${minute} (boss's local time, ${timeZone})
+Exact current instant: ${now.toISOString()}. Compare ISO freight lookup/expiry timestamps as instants, not as local clock strings.
 Message timestamps below are MM-DD HH:MM. Use the date above to interpret "today" / "yesterday" / day-of-week references — don't assume the most recent message is from today.
 Lines marked \`??-?? ??:??\` are messages (typically media attachments without text caption) whose exact send time wasn't recorded. They happened at some point in this conversation; their position in the list is NOT chronological — do not infer "just now" or any specific timing from them.`;
 }

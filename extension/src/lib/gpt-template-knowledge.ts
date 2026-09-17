@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from './database.types';
 import { stringifyError } from './errors';
+import { validateGptSkill, type GptSkill } from './gpt-skill';
 
 // description 原本是普通说明。只有带专用前缀且 schema/version/字段全部有效的
 // envelope 才能提升为业务知识；普通文本、普通 JSON 和客户消息都不是知识来源。
@@ -13,12 +14,14 @@ export interface GptTemplateMetadata {
   approvedKnowledge: string;
   hasEnvelope: boolean;
   updatedAt: string | null;
+  skill?: GptSkill;
 }
 
 export interface GptApprovedKnowledge {
   text: string;
   templateId: string;
   updatedAt: string;
+  skill?: GptSkill;
 }
 
 export function decodeGptTemplateDescription(raw: unknown): GptTemplateMetadata {
@@ -35,8 +38,9 @@ export function decodeGptTemplateDescription(raw: unknown): GptTemplateMetadata 
     const envelope = value as Record<string, unknown>;
     const keys = Object.keys(envelope).sort().join(',');
     if (
-      keys !== 'approvedKnowledge,description,schema,updatedAt,version' ||
-      envelope.schema !== SCHEMA || envelope.version !== VERSION ||
+      !((envelope.version === VERSION && keys === 'approvedKnowledge,description,schema,updatedAt,version')
+        || (envelope.version === 2 && keys === 'approvedKnowledge,description,schema,skill,updatedAt,version')) ||
+      envelope.schema !== SCHEMA ||
       typeof envelope.description !== 'string' ||
       typeof envelope.approvedKnowledge !== 'string' ||
       typeof envelope.updatedAt !== 'string' ||
@@ -48,6 +52,7 @@ export function decodeGptTemplateDescription(raw: unknown): GptTemplateMetadata 
       approvedKnowledge: envelope.approvedKnowledge,
       hasEnvelope: true,
       updatedAt: envelope.updatedAt,
+      ...(envelope.version === 2 ? { skill: validateGptSkill(envelope.skill) } : {}),
     };
   } catch {
     throw new Error('GPT 模板的已确认业务知识格式损坏或版本不受支持。原始内容已保留，请修复后再生成。');
@@ -59,20 +64,22 @@ export function encodeGptTemplateDescription(
   approvedKnowledge: string,
   preserveEnvelope = false,
   updatedAt = new Date().toISOString(),
+  skill?: GptSkill,
 ): string | null {
   const summary = description.trim();
   const knowledge = approvedKnowledge.trim();
   // 保持从未启用知识的旧模板行为。曾启用后清空则保留 envelope，向旧对话明确撤销。
   // 说明本身若是转贴来的 envelope，也必须包成纯说明，不能在下一次读取时升级权限。
-  if (!knowledge && !preserveEnvelope && !summary.startsWith(GPT_TEMPLATE_METADATA_PREFIX)) {
+  if (!skill && !knowledge && !preserveEnvelope && !summary.startsWith(GPT_TEMPLATE_METADATA_PREFIX)) {
     return summary || null;
   }
   return GPT_TEMPLATE_METADATA_PREFIX + JSON.stringify({
     schema: SCHEMA,
-    version: VERSION,
+    version: skill ? 2 : VERSION,
     description: summary,
     approvedKnowledge: knowledge,
     updatedAt,
+    ...(skill ? { skill: validateGptSkill(skill) } : {}),
   }, null, 2);
 }
 
@@ -103,6 +110,7 @@ export async function loadGptApprovedKnowledge(
       text: metadata.approvedKnowledge,
       templateId: data.id,
       updatedAt: metadata.updatedAt!,
+      ...(metadata.skill ? { skill: metadata.skill } : {}),
     };
   } catch (error) {
     throw new Error(`读取 GPT 已确认业务知识失败，已停止本次生成：${stringifyError(error)}`);

@@ -1,0 +1,4 @@
+interface:
+  display_name: "整车运费查询"
+  short_description: "查询海运参考、核对车辆承运与费用范围，并保存每次查询结果"
+  default_prompt: "请用 $sino-gear-freight 处理当前客户需求，复用已确认信息并保存结果。"

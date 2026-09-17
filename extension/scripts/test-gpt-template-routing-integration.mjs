@@ -24,6 +24,23 @@ const { Simulate } = require('react-dom/test-utils');
 
 const common = 'const h = () => globalThis.__gptRoutingIntegration;\n';
 const mocks = {
+  '@/lib/gpt-followup': `${common}
+    export const loadFollowupContext = async (_db,orgId,contactId) => ({orgId,contactId});
+    export const followupPrompt = () => '';
+    export const extractFollowup = text => ({text,decision:{title:'等待条件',reason:'离线边界替身'}});
+    export const saveFollowup = async (_db,ctx,decision) => ({decision,after:null,protected:false});`,
+  '@/lib/sales-work-memory': `${common}
+    export const loadSalesWorkMemory = async (_db, org, contactId) => {
+      if (h().memoryError) throw Error(h().memoryError);
+      return structuredClone(h().memories[contactId] ?? {contactId,scopeId:contactId,label:'当前需求',entries:[],tasks:[]});
+    };
+    export const saveSalesWorkEntry = async (_db, org, contactId, entry) => {
+      if (h().memorySaveError) throw Error(h().memorySaveError);
+      const m = h().memories[contactId] ??= {contactId,scopeId:contactId,label:'当前需求',entries:[],tasks:[]};
+      h().memoryWrites.push({org,contactId,entry});
+      if(entry.kind==='scope'){m.scopeId=entry.scopeId;m.label=entry.text;m.entries=[];}
+      m.entries.push({...entry,at:new Date().toISOString()});
+    };`,
   '@/lib/supabase': `${common}export const supabase = { from: table => h().query(table) };`,
   '@/lib/errors': 'export const stringifyError = e => e instanceof Error ? e.message : String(e);',
   '@/lib/jump-to-chat': `${common}export const jumpToChat = async () => true; export const verifyHeaderMatches = () => h().headerMatches;`,
@@ -39,7 +56,7 @@ const mocks = {
     export const buildDiscussionMessage = args => record(args.ctx ? 'discussion-first' : 'discussion-followup', args);`,
   '@/lib/gpt-template-knowledge': `${common}
     export const loadGptApprovedKnowledge = async (_client, id, orgId) => {
-      h().knowledge.push({id,orgId}); return 'approved-knowledge:' + id;
+      h().knowledge.push({id,orgId}); return h().knowledgeSnapshots[id] ?? 'approved-knowledge:' + id;
     };`,
   '@/lib/claude-parser': 'export const parseClaudeResponse = () => null;',
   '@/content/whatsapp-compose': 'export const fillWhatsAppCompose = () => { throw new Error("Compose must never run"); };',
@@ -49,7 +66,7 @@ const mocks = {
   '@/lib/ai-reply-log': `${common}export const logAiReply = async args => { h().logs.push(args); return 'offline-log'; }; export const markAiReplyFilled = async () => {};`,
   '@/lib/reply-sanitize': 'export const sanitizeReplyForCustomer = x => x; export const wasReplyDirty = () => false;',
   './ReplyCard': 'export const ReplyCard = () => null;',
-  './ClaudeReplySection': 'export const ClientRecordCard = () => null;',
+  './ClientRecordCard': 'export const ClientRecordCard = () => null;',
   './GPTTemplatesModal': 'export const GPTTemplatesModal = () => null;',
   './GeneratedAtBadge': 'export const GeneratedAtBadge = () => null;',
   '@/lib/whatsapp-idb': 'export const readWhatsAppData = async () => ({chats:[],contacts:[]});',
@@ -89,9 +106,12 @@ function makeHarness(options = {}) {
     conversations: structuredClone(options.conversations ?? []),
     messages: structuredClone(options.messages ?? { 'customer-a': [msg('Quiero el R08 diésel')] }),
     interests: structuredClone(options.interests ?? {}),
+    knowledgeSnapshots: structuredClone(options.knowledgeSnapshots ?? {}),
+    memories: structuredClone(options.memories ?? {}), memoryWrites: [], memoryError: options.memoryError, memorySaveError: options.memorySaveError,
+    quoteRows: [], responseTexts: options.responseTexts, quoteSaveError: options.quoteSaveError,
     store: {}, calls: [], queries: [], writes: [], knowledge: [], prompts: [], logs: [], progress: [], syncs: [],
     headerMatches: false, domMessages: [], returnedUrl: options.returnedUrl,
-    holdRuntime: options.holdRuntime ?? false,
+    holdRuntime: options.holdRuntime ?? false, responseText: options.responseText,
   };
   let messageReadCount = 0;
   h.readMessages = async id => {
@@ -102,7 +122,7 @@ function makeHarness(options = {}) {
     return rows;
   };
   h.query = table => {
-    assert.ok(['gpt_templates', 'gpt_conversations', 'vehicle_interests'].includes(table), `unexpected table ${table}`);
+    assert.ok(['gpt_templates', 'gpt_conversations', 'vehicle_interests', 'contacts', 'contact_events'].includes(table), `unexpected table ${table}`);
     const filters = []; let operation = 'select'; let payload; let single = false; let executed;
     const builder = {
       select() { return builder; },
@@ -117,6 +137,15 @@ function makeHarness(options = {}) {
       then(resolve, reject) {
         executed ??= Promise.resolve().then(() => {
           h.queries.push({ table, operation, filters: [...filters] });
+          if(table==='contacts') return {data:{id:filters.find(([k])=>k==='id')[1]},error:null};
+          if(table==='contact_events') {
+            assert.equal(operation,'insert');
+            if(h.quoteSaveError)return {data:null,error:{message:h.quoteSaveError}};
+            h.quoteRows.push(structuredClone(payload));
+            const m=h.memories[payload.contact_id]??={contactId:payload.contact_id,scopeId:payload.contact_id,label:'当前需求',entries:[],tasks:[]};
+            (m.quoteVersions??=[]).push({id:payload.id,at:new Date().toISOString(),payload:payload.payload});
+            return {data:null,error:null};
+          }
           let rows = table === 'gpt_templates' ? h.templates : table === 'gpt_conversations'
             ? h.conversations : Object.entries(h.interests).flatMap(([id, interests]) => interests.map(x => ({ ...x, contact_id: id })));
           if (operation !== 'select') {
@@ -148,7 +177,7 @@ globalThis.chrome = {
   runtime: { async sendMessage(request) {
     const h = globalThis.__gptRoutingIntegration;
     assert.equal(request.type, 'GPT_RUN'); h.calls.push(request);
-    const result = { ok: true, responseText: 'Offline synthetic reply',
+    const result = { ok: true, responseText: h.responseTexts?.[h.calls.length-1] ?? h.responseText ?? 'Offline synthetic reply',
       chatUrl: h.returnedUrl ?? `${request.url.split('/c/')[0]}/c/offline-result` };
     if (h.holdRuntime) return new Promise(resolve => { h.releaseRuntime = () => resolve(result); });
     return result;
@@ -353,4 +382,96 @@ test('auto R08 leaves selector enabled; manual Miles and restore automatic both 
   await render('customer-b');
   select = container.querySelector('select');
   assert.equal(select.value, r08.id, 'manual choice must not leak across customers');
+});
+
+for (const action of ['generate', 'discussion']) {
+  for (const existing of [false, true]) {
+    test(`skill ${action} ${existing ? 'continuation' : 'first turn'} carries current skill identity and saves only a bound conversation`, async t => {
+      const skill = { id: '6aabac4c1240819193bc311372c9d2ab', name: 'sino gear r08 miles' };
+      const encoded = 'SGC_GPT_TEMPLATE_CONFIG\n' + JSON.stringify({ schema: 'sinogear.gpt-template', version: 2,
+        description: 'skill test', approvedKnowledge: '最新知识', updatedAt: '2026-09-17T08:00:00.000Z', skill });
+      const specialist = { ...r08, id: 'template-skill', gpt_url: 'https://chatgpt.com/', description: encoded };
+      const bound = `https://chatgpt.com/c/offline-skill#sgc_skill=${skill.id}`;
+      const { h, container } = await mount(t, { templates: [miles, specialist], returnedUrl: bound,
+        knowledgeSnapshots: { [specialist.id]: { text: '最新知识', templateId: specialist.id, updatedAt: '2026-09-17T08:00:00.000Z', skill } },
+        conversations: [conversation(specialist, 'customer-a', existing ? bound : 'https://chatgpt.com/c/unbound-old')],
+      });
+      if (action === 'generate') await click(button(container, text => text === (existing ? '续聊生成' : '生成')));
+      else await discuss(container);
+      assert.equal(h.calls.length, 1);
+      assert.deepEqual(h.calls[0].skill, skill);
+      assert.equal(h.calls[0].url, existing ? bound : specialist.gpt_url);
+      assert.equal(h.writes.length, 1);
+      assert.equal(h.writes[0].payload.chat_url, bound);
+      assert.equal(h.writes[0].payload.template_id, specialist.id);
+    });
+  }
+}
+
+test('owner instructions survive cleared guidance and a fresh conversation', async t => {
+  const {h,container:c}=await mount(t);
+  await guidance(c,'本单地面费2000；先内部核算');
+  await click(button(c,x=>x==='生成'));
+  assert.equal(h.memoryWrites[0].entry.kind,'sales_instruction');
+  assert.equal(h.memoryWrites[1].entry.kind,'assistant_draft');
+  h.conversations.length=0;
+  await click(button(c,x=>x==='续聊生成'||x==='生成'));
+  const memory=h.prompts.at(-1).args.workMemory;
+  assert.equal(memory.entries.filter(x=>x.kind==='sales_instruction').length,1);
+  assert.ok(memory.entries.some(x=>x.text==='本单地面费2000；先内部核算'));
+  assert.equal(h.prompts.at(-1).kind,'first');
+});
+test('memory read failure stops generation instead of silently forgetting approvals', async t => {
+ const {h,container:c}=await mount(t,{memoryError:'读取客户工作记录失败'});
+ await click(button(c,x=>x==='生成'));
+ assert.equal(h.calls.length,0);assert.ok(c.textContent.includes('读取客户工作记录失败'));
+});
+test('owner-input save failure preserves instructions and does not invoke model', async t => {
+ const {h,container:c}=await mount(t,{memorySaveError:'保存客户工作记录失败'});
+ await guidance(c,'本单批准运费3000');await click(button(c,x=>x==='生成'));
+ assert.equal(h.calls.length,0);assert.equal(c.querySelector('textarea').value,'本单批准运费3000');
+});
+test('new demand keeps previous conditions out of next prompt and starts fresh chat', async t => {
+ const prior={contactId:'customer-a',scopeId:'customer-a',label:'旧单',entries:[{id:'old',at:'2026-01-01',scopeId:'customer-a',kind:'sales_instruction',text:'赠品ALPHA'}],tasks:[]};
+ const {h,container:c}=await mount(t,{conversations:[conversation(r08)],memories:{'customer-a':prior}});
+ const input=c.querySelector('input[aria-label="另一笔需求名称"]');
+ await act(async()=>Simulate.change(input,{target:{value:'第二批'}}));await settle();
+ await click(button(c,x=>x==='开始另一笔需求'));
+ await click(button(c,x=>x==='续聊生成'||x==='生成'));
+ assert.equal(h.prompts.at(-1).kind,'first');assert.equal(h.prompts.at(-1).args.workMemory.label,'第二批');
+ assert.ok(!JSON.stringify(h.prompts.at(-1).args.workMemory).includes('ALPHA'));
+});
+
+for (const action of ['generate','discussion']) {
+ test(`${action} saves conversational freight research automatically without a freight form`,async t=>{
+  const raw='[Client Record]\n\n[WhatsApp Reply]\n\n[Full Translation & Strategy]\n内部估算结论\n<freight_research>Shanghai → Tema；最高可比参考4000美元/柜；https://example.com/rate；非正式报价</freight_research>';
+  const {h,container}=await mount(t,{responseText:raw});
+  assert.equal(container.querySelector('[aria-label="运费目的港"]'),null);
+  if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
+  const research=h.memoryWrites.find(w=>w.entry.kind==='freight_lookup');
+  assert.ok(research);assert.equal(research.contactId,'customer-a');
+  const record=JSON.parse(research.entry.text);assert.equal(record.status,'model_research_unverified');assert.equal(record.bindingQuote,false);
+  assert.match(record.raw,/最高可比参考4000/);assert.doesNotMatch(h.logs[0].response,/<freight_research>/);
+  assert.equal(h.memoryWrites.filter(w=>w.entry.kind==='assistant_draft').length,1);
+ });
+}
+
+for(const action of ['generate','discussion']) {
+ test(`${action} computes quote, composes in same chat and saves append-only input/result version`,async t=>{
+   const plan={label:'两台',model:'EV510',quantity:2,propulsion:'bev',shippingMode:'container',containers:1,loadingBasis:'测试一柜两台',vehicle:{basis:'approved_fob',amount:'25000',currency:'USD',source:'批准价',groundIncluded:true},freight:{amountUsd:'11000',source:'测试运费',dgIncluded:false,groundIncluded:false,checkedAt:new Date().toISOString(),validUntil:null,kind:'owner_estimate'},profit:null,groundOverride:null,insurance:null,fixedSelling:null};
+   const input={schema:'quote-input.v1',origin:'Shanghai',destination:'La Guaira',fx:null,plans:[plan]};
+   const first='[WhatsApp Reply]\n\n[Full Translation & Strategy]\n<quote_input>'+JSON.stringify(input)+'</quote_input>';
+   const final='[WhatsApp Reply]USD 62,000.00 total, USD 31,000.00 per car.\n[Full Translation & Strategy]保险未含';
+   const prior={contactId:'customer-a',scopeId:'customer-a',label:'本单',entries:[],tasks:[],quoteVersions:[{id:'previous-version',at:'2026-09-17T00:00:00Z',payload:{summary:'旧版'}}]};
+   const {h,container}=await mount(t,{responseTexts:[first,final],memories:{'customer-a':prior}});
+   if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
+   assert.equal(h.calls.length,2);assert.equal(h.calls[1].url,`${r08.gpt_url}/c/offline-result`);assert.match(h.calls[1].prompt,/62000.00/);
+   assert.equal(h.quoteRows.length,1);assert.equal(h.quoteRows[0].contact_id,'customer-a');assert.equal(h.quoteRows[0].payload.status,'draft');assert.equal(h.quoteRows[0].payload.parentId,'previous-version');assert.equal(h.quoteRows[0].payload.result[0].dgUsd,'1000.00');
+   assert.equal(h.memoryWrites.filter(x=>x.entry.kind==='assistant_draft').length,1);assert.doesNotMatch(h.logs[0].response,/quote_input/);assert.match(container.textContent,/报价核算历史/);
+ });
+}
+test('failed quote version write does not display a falsely saved/sendable quote',async t=>{
+ const input={schema:'quote-input.v1',origin:'Shanghai',destination:'Tema',fx:null,plans:[{label:'一台',model:'柴油',quantity:1,propulsion:'fuel',shippingMode:'roro',containers:null,loadingBasis:'滚装',vehicle:{basis:'approved_fob',amount:'10000',currency:'USD',source:'本单批准',groundIncluded:true},freight:{amountUsd:'2000',source:'测试',dgIncluded:false,groundIncluded:false,checkedAt:new Date().toISOString(),validUntil:null,kind:'owner_estimate'},profit:null,groundOverride:null,insurance:null,fixedSelling:null}]};
+ const {h,container}=await mount(t,{quoteSaveError:'offline',responseTexts:['[WhatsApp Reply]\n[Full Translation & Strategy]<quote_input>'+JSON.stringify(input)+'</quote_input>','[WhatsApp Reply]USD 12000.00\n[Full Translation & Strategy]参考']});
+ await click(button(container,x=>x==='生成'));assert.equal(h.calls.length,2);assert.equal(h.quoteRows.length,0);assert.equal(h.memoryWrites.filter(x=>x.entry.kind==='assistant_draft').length,0);assert.match(container.textContent,/报价版本保存失败/);
 });

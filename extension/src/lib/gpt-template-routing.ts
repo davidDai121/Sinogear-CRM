@@ -1,6 +1,8 @@
 import type { ChatMessage } from '@/content/whatsapp-messages';
 import { isMediaOnly } from './chat-media-utils';
 import { isSalesPitch } from './sales-pitch';
+import { decodeGptTemplateDescription } from './gpt-template-knowledge';
+import { R08_SKILL_ID } from './gpt-skill';
 
 // This is the owner's verified R08 GPT identity, not a template display name.
 export const R08_GPT_ID = 'g-6aa7711ad9cc8191aa3d3693cfd7ad9f';
@@ -10,6 +12,7 @@ interface Template {
   name: string;
   gpt_url: string;
   is_default: boolean;
+  description?: string | null;
 }
 
 export interface GptRoutingContext {
@@ -93,6 +96,15 @@ export function customGptId(raw: string): string | null {
   return chatGptUrl(raw)?.pathname.match(/^\/g\/(g-[a-z0-9]+)(?:-|\/|$)/i)?.[1].toLowerCase() ?? null;
 }
 
+function templateSkill(template: { description?: string | null }) {
+  try { return decodeGptTemplateDescription(template.description ?? null).skill; }
+  catch { return undefined; } // Generation still fails closed in the knowledge loader.
+}
+
+function isR08Template(template: Template): boolean {
+  return templateSkill(template)?.id === R08_SKILL_ID || customGptId(template.gpt_url) === R08_GPT_ID;
+}
+
 export function resolveGptTemplateRoute<T extends Template>(
   templates: T[], selectedTemplateId: string, context: GptRoutingContext,
 ): { template: T | null; isR08: boolean; reason: string; error: string | null } {
@@ -100,13 +112,13 @@ export function resolveGptTemplateRoute<T extends Template>(
     const template = templates.find((t) => t.id === context.manualTemplateId) ?? null;
     return {
       template,
-      isR08: !!template && customGptId(template.gpt_url) === R08_GPT_ID,
+      isR08: !!template && isR08Template(template),
       reason: '手动选择',
       error: template ? null : '手动选择的 GPT 模板已不可用，请重新选择或恢复自动匹配。',
     };
   }
   const { topic, reason } = inferTopic(context);
-  const r08Templates = templates.filter((t) => customGptId(t.gpt_url) === R08_GPT_ID);
+  const r08Templates = templates.filter(isR08Template);
   if (topic === 'r08') {
     const template = r08Templates.find((t) => t.id === selectedTemplateId) ?? r08Templates[0] ?? null;
     return {
@@ -116,7 +128,7 @@ export function resolveGptTemplateRoute<T extends Template>(
   }
   const selected = templates.find((t) => t.id === selectedTemplateId);
   const available = topic === 'other'
-    ? templates.filter((t) => customGptId(t.gpt_url) !== R08_GPT_ID) : templates;
+    ? templates.filter((t) => !isR08Template(t)) : templates;
   const template = available.find((t) => t.id === selected?.id)
     ?? available.find((t) => t.is_default) ?? available[0] ?? null;
   return { template, isR08: false, reason, error: null };
@@ -125,11 +137,14 @@ export function resolveGptTemplateRoute<T extends Template>(
 /** A template ID alone is insufficient: never continue another GPT's thread. */
 export function isConversationForGptTemplate(
   conversation: { contact_id: string; template_id: string; chat_url: string },
-  contactId: string, template: Pick<Template, 'id' | 'gpt_url'>,
+  contactId: string, template: Pick<Template, 'id' | 'gpt_url' | 'description'>,
 ): boolean {
   if (conversation.contact_id !== contactId || conversation.template_id !== template.id) return false;
   const url = chatGptUrl(conversation.chat_url);
   if (!url || !chatGptUrl(template.gpt_url)) return false;
+  const skill = templateSkill(template);
+  if (skill) return url.hostname === 'chatgpt.com' && /^\/c\/[a-z0-9-]+\/?$/i.test(url.pathname)
+    && new URLSearchParams(url.hash.slice(1)).get('sgc_skill') === skill.id;
   const expectedId = customGptId(template.gpt_url);
   if (expectedId) {
     return customGptId(conversation.chat_url) === expectedId

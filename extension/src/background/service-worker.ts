@@ -1,3 +1,4 @@
+import { runDueFollowup, type FollowupRunnerState } from '@/lib/gpt-followup-runner';
 import {
   buildPrompt,
   buildTagPrompt,
@@ -18,8 +19,8 @@ import {
 } from '@/lib/stage-inference';
 import type { InferStageRequest } from '@/lib/stage-inference';
 import { runGem, isBusy as isGemBusy } from '@/lib/gem-automation';
-import { runClaude, isBusy as isClaudeBusy } from '@/lib/claude-automation';
 import { runGpt, isBusy as isGptBusy } from '@/lib/gpt-automation';
+import type { GptSkill } from '@/lib/gpt-skill';
 import { alarmKey, parseAlarmKey } from '@/lib/auto-reply-state';
 import { supabase } from '@/lib/supabase';
 
@@ -227,18 +228,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg?.type === 'GEM_BUSY') {
     sendResponse({ ok: true, busy: isGemBusy() });
-    return false;
-  }
-
-  if (msg?.type === 'CLAUDE_RUN') {
-    handleClaudeRun(msg as ClaudeRunRequest)
-      .then((res) => sendResponse(res))
-      .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
-    return true;
-  }
-
-  if (msg?.type === 'CLAUDE_BUSY') {
-    sendResponse({ ok: true, busy: isClaudeBusy() });
     return false;
   }
 
@@ -452,34 +441,6 @@ async function handleGemRun(req: GemRunRequest) {
   }
 }
 
-interface ClaudeRunRequest {
-  type: 'CLAUDE_RUN';
-  url: string;
-  prompt: string;
-  active?: boolean;
-  responseTimeoutMs?: number;
-}
-
-async function handleClaudeRun(req: ClaudeRunRequest) {
-  if (!req.url) return { ok: false, error: '缺少 Claude URL' };
-  if (!req.prompt) return { ok: false, error: '缺少 prompt' };
-  try {
-    const result = await runClaude({
-      url: req.url,
-      prompt: req.prompt,
-      active: req.active,
-      responseTimeoutMs: req.responseTimeoutMs,
-    });
-    return {
-      ok: true,
-      responseText: result.responseText,
-      chatUrl: result.chatUrl,
-    };
-  } catch (err) {
-    return { ok: false, error: String((err as Error)?.message ?? err) };
-  }
-}
-
 interface GptRunRequest {
   type: 'GPT_RUN';
   url: string;
@@ -487,6 +448,7 @@ interface GptRunRequest {
   active?: boolean;
   responseTimeoutMs?: number;
   ensureThinking?: boolean;
+  skill?: GptSkill;
 }
 
 async function handleGptRun(req: GptRunRequest) {
@@ -499,6 +461,7 @@ async function handleGptRun(req: GptRunRequest) {
       active: req.active,
       responseTimeoutMs: req.responseTimeoutMs,
       ensureThinking: req.ensureThinking,
+      skill: req.skill,
     });
     return {
       ok: true,
@@ -791,3 +754,29 @@ async function callQwenTranslate(
 
   return { ok: true, translation: content.trim() };
 }
+
+// Internal GPT reviews only. This path never invokes AUTO_REPLY_FIRE or WhatsApp compose.
+const FOLLOWUP_ALARM = 'sgc-gpt-followup-review';
+let followupRunning = false;
+async function reviewFollowups() {
+  if (followupRunning || isGptBusy()) return;
+  followupRunning = true;
+  try {
+    const { data } = await supabase.auth.getUser();
+    if (!data.user) return;
+    const key = `gptFollowupRunner:${data.user.id}`;
+    const saved = await chrome.storage.local.get(key);
+    const next = await runDueFollowup(supabase, runGpt, (saved[key] ?? {}) as FollowupRunnerState);
+    await chrome.storage.local.set({ [key]: next, gptFollowupLastStatus: { userId: data.user.id, ...next } });
+  } catch (error) {
+    console.warn('[GPT follow-up]', error);
+  } finally { followupRunning = false; }
+}
+async function ensureFollowupAlarm() {
+  const alarm = await chrome.alarms.get(FOLLOWUP_ALARM);
+  if (!alarm || alarm.periodInMinutes !== 1) await chrome.alarms.create(FOLLOWUP_ALARM, { delayInMinutes: 1, periodInMinutes: 1 });
+}
+chrome.runtime.onStartup.addListener(() => { void ensureFollowupAlarm(); void reviewFollowups(); });
+chrome.runtime.onInstalled.addListener(() => { void ensureFollowupAlarm(); });
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === FOLLOWUP_ALARM) void reviewFollowups(); });
+void ensureFollowupAlarm();

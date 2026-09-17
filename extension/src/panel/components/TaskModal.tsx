@@ -60,7 +60,7 @@ export function TaskModal({ orgId, task, onClose, onSaved }: Props) {
       const { error } = await supabase
         .from('tasks')
         .update(payload)
-        .eq('id', task.id);
+        .eq('id', task.id).eq('org_id', orgId);
       if (error) {
         setError(error.message);
         setBusy(false);
@@ -98,6 +98,7 @@ export function TaskModal({ orgId, task, onClose, onSaved }: Props) {
         </header>
 
         <form className="sgc-modal-body" onSubmit={submit}>
+          {task && <p className="sgc-muted">手动改期或改状态后，GPT会保留你的安排。清空日期可暂停自动复核。</p>}
           <label className="sgc-field">
             <span>任务标题</span>
             <input

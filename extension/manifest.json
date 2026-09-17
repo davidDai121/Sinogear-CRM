@@ -29,7 +29,6 @@
   "host_permissions": [
     "https://web.whatsapp.com/*",
     "https://gemini.google.com/*",
-    "https://claude.ai/*",
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://*.supabase.co/*",

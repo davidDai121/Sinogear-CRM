@@ -11,8 +11,10 @@
     "typecheck": "tsc -b --noEmit",
     "test:gpt-paragraphs": "node --test scripts/test-gpt-paragraphs.mjs",
     "test:gpt-knowledge": "node --test scripts/test-gpt-knowledge.mjs",
+    "test:gpt-skill": "node --test scripts/test-gpt-skill.mjs scripts/test-gpt-template-routing-integration.mjs scripts/test-gpt-template-form.mjs",
     "package": "node scripts/package.mjs",
-    "migrate-old-pg": "node scripts/migrate-from-old-pg.mjs"
+    "migrate-old-pg": "node scripts/migrate-from-old-pg.mjs",
+    "test:gpt-followup": "node --test scripts/test-gpt-followup.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

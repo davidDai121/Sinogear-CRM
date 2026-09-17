@@ -38,6 +38,7 @@ const KNOWN_SECTION_HEADERS = [
   'Reply Discipline',
   'Anti-Patterns',
   // Chinese
+  'GPT跟进安排',
   '摘要',
   '客户档案',
   '客户记录',
@@ -83,7 +84,9 @@ const NEED_FROM_BOSS_RE =
 export function sanitizeReplyForCustomer(text: string): string {
   if (!text) return '';
 
-  let cleaned = text;
+  // Internal machine records are never customer prose, including malformed blocks.
+  const internal = text.search(/<\/?(?:quote_input|freight_research|crm_followup)\b/i);
+  let cleaned = internal >= 0 ? text.slice(0, internal) : text;
 
   // 1. 截掉第一个已知 section header 及之后所有内容
   const headerMatch = cleaned.match(HEADER_RE);

@@ -1,4 +1,5 @@
 import { readGptResponseSnapshot } from './gpt-response-dom';
+import { bindSkillConversation, fillGptSkillPrompt, validateGptSkill, type GptSkill } from './gpt-skill';
 
 /**
  * chatgpt.com 网页自动化（service worker 端）
@@ -34,6 +35,7 @@ export interface GptRunOptions {
   responseTimeoutMs?: number;
   /** 是否尝试切到 GPT-5 Thinking 模型（仅新对话需要；续聊保留上次模型） */
   ensureThinking?: boolean;
+  skill?: GptSkill;
 }
 
 export interface GptRunResult {
@@ -52,8 +54,17 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
 
   let tabId: number | null = null;
   try {
+    const skill = opts.skill ? validateGptSkill(opts.skill) : undefined;
+    const target = new URL(opts.url);
+    const boundSkill = new URLSearchParams(target.hash.slice(1)).get('sgc_skill');
+    if (boundSkill && boundSkill !== skill?.id) throw new Error('技能配置已变化，请刷新模板后重新生成');
+    if (skill) {
+      if (target.protocol !== 'https:' || target.hostname !== 'chatgpt.com' || target.username || target.password
+        || !/^(?:\/|\/c\/[a-z0-9-]+\/?)$/i.test(target.pathname)) throw new Error('技能必须从普通 ChatGPT 会话启动');
+      target.hash = ''; // Strip the CRM-only conversation binding before navigation.
+    }
     const tab = await chrome.tabs.create({
-      url: opts.url,
+      url: target.href,
       active: opts.active ?? false,
     });
     if (tab.id == null) throw new Error('无法创建 ChatGPT 标签页');
@@ -69,11 +80,11 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
     // 响应判定只认「id 变了 = 新增 turn」，绝不把续聊历史里最后一条旧响应
     // 当成本轮结果；比数 turn 个数鲁棒（不受隐藏节点/重复渲染影响）
     const baseline = await readTurnAnchors(tabId);
-    await typeAndSend(tabId, opts.prompt);
+    await typeAndSend(tabId, opts.prompt, skill);
     let accepted = await waitForSendAccepted(tabId, baseline, 10000);
     if (!accepted) {
       // 输入被 hydration 吞了 → 重填重发一次
-      await typeAndSend(tabId, opts.prompt);
+      await typeAndSend(tabId, opts.prompt, skill);
       accepted = await waitForSendAccepted(tabId, baseline, 10000);
     }
     if (!accepted) {
@@ -88,7 +99,7 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
     );
 
     const finalTab = await chrome.tabs.get(tabId);
-    const chatUrl = finalTab.url ?? opts.url;
+    const chatUrl = skill ? bindSkillConversation(finalTab.url ?? '', skill) : finalTab.url ?? opts.url;
 
     await chrome.tabs.remove(tabId).catch(() => {});
     return { responseText, chatUrl };
@@ -302,7 +313,7 @@ async function waitForInput(tabId: number, timeoutMs = 30000): Promise<void> {
   throw new Error('未找到 ChatGPT 输入框（DOM 可能变了，需要更新 selector）');
 }
 
-async function typeAndSend(tabId: number, text: string): Promise<void> {
+async function fillLegacyPrompt(tabId: number, text: string): Promise<void> {
   // 1. 填入输入框
   const ok = await execute<boolean>(
     tabId,
@@ -570,8 +581,19 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
     await sleep(800);
   }
 
-  // 2. 点发送按钮
-  const clicked = await execute<boolean>(tabId, () => {
+}
+
+async function typeAndSend(tabId: number, text: string, skill?: GptSkill): Promise<void> {
+  if (skill) {
+    const prepared = await execute<boolean>(tabId, fillGptSkillPrompt, [skill, text]);
+    if (prepared !== true) throw new Error('技能输入准备失败，未发送客户上下文');
+  } else await fillLegacyPrompt(tabId, text);
+  // Recheck the immutable skill ID at the final send boundary.
+  const clicked = await execute<boolean>(tabId, (skillId: string | null) => {
+    if (skillId) {
+      const pills = document.querySelectorAll('#prompt-textarea [data-symbol="skillMention"]');
+      if (pills.length !== 1 || pills[0].getAttribute('data-id') !== skillId) return false;
+    }
     const inputSels = [
       '#prompt-textarea',
       '.ProseMirror',
@@ -683,7 +705,7 @@ async function typeAndSend(tabId: number, text: string): Promise<void> {
       return true;
     }
     return false;
-  });
+  }, [skill?.id ?? null]);
 
   if (!clicked) throw new Error('找不到 ChatGPT 发送按钮');
 }

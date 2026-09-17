@@ -106,6 +106,17 @@ function describe(ev: ContactEventRow): { title: string; detail?: string } {
       return { title: `新建任务 "${title}"${source}` };
     }
     case 'ai_extracted': {
+      if (p.schema === 'gpt-followup.v1') {
+        const d = p.decision as {title?: string; reason?: string};
+        return { title: `${p.phase === 'applied' ? 'GPT跟进判断' : 'GPT跟进保存记录'}${p.protected ? '（保留人工安排）' : ''} · ${d?.title ?? ''}`,
+          detail: d?.reason };
+      }
+      if (p.schema === 'sales-history.v1') return { title: '归档历史销售指导', detail: `${p.sourceAt ?? ''} · ${String(p.text ?? '').slice(0,180)}` };
+      if (p.schema === 'quote-calculation.v1') return { title: '报价核算版本（草稿，未发送）', detail: String(p.summary ?? '').slice(0,180) };
+      if (p.schema === 'sales-work.v1') {
+        const labels: Record<string, string> = { scope: '开始新的采购需求', sales_instruction: '保存销售补充', sales_discussion: '保存内部讨论', assistant_draft: '保存AI草稿（未发送）', freight_lookup: '保存运费查询（待确认）' };
+        return { title: labels[String(p.kind)] ?? '销售工作记录', detail: String(p.text ?? '').slice(0, 180) };
+      }
       const fields = Array.isArray(p.applied_fields) ? p.applied_fields : [];
       const vehicles = typeof p.vehicles_added === 'number' ? p.vehicles_added : 0;
       const parts: string[] = [];

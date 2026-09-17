@@ -1,3 +1,4 @@
+import type { FollowupPlan } from '@/lib/gpt-followup';
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Database, TaskStatus } from '@/lib/database.types';
@@ -52,6 +53,8 @@ function shortName(c: ContactRow | undefined, fallbackPhone: string): string {
 export function TasksPage({ orgId, onJumpToChat }: Props) {
   const { scope, myContactIds, handlersByContact, membersById, myUserId } =
     useScope();
+  const [plans, setPlans] = useState<Record<string, FollowupPlan>>({});
+  const [reviewError, setReviewError] = useState('');
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [contactMap, setContactMap] = useState<Record<string, ContactRow>>({});
   const [statusFilter, setStatusFilter] = useState<TaskStatus>('open');
@@ -60,7 +63,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
   const [modalTask, setModalTask] = useState<TaskRow | null | false>(false);
   const [calendarAnchor, setCalendarAnchor] = useState(() => new Date());
   const [selectedDateKey, setSelectedDateKey] = useState<string | null>(
-    toDateKey(new Date()),
+    '__due',
   );
   const [stalledTotal, setStalledTotal] = useState(0);
 
@@ -69,8 +72,8 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
     [myContactIds],
   );
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  const refresh = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     setError(null);
 
     // 服务端 join 过滤："我的客户"通过 contact_handlers!inner(user_id) 过滤，
@@ -122,6 +125,24 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
     }
 
     setTasks(taskList);
+    const followupPlans: Record<string, FollowupPlan> = {};
+    const ids = [...new Set(taskList.map(t => t.contact_id))];
+    try {
+      for (let i = 0; i < ids.length; i += 100) {
+        const rows = await fetchAllPaged<{ payload: Record<string, unknown> }>((from, to) => supabase.from('contact_events')
+          .select('payload').in('contact_id', ids.slice(i, i + 100)).eq('event_type', 'ai_extracted')
+          .contains('payload', { schema: 'gpt-followup.v1' }).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to));
+        for (const row of rows) {
+          const p = row.payload as unknown as FollowupPlan;
+          if (p.orgId === orgId && !followupPlans[p.taskId]) followupPlans[p.taskId] = p;
+        }
+      }
+      setPlans(followupPlans);
+      const saved = await chrome.storage.local.get('gptFollowupLastStatus');
+      const state = saved.gptFollowupLastStatus;
+      setReviewError(state?.userId === myUserId ? Object.entries(state.failures ?? {}).filter(([id]) => taskList.some(t => t.id === id)).map(([, value]) => (value as {message?: string}).message ?? '复核失败').join('；') : '');
+    } catch (e) { setError(`跟进判断读取失败：${e instanceof Error ? e.message : String(e)}`); }
+
 
     const contactIds = Array.from(new Set(taskList.map((t) => t.contact_id)));
     if (contactIds.length) {
@@ -173,6 +194,11 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
     };
   }, [refresh]);
 
+  useEffect(() => {
+    const timer = setInterval(() => { void refresh(true); }, 30_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
   const toggleStatus = async (task: TaskRow) => {
     const next: TaskStatus = task.status === 'open' ? 'done' : 'open';
     const prev = tasks;
@@ -180,7 +206,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
     const { error } = await supabase
       .from('tasks')
       .update({ status: next })
-      .eq('id', task.id);
+      .eq('id', task.id).eq('org_id', orgId);
     if (error) {
       setError(error.message);
       setTasks(prev);
@@ -198,11 +224,15 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
   }, [tasks]);
 
   const visibleTasks = useMemo(() => {
+    if (selectedDateKey === '__due') {
+      const today = toDateKey(new Date());
+      return tasks.filter(t => t.due_at && toDateKey(new Date(t.due_at)) <= today && (!plans[t.id] || plans[t.id].protected || plans[t.id].decision.decision === 'act'));
+    }
     if (selectedDateKey) {
       return tasksByDate[selectedDateKey] ?? [];
     }
     return tasks;
-  }, [selectedDateKey, tasks, tasksByDate]);
+  }, [selectedDateKey, tasks, tasksByDate, plans]);
 
   const todayKey = toDateKey(new Date());
   const weekStart = startOfWeek(new Date());
@@ -241,7 +271,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
 
   const monthLabel = `${calendarAnchor.getFullYear()} 年 ${calendarAnchor.getMonth() + 1} 月`;
 
-  const detailLabel = selectedDateKey
+  const detailLabel = selectedDateKey === '__due' ? `今日可推进及逾期（${visibleTasks.length} 条）` : selectedDateKey
     ? selectedDateKey === todayKey
       ? `今天的任务（${visibleTasks.length} 条）`
       : `${selectedDateKey} 的任务（${visibleTasks.length} 条）`
@@ -294,6 +324,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
       </div>
 
       {error && <div className="sgc-error">{error}</div>}
+      {reviewError && <div className="sgc-error">GPT自动复核暂未完成：{reviewError}。任务已保留；可在客户GPT对话重新生成。</div>}
 
       <div className="sgc-calendar">
         <div className="sgc-calendar-header">
@@ -389,6 +420,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
 
       <div className="sgc-task-detail-header">
         <strong>{detailLabel}</strong>
+        <button type="button" className="sgc-btn-link" onClick={() => setSelectedDateKey('__due')}>今日可推进及逾期</button>
         {selectedDateKey && (
           <button
             type="button"
@@ -405,7 +437,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
       ) : visibleTasks.length === 0 ? (
         <div className="sgc-empty">
           {selectedDateKey
-            ? `${selectedDateKey === todayKey ? '今天' : selectedDateKey} 没有任务`
+            ? selectedDateKey === '__due' ? '今天没有可推进或逾期任务' : `${selectedDateKey === todayKey ? '今天' : selectedDateKey} 没有任务`
             : `没有${STATUS_LABEL[statusFilter]}的任务`}
         </div>
       ) : (
@@ -475,7 +507,11 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
                       </div>
                     )}
                   </td>
-                  <td>{t.title}</td>
+                  <td>{t.title}{plans[t.id] && <div className="sgc-muted" style={{ maxWidth: 440, whiteSpace: 'normal', marginTop: 4 }}>
+                    {plans[t.id].decision.reason}<br />
+                    {plans[t.id].protected ? '保留人工安排 · ' : plans[t.id].decision.timeBasis === 'gpt' ? 'GPT判断时间 · ' : ''}
+                    判断于 {new Date(plans[t.id].evaluatedAt).toLocaleString()}
+                  </div>}</td>
                   <td>{time}</td>
                   <td>
                     <span className="sgc-muted">{STATUS_LABEL[t.status]}</span>

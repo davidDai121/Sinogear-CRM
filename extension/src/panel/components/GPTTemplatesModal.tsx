@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
 import { decodeGptTemplateDescription, encodeGptTemplateDescription } from '@/lib/gpt-template-knowledge';
+import { validateGptSkill } from '@/lib/gpt-skill';
 
 type GptTemplateRow = Database['public']['Tables']['gpt_templates']['Row'];
 
@@ -30,6 +31,7 @@ function TemplateDescription({ template }: { template: GptTemplateRow }) {
   return (
     <>
       {metadata.value?.description && <div className="sgc-muted">{metadata.value.description}</div>}
+      {metadata.value?.skill && <div className="sgc-muted">ChatGPT 技能 · {metadata.value.skill.name}</div>}
       {metadata.value?.hasEnvelope && (
         <div className="sgc-muted">
           {metadata.value.approvedKnowledge.trim()
@@ -109,7 +111,7 @@ export function GPTTemplatesModal({ orgId, onClose }: Props) {
       <div className="sgc-modal-backdrop" onClick={onClose} />
       <div className="sgc-modal sgc-modal-wide" role="dialog">
         <header className="sgc-modal-header">
-          <strong>Custom GPT 模板（per-user）</strong>
+          <strong>GPT / 技能模板（个人）</strong>
           <button
             className="sgc-drawer-close"
             onClick={onClose}
@@ -253,6 +255,9 @@ function TemplateForm({
     gpt_url: template?.gpt_url ?? '',
     description: metadata.value?.description ?? template?.description ?? '',
     approvedKnowledge: metadata.value?.approvedKnowledge ?? '',
+    useSkill: !!metadata.value?.skill,
+    skillId: metadata.value?.skill?.id ?? '',
+    skillName: metadata.value?.skill?.name ?? '',
     is_default: template?.is_default ?? !hasDefault,
   });
   const [busy, setBusy] = useState(false);
@@ -265,7 +270,7 @@ function TemplateForm({
       setError(metadata.error);
       return;
     }
-    const url = draft.gpt_url.trim();
+    const url = draft.useSkill ? 'https://chatgpt.com/' : draft.gpt_url.trim();
     if (!draft.name.trim() || !url) return;
     // 允许 chatgpt.com（含 /g/ 自定义 GPT 和 /?model= 普通对话）+ 旧 chat.openai.com
     if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url)) {
@@ -278,6 +283,8 @@ function TemplateForm({
         draft.description,
         draft.approvedKnowledge,
         metadata.value?.hasEnvelope,
+        new Date().toISOString(),
+        draft.useSkill ? validateGptSkill({ id: draft.skillId.trim(), name: draft.skillName.trim() }) : undefined,
       );
       let savedTemplateId: string;
       if (template) {
@@ -343,7 +350,25 @@ function TemplateForm({
         />
       </label>
 
-      <label className="sgc-field sgc-field-full">
+      <label className="sgc-field sgc-field-full sgc-checkbox-row">
+        <input type="checkbox" checked={draft.useSkill}
+          onChange={(e) => setDraft({ ...draft, useSkill: e.target.checked })} />
+        <span>使用已安装的 ChatGPT 技能</span>
+      </label>
+
+      {draft.useSkill ? <>
+        <label className="sgc-field sgc-field-full">
+          <span>技能名称（ChatGPT 中显示的名称）</span>
+          <input value={draft.skillName} required placeholder="sino gear r08 miles"
+            onChange={(e) => setDraft({ ...draft, skillName: e.target.value })} />
+        </label>
+        <label className="sgc-field sgc-field-full">
+          <span>技能 ID（技能编辑页链接末尾）</span>
+          <input value={draft.skillId} required pattern="[a-f0-9]{32}"
+            onChange={(e) => setDraft({ ...draft, skillId: e.target.value })} />
+          <span className="sgc-muted">先在当前 ChatGPT 账号安装技能。生成时会核对技能身份；旧 GPT 对话保留，新技能从新会话开始。</span>
+        </label>
+      </> : <label className="sgc-field sgc-field-full">
         <span>Custom GPT URL</span>
         <input
           value={draft.gpt_url}
@@ -351,7 +376,7 @@ function TemplateForm({
           placeholder="https://chatgpt.com/g/g-xxxxx-name"
           required
         />
-      </label>
+      </label>}
 
       <label className="sgc-field sgc-field-full">
         <span>说明（可选）</span>
@@ -403,7 +428,8 @@ function TemplateForm({
         <button
           type="submit"
           className="sgc-btn-primary"
-          disabled={busy || !!metadata.error || !draft.name.trim() || !draft.gpt_url.trim()}
+          disabled={busy || !!metadata.error || !draft.name.trim()
+            || (draft.useSkill ? !draft.skillId.trim() || !draft.skillName.trim() : !draft.gpt_url.trim())}
         >
           {busy ? '保存中…' : template ? '保存' : '创建'}
         </button>

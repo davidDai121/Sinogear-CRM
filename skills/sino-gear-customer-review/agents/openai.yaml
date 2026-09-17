@@ -1,0 +1,4 @@
+interface:
+  display_name: "客户需求判断"
+  short_description: "结合真实采购行为和销售补充判断需求卡点、投入价值及下一步"
+  default_prompt: "请用 $sino-gear-customer-review 处理当前客户需求，复用已确认信息并保存结果。"

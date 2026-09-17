@@ -1,0 +1,4 @@
+interface:
+  display_name: "客户跟进推进"
+  short_description: "根据真实承诺、等待条件和人工安排推进客户，避免重复催办"
+  default_prompt: "请用 $sino-gear-follow-up 处理当前客户需求，复用已确认信息并保存结果。"
