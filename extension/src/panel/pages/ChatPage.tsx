@@ -16,8 +16,8 @@ const SIDE_PANEL_COLLAPSED_KEY = 'sgc:side-panel-collapsed';
 
 export function ChatPage({ orgId }: Props) {
   const chat = useCurrentChat();
-  const crm = useCrmData(orgId);
   const { scope, myContactIds } = useScope();
+  const crm = useCrmData(orgId, myContactIds);
   const [filtered, setFiltered] = useState<CrmContact[] | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
@@ -197,6 +197,7 @@ export function ChatPage({ orgId }: Props) {
           onClose={() => setClearSignal((n) => n + 1)}
           onAction={crm.refresh}
           onSetPinned={crm.setPinned}
+          onSetLeadStatus={crm.setLeadStatus}
         />
       )}
 

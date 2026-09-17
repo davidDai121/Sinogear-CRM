@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { uploadToCloudinary, thumbnailUrl } from '@/lib/cloudinary';
 import type { Database, VehicleMediaType } from '@/lib/database.types';
+import {
+  displayVehicleMediaCaption,
+  groupVehicleMedia,
+  isCertificationTemplate,
+  updatedVehicleMediaCaption,
+} from '@/lib/vehicle-media-groups';
 import { CloudinaryImg } from './CloudinaryImg';
 
 type MediaRow = Database['public']['Tables']['vehicle_media']['Row'];
@@ -105,48 +111,61 @@ export function VehicleMediaManager({ vehicleId }: Props) {
   };
 
   const updateCaption = async (id: string, caption: string) => {
-    const trimmed = caption.trim() || null;
+    const media = items.find((m) => m.id === id);
+    if (!media) return;
+    const savedCaption = updatedVehicleMediaCaption(media, caption);
     const { error } = await supabase
       .from('vehicle_media')
-      .update({ caption: trimmed })
+      .update({ caption: savedCaption })
       .eq('id', id);
     if (error) {
       setError(error.message);
       return;
     }
     setItems((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, caption: trimmed } : m)),
+      prev.map((m) => (m.id === id ? { ...m, caption: savedCaption } : m)),
     );
   };
 
   const uploadingKeys = Object.keys(uploadingPct);
+  const grouped = groupVehicleMedia(items);
 
   return (
     <div className="sgc-vehicle-media">
       <div className="sgc-section-head">
         <strong>媒体资料</strong>
-        <span className="sgc-muted">图片 / 视频 / 配置表 — 存储在 Cloudinary</span>
+        <span className="sgc-muted">图片 / 视频 / 配置表 / 认证模板（参考） — 存储在 Cloudinary</span>
       </div>
 
       {loading ? (
         <div className="sgc-muted">加载中…</div>
       ) : (
-        SECTIONS.map(({ type, label, accept, hint }) => {
-          const list = items.filter((m) => m.media_type === type);
-          return (
+        <>
+          {SECTIONS.map(({ type, label, accept, hint }) => (
             <MediaSection
               key={type}
               type={type}
               label={label}
               accept={accept}
               hint={hint}
-              items={list}
+              items={grouped[type]}
               onUpload={(files) => handleFiles(type, files)}
               onDelete={handleDelete}
               onCaptionChange={updateCaption}
             />
-          );
-        })
+          ))}
+          {grouped.certificationTemplates.length > 0 && (
+            <MediaSection
+              type="spec"
+              label="认证模板（参考）"
+              accept="application/pdf"
+              hint="办证参考样本，请按文件标注的车型和用途查看。"
+              items={grouped.certificationTemplates}
+              onDelete={handleDelete}
+              onCaptionChange={updateCaption}
+            />
+          )}
+        </>
       )}
 
       {uploadingKeys.length > 0 && (
@@ -169,7 +188,7 @@ interface SectionProps {
   accept: string;
   hint: string;
   items: MediaRow[];
-  onUpload: (files: FileList) => void;
+  onUpload?: (files: FileList) => void;
   onDelete: (id: string) => void;
   onCaptionChange: (id: string, caption: string) => void;
 }
@@ -195,25 +214,31 @@ function MediaSection({
             <span className="sgc-muted"> · {items.length}</span>
           )}
         </strong>
-        <button
-          type="button"
-          className="sgc-btn-link"
-          onClick={() => inputRef.current?.click()}
-        >
-          + 上传
-        </button>
-        <input
-          ref={inputRef}
-          type="file"
-          accept={accept}
-          multiple
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            onUpload(e.target.files!);
-            e.target.value = '';
-          }}
-        />
+        {onUpload && (
+          <>
+            <button
+              type="button"
+              className="sgc-btn-link"
+              onClick={() => inputRef.current?.click()}
+            >
+              + 上传
+            </button>
+            <input
+              ref={inputRef}
+              type="file"
+              accept={accept}
+              multiple
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                onUpload(e.target.files!);
+                e.target.value = '';
+              }}
+            />
+          </>
+        )}
       </div>
+
+      {!onUpload && items.length > 0 && <div className="sgc-muted sgc-media-empty">{hint}</div>}
 
       {items.length === 0 ? (
         <div className="sgc-muted sgc-media-empty">{hint}</div>
@@ -240,7 +265,7 @@ interface ThumbProps {
 }
 
 function MediaThumb({ media, onDelete, onCaptionChange }: ThumbProps) {
-  const [caption, setCaption] = useState(media.caption ?? '');
+  const [caption, setCaption] = useState(displayVehicleMediaCaption(media));
 
   const isImage = media.media_type === 'image';
   const isVideo = media.media_type === 'video';
@@ -253,7 +278,7 @@ function MediaThumb({ media, onDelete, onCaptionChange }: ThumbProps) {
         {showsThumb ? (
           <CloudinaryImg
             src={thumbnailUrl(media.url)}
-            alt={media.caption ?? ''}
+            alt={displayVehicleMediaCaption(media)}
             loading="lazy"
           />
         ) : (
@@ -266,13 +291,18 @@ function MediaThumb({ media, onDelete, onCaptionChange }: ThumbProps) {
         )}
         {isVideo && <span className="sgc-media-play">▶</span>}
       </a>
+      {isCertificationTemplate(media) && media.file_name && (
+        <span className="sgc-muted" style={{ padding: 4, fontSize: 11, overflowWrap: 'anywhere' }}>
+          {media.file_name}
+        </span>
+      )}
       <input
         className="sgc-media-caption"
         placeholder="备注"
         value={caption}
         onChange={(e) => setCaption(e.target.value)}
         onBlur={() => {
-          if ((media.caption ?? '') !== caption) onCaptionChange(caption);
+          if (displayVehicleMediaCaption(media) !== caption) onCaptionChange(caption);
         }}
       />
       <button

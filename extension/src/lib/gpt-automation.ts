@@ -1,3 +1,5 @@
+import { readGptResponseSnapshot } from './gpt-response-dom';
+
 /**
  * chatgpt.com 网页自动化（service worker 端）
  *
@@ -816,71 +818,9 @@ async function waitForResponse(
   let sawGenerating = false;
 
   while (Date.now() - start < timeoutMs) {
-    const state = await execute<{
-      generating: boolean;
-      hasCopyBtn: boolean;
-      content: string;
-    }>(
+    const state = await execute(
       tabId,
-      (prevId: string | null) => {
-        const stopBtn = document.querySelector(
-          'button[data-testid="stop-button"], button[aria-label*="Stop streaming" i], button[aria-label*="Stop generating" i], button[aria-label*="Stop response" i], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
-        );
-        // 在最后一条 assistant 消息附近找 copy 按钮（出现 = 该消息写完）
-        const copyBtn = document.querySelector(
-          'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy" i], button[aria-label*="复制" i]',
-        );
-
-        // 锚点没变 = 还没有新 assistant turn，content 一律留空——
-        // 此刻最后一条是上一轮的旧响应，绝不能读
-        const els = document.querySelectorAll('[data-message-author-role="assistant"]');
-        let curId: string | null = null;
-        if (els.length > 0) {
-          curId =
-            els[els.length - 1].getAttribute('data-message-id') ?? `count:${els.length}`;
-        } else {
-          const prose = document.querySelectorAll('.markdown.prose, div.prose').length;
-          curId = prose > 0 ? `prose:${prose}` : null;
-        }
-        if (curId === null || curId === prevId) {
-          return { generating: !!stopBtn, hasCopyBtn: !!copyBtn, content: '' };
-        }
-
-        // 提取最后一条 assistant 消息文本，跳过 thinking/reasoning 折叠面板
-        const turnSelectors = [
-          '[data-message-author-role="assistant"]',
-          '[data-testid^="conversation-turn-"]',
-          '.markdown.prose',
-          'div.prose',
-        ];
-        let content = '';
-        for (const sel of turnSelectors) {
-          const els = Array.from(
-            document.querySelectorAll(sel),
-          ) as HTMLElement[];
-          if (els.length === 0) continue;
-          const last = els[els.length - 1];
-
-          // 克隆 + 移除 thinking 区块和按钮工具栏，只保留正文
-          const clone = last.cloneNode(true) as HTMLElement;
-          clone
-            .querySelectorAll(
-              '[data-testid*="thinking" i], [aria-label*="Thinking" i], [aria-label*="Reasoning" i], button, [role="toolbar"]',
-            )
-            .forEach((el) => el.remove());
-          const t = (clone.innerText ?? clone.textContent ?? '').trim();
-          if (t) {
-            content = t;
-            break;
-          }
-        }
-
-        return {
-          generating: !!stopBtn,
-          hasCopyBtn: !!copyBtn,
-          content,
-        };
-      },
+      readGptResponseSnapshot,
       [baselineId],
     );
 
@@ -896,54 +836,9 @@ async function waitForResponse(
       // sleep 4s（之前 2.5s）：给 Thinking→Reply 的过渡期足够时间让 Stop
       // 按钮重新出现，避开把过渡期当完成的 race
       await sleep(4000);
-      const final = await execute<{ generating: boolean; content: string }>(
+      const final = await execute(
         tabId,
-        (prevId: string | null) => {
-          const stopBtn = document.querySelector(
-            'button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
-          );
-          const roleEls = document.querySelectorAll(
-            '[data-message-author-role="assistant"]',
-          );
-          let curId: string | null = null;
-          if (roleEls.length > 0) {
-            curId =
-              roleEls[roleEls.length - 1].getAttribute('data-message-id') ??
-              `count:${roleEls.length}`;
-          } else {
-            const prose = document.querySelectorAll('.markdown.prose, div.prose').length;
-            curId = prose > 0 ? `prose:${prose}` : null;
-          }
-          if (curId === null || curId === prevId) {
-            return { generating: !!stopBtn, content: '' };
-          }
-          const turnSelectors = [
-            '[data-message-author-role="assistant"]',
-            '[data-testid^="conversation-turn-"]',
-            '.markdown.prose',
-            'div.prose',
-          ];
-          let content = '';
-          for (const sel of turnSelectors) {
-            const els = Array.from(
-              document.querySelectorAll(sel),
-            ) as HTMLElement[];
-            if (els.length === 0) continue;
-            const last = els[els.length - 1];
-            const clone = last.cloneNode(true) as HTMLElement;
-            clone
-              .querySelectorAll(
-                '[data-testid*="thinking" i], [aria-label*="Thinking" i], [aria-label*="Reasoning" i], button, [role="toolbar"]',
-              )
-              .forEach((el) => el.remove());
-            const t = (clone.innerText ?? clone.textContent ?? '').trim();
-            if (t) {
-              content = t;
-              break;
-            }
-          }
-          return { generating: !!stopBtn, content };
-        },
+        readGptResponseSnapshot,
         [baselineId],
       );
       if (!final.generating && final.content.length >= state.content.length) {

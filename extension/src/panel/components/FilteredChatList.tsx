@@ -7,6 +7,7 @@ import { useScope } from '../contexts/ScopeContext';
 import { useReplyProgress } from '../hooks/useReplyProgress';
 import { clearReplyProgress, isSentAfter } from '@/lib/reply-progress';
 import { shortNameOf } from '../hooks/useOrgMembers';
+import { isUncontactedAdLead, LEAD_HANDLED_TAG, LEAD_NO_WHATSAPP_TAG } from '@/lib/ad-lead-status';
 
 interface Props {
   contacts: CrmContact[];
@@ -16,6 +17,7 @@ interface Props {
   onAction: () => void;
   /** 乐观置顶/取消置顶（useCrmData.setPinned） */
   onSetPinned: (contactId: string, pinned: boolean) => Promise<void>;
+  onSetLeadStatus: (contactId: string, tag: string | null) => Promise<void>;
 }
 
 function relativeTime(ts: number): string {
@@ -42,6 +44,7 @@ export function FilteredChatList({
   onClose,
   onAction,
   onSetPinned,
+  onSetLeadStatus,
 }: Props) {
   const { handlersByContact, membersById, myUserId } = useScope();
   const replyProgress = useReplyProgress();
@@ -116,21 +119,11 @@ export function FilteredChatList({
       // 整个重新加载（实测约 14 秒），号码没注册还会弹错误框。
       // 这批人有 327 个，挨个点一遍等于反复重载几百次，不能用。
       // 改成搜索优先；搜不到就问一句，确认了才走 deep link。
-      const noChatLead = c.isAdLead && !c.chat;
+      // 2026-09-09：不只广告线索——"我主理但本机 WA 没会话"的客户现在也会进
+      // 列表（useCrmData 第 3 路），同样搜不到，同样直接问。
+      const noChatLead = !c.chat;
 
-      // ⚠️ 2026-08-23：这种线索**根本不要去搜**，直接问。
-      // 「广告线索·未联系」桶的判定就是 isUncontactedAdLead = isAdLead && !chat
-      // （filters.ts），也就是说 WA 缓存里压根没有这个会话 —— 这一搜必然搜不到，
-      // 但代价一样不少：
-      //   - 号码被打进 WA 搜索框 → WhatsApp Web 拿它全库搜一遍（9,000+ 会话）
-      //   - 列表重排触发 observeCurrentChat（监听整个 document.body 的
-      //     childList+subtree）→ 每帧一次 readCurrentChat()，这段窗口里最多 ~340 次
-      //   - readCurrentChat 缓存未命中还会触发 refreshChatNameCache() 全量读 WA IDB
-      //   - jumpToChat 搜不到要走满 80+600+20×150+10×200 = 5,680ms 才 return false
-      // boss 实测反馈"左边刷新特别特别慢"。这批有 141 个，挨个点一遍 = 141 次全库
-      // 搜索 + 13 分钟纯等待，全是白烧。
-      // 下面那个确认框的文案本来就是"这个客户还没有 WhatsApp 会话"，当即弹出即可，
-      // 真要打开就点「仍然打开」走 forceDeepLink（deep link 能创建会话，搜索不能）。
+      // 无本机匹配时先展示选择；并不能据此断定客户从未联系或号码未注册。
       if (noChatLead && !forceDeepLink) {
         setConfirmOpen(c.phone);
         return;
@@ -216,6 +209,22 @@ export function FilteredChatList({
     }
   };
 
+  const setLeadStatus = async (c: CrmContact, tag: string | null) => {
+    if (!c.contact) return;
+    cancelPendingGo();
+    setMenu(null);
+    setBusyId(c.contact.id);
+    setError(null);
+    try {
+      await onSetLeadStatus(c.contact.id, tag);
+      setConfirmOpen(null);
+    } catch (err) {
+      setError(stringifyError(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div className="sgc-filtered-list">
       <div className="sgc-filtered-list-header">
@@ -227,11 +236,11 @@ export function FilteredChatList({
       {error && <div className="sgc-filtered-list-error">{error}</div>}
       {confirmOpen && (
         <div className="sgc-sales-signal sgc-sales-signal-warning" style={{ margin: 8 }}>
-          <strong>这个客户还没有 WhatsApp 会话</strong>
+          <strong>本机暂未匹配到这个客户的 WhatsApp 会话</strong>
           <span style={{ fontSize: 12 }}>
-            他填过广告表单但没点「Chat on WhatsApp」。强行打开会让 WhatsApp Web
+            可能是会话未同步、号码映射未匹配，或客户尚未发起聊天。强行打开会让 WhatsApp Web
             整页重载（约 14 秒），号码没注册的话还会报错。
-            建议直接用客户卡上的「💬 发起首次联系」——那里会带上表单作答起草第一条消息。
+            广告线索建议直接用客户卡上的「💬 发起首次联系」——那里会带上表单作答起草第一条消息。
           </span>
           <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
             <button
@@ -404,6 +413,20 @@ export function FilteredChatList({
                   </button>
                 </div>
               )}
+              {isUncontactedAdLead(c) && (
+                <div className="sgc-filtered-row-actions">
+                  <button className="sgc-row-action" disabled={isBusy}
+                    title="移出未联系列表；资料保留，可在所有客户中右键恢复"
+                    onClick={(e) => { e.stopPropagation(); void setLeadStatus(c, LEAD_HANDLED_TAG); }}>
+                    ✓ 已处理
+                  </button>
+                  <button className="sgc-row-action sgc-row-action-danger" disabled={isBusy}
+                    title="确认号码无法使用 WhatsApp 后手动标记；移出未联系列表，可恢复"
+                    onClick={(e) => { e.stopPropagation(); void setLeadStatus(c, LEAD_NO_WHATSAPP_TAG); }}>
+                    无 WhatsApp
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}
@@ -421,6 +444,12 @@ export function FilteredChatList({
           >
             {menu.contact.pinned ? '📌 取消置顶' : '📌 置顶客户'}
           </button>
+          {menu.contact.tags.some((tag) => tag === LEAD_HANDLED_TAG || tag === LEAD_NO_WHATSAPP_TAG) && (
+            <button className="sgc-context-menu-item"
+              onClick={() => void setLeadStatus(menu.contact, null)}>
+              ↩ 撤销线索处理标记
+            </button>
+          )}
         </div>
       )}
     </div>

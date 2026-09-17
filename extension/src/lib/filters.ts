@@ -1,6 +1,7 @@
 import type { CustomerQuality } from './database.types';
 import type { CrmContact } from '@/panel/hooks/useCrmData';
 import { getBrandOverride } from './brand-overrides';
+import { isUncontactedAdLead } from './ad-lead-status';
 
 export type TodoBucket =
   | 'pinned'   // 用户手动置顶
@@ -164,18 +165,6 @@ export function isFilterEmpty(f: FilterState): boolean {
     f.vehicleModels.size === 0 &&
     f.budgetBuckets.size === 0
   );
-}
-
-/**
- * 广告来的、且从来没在 WhatsApp 说过话的线索。
- *
- * 2026-08-20 实测：8 个 Facebook 即时表单的「感谢页」都配了「Chat on WhatsApp」
- * 按钮，但只有 42% 的客户会去点。剩下 58% 填完表就走了——资料在 Meta 手里，
- * 你们这边一条消息都没有。这个桶就是那批人。
- * 他们一旦回消息（有了 chat），自动从桶里消失，进正常的「我该回」流程。
- */
-function isUncontactedAdLead(c: CrmContact): boolean {
-  return c.isAdLead && !c.chat;
 }
 
 function matchTodoBucket(c: CrmContact, bucket: TodoBucket): boolean {

@@ -13,6 +13,7 @@ import type { ChatMessage } from '@/content/whatsapp-messages';
 import type { Database } from './database.types';
 import { attributeOutboundMessage } from './ai-reply-attribution';
 import { markAiReplyFilled } from './ai-reply-log';
+import { MESSAGES_SYNCED_EVENT } from './ad-lead-status';
 
 type MessageRow = Database['public']['Tables']['messages']['Row'];
 
@@ -68,6 +69,9 @@ export async function syncMessages(
     });
 
   if (error) return { inserted: 0, error: error.message };
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(MESSAGES_SYNCED_EVENT, { detail: { contactId } }));
+  }
 
   // upsert 成功后，对归因到的 ai_reply_log 标 was_sent —— fire and forget
   for (const row of rows) {

@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
+import { decodeGptTemplateDescription, encodeGptTemplateDescription } from '@/lib/gpt-template-knowledge';
 
 type GptTemplateRow = Database['public']['Tables']['gpt_templates']['Row'];
 
@@ -14,6 +15,32 @@ type EditingState =
   | { mode: 'list' }
   | { mode: 'new' }
   | { mode: 'edit'; template: GptTemplateRow };
+
+function readMetadataForUi(description: string | null) {
+  try {
+    return { value: decodeGptTemplateDescription(description), error: null };
+  } catch (error) {
+    return { value: null, error: stringifyError(error) };
+  }
+}
+
+function TemplateDescription({ template }: { template: GptTemplateRow }) {
+  const metadata = readMetadataForUi(template.description);
+  if (metadata.error) return <div className="sgc-error">{metadata.error}</div>;
+  return (
+    <>
+      {metadata.value?.description && <div className="sgc-muted">{metadata.value.description}</div>}
+      {metadata.value?.hasEnvelope && (
+        <div className="sgc-muted">
+          {metadata.value.approvedKnowledge.trim()
+            ? `已确认业务知识 · ${metadata.value.approvedKnowledge.trim().length} 字`
+            : '已清空共享业务知识'}
+          {metadata.value.updatedAt && ` · 保存于 ${new Date(metadata.value.updatedAt).toLocaleString()}`}
+        </div>
+      )}
+    </>
+  );
+}
 
 /**
  * Custom GPT 模板管理（mirror of GemTemplatesModal）。per-user：
@@ -170,9 +197,7 @@ export function GPTTemplatesModal({ orgId, onClose }: Props) {
                         {t.gpt_url}
                       </a>
                     </div>
-                    {t.description && (
-                      <div className="sgc-muted">{t.description}</div>
-                    )}
+                    <TemplateDescription template={t} />
                   </div>
                 ))}
               </div>
@@ -222,10 +247,12 @@ function TemplateForm({
   onCancel: () => void;
   onSaved: () => Promise<void>;
 }) {
+  const [metadata] = useState(() => readMetadataForUi(template?.description ?? null));
   const [draft, setDraft] = useState({
     name: template?.name ?? '',
     gpt_url: template?.gpt_url ?? '',
-    description: template?.description ?? '',
+    description: metadata.value?.description ?? template?.description ?? '',
+    approvedKnowledge: metadata.value?.approvedKnowledge ?? '',
     is_default: template?.is_default ?? !hasDefault,
   });
   const [busy, setBusy] = useState(false);
@@ -234,6 +261,10 @@ function TemplateForm({
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (metadata.error) {
+      setError(metadata.error);
+      return;
+    }
     const url = draft.gpt_url.trim();
     if (!draft.name.trim() || !url) return;
     // 允许 chatgpt.com（含 /g/ 自定义 GPT 和 /?model= 普通对话）+ 旧 chat.openai.com
@@ -243,36 +274,53 @@ function TemplateForm({
     }
     setBusy(true);
     try {
-      // If marking this as default, clear other defaults (per-user RLS 限定到自己的行)
-      if (draft.is_default) {
-        await supabase
-          .from('gpt_templates')
-          .update({ is_default: false })
-          .eq('org_id', orgId)
-          .neq('id', template?.id ?? '00000000-0000-0000-0000-000000000000');
-      }
-
+      const description = encodeGptTemplateDescription(
+        draft.description,
+        draft.approvedKnowledge,
+        metadata.value?.hasEnvelope,
+      );
+      let savedTemplateId: string;
       if (template) {
-        const { error } = await supabase
+        const { data, error } = await supabase
           .from('gpt_templates')
           .update({
             name: draft.name.trim(),
             gpt_url: url,
-            description: draft.description.trim() || null,
+            description,
             is_default: draft.is_default,
           })
-          .eq('id', template.id);
+          .eq('id', template.id)
+          .eq('org_id', orgId)
+          .eq('updated_at', template.updated_at)
+          .select('id')
+          .maybeSingle();
         if (error) throw new Error(error.message);
+        if (!data) throw new Error('模板已在其他窗口更新，请重新打开后保存。');
+        savedTemplateId = data.id;
       } else {
         // created_by 由 trigger 自动填 auth.uid()，客户端不传
-        const { error } = await supabase.from('gpt_templates').insert({
-          org_id: orgId,
-          name: draft.name.trim(),
-          gpt_url: url,
-          description: draft.description.trim() || null,
-          is_default: draft.is_default,
-        });
+        const { data, error } = await supabase.from('gpt_templates')
+          .insert({
+            org_id: orgId,
+            name: draft.name.trim(),
+            gpt_url: url,
+            description,
+            is_default: draft.is_default,
+          })
+          .select('id')
+          .single();
         if (error) throw new Error(error.message);
+        savedTemplateId = data.id;
+      }
+
+      // 先通过本模板的并发检查，再变更其他默认项。默认选项没变时不写无关模板。
+      if (draft.is_default && !template?.is_default) {
+        const { error: clearErr } = await supabase
+          .from('gpt_templates')
+          .update({ is_default: false })
+          .eq('org_id', orgId)
+          .neq('id', savedTemplateId);
+        if (clearErr) throw new Error(`模板内容已保存，但更新默认模板失败：${clearErr.message}`);
       }
       await onSaved();
     } catch (err) {
@@ -310,11 +358,29 @@ function TemplateForm({
         <textarea
           rows={2}
           value={draft.description}
+          readOnly={!!metadata.error}
           onChange={(e) =>
             setDraft({ ...draft, description: e.target.value })
           }
           placeholder="这个 Custom GPT 用来做什么？例如：客户分析 + 回复建议"
         />
+      </label>
+
+      <label className="sgc-field sgc-field-full">
+        <span>已确认业务知识</span>
+        <textarea
+          rows={10}
+          value={draft.approvedKnowledge}
+          readOnly={!!metadata.error}
+          onChange={(e) => setDraft({ ...draft, approvedKnowledge: e.target.value })}
+          placeholder="填写老板已确认、可供这个模板重复使用的业务答案，并注明适用范围和日期。"
+        />
+        <span className="sgc-muted">
+          该模板的首次回复、续聊和内部讨论都会读取最新内容，用于不同客户。仅针对当前订单的特批请写在客户销售指令中。
+        </span>
+        {metadata.value?.updatedAt && (
+          <span className="sgc-muted">上次保存：{new Date(metadata.value.updatedAt).toLocaleString()}</span>
+        )}
       </label>
 
       <label className="sgc-field sgc-field-full sgc-checkbox-row">
@@ -328,7 +394,7 @@ function TemplateForm({
         <span>设为我的默认（生成回复时优先用这个）</span>
       </label>
 
-      {error && <div className="sgc-error">{error}</div>}
+      {(error || metadata.error) && <div className="sgc-error">{error || metadata.error}</div>}
 
       <div className="sgc-modal-actions sgc-field-full">
         <button type="button" className="sgc-btn-link" onClick={onCancel}>
@@ -337,7 +403,7 @@ function TemplateForm({
         <button
           type="submit"
           className="sgc-btn-primary"
-          disabled={busy || !draft.name.trim() || !draft.gpt_url.trim()}
+          disabled={busy || !!metadata.error || !draft.name.trim() || !draft.gpt_url.trim()}
         >
           {busy ? '保存中…' : template ? '保存' : '创建'}
         </button>

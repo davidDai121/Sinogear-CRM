@@ -26,6 +26,7 @@ import {
 } from '@/lib/pending-reply-store';
 import { countryToRegion } from '@/lib/regions';
 import { stringifyError } from '@/lib/errors';
+import { hasMessageEvidence, LEAD_HANDLED_TAG, LEAD_NO_WHATSAPP_TAG, MESSAGES_SYNCED_EVENT } from '@/lib/ad-lead-status';
 import { syncAutoStages } from '@/lib/stage-sync';
 import { syncWhatsAppLabels } from '@/lib/label-sync';
 import {
@@ -52,8 +53,7 @@ type WhatsAppDataSnapshot = Awaited<ReturnType<typeof readWhatsAppData>>;
  */
 // ⚠️ 别往这里加列。2026-08-21 实测：加一个 fb_lead_id 就是 +172 KB/次，
 // 按每人每天 12 次全量刷新 × 3 人 = +182 MB/月，占免费额度 5 GB 的 3.5%。
-// 需要「哪些客户是广告线索」时单独查一次 id 列表（23 KB/次，25 MB/月），
-// 见 fetchAdLeadIds —— 便宜 7 倍。
+// 广告名单单独查；fetchAdLeadIds 额外只取每条线索的一个消息 id 来判定历史。
 const CONTACT_LIST_COLS =
   'id, phone, group_jid, wa_name, name, country, language, budget_usd, customer_stage, quality, destination_port';
 
@@ -88,6 +88,8 @@ export interface CrmContact {
   /** 来自 Facebook 广告表单（contacts.fb_lead_id 非空）。单独查 id 列表得来，
    *  不把 fb_lead_id 塞进 CONTACT_LIST_COLS——那样每次全量刷新多 172 KB。 */
   isAdLead: boolean;
+  /** 任意已保存消息都算历史，包括 sent_at 为 NULL 的媒体消息。 */
+  hasMessageHistory: boolean;
   /**
    * 最后一条**出站**消息时间（unix 秒，messages 表 + WA IDB 两路合并）。
    * 给回复进度用：`isSentAfter(progress, lastOutboundT)` 判断"生成完之后到底
@@ -108,6 +110,7 @@ export interface CrmData {
    * 这样右键置顶后 UI 不用等几秒重拉所有 contacts。
    */
   setPinned: (contactId: string, pinned: boolean) => Promise<void>;
+  setLeadStatus: (contactId: string, tag: string | null) => Promise<void>;
   /** 车型兴趣是否已加载。false 时「🚗 车型」维度为空是"还没拉"，不是"没数据" */
   vehicleLoaded: boolean;
   /** 按需拉车型兴趣 —— 它不在初次加载里，展开「🚗 车型」筛选区时才调 */
@@ -181,6 +184,7 @@ interface DbState {
   pinnedIds: Set<string>;
   /** 带 fb_lead_id 的客户 id —— 单独查，不往 CONTACT_LIST_COLS 里塞列（省 egress） */
   adLeadIds: Set<string>;
+  adLeadHistoryIds: Set<string>;
   loading: boolean;
   error: string | null;
 }
@@ -207,6 +211,7 @@ const EMPTY_DB: DbState = {
   msgDirections: new Map(),
   pinnedIds: new Set(),
   adLeadIds: new Set(),
+  adLeadHistoryIds: new Set(),
   loading: true,
   error: null,
 };
@@ -444,25 +449,30 @@ function fetchAllContactTags(org: string): Promise<ContactTagRow[]> {
 }
 
 /**
- * 只取 id 的广告线索名单（23 KB/次）。
- * 走 contacts 的 (org_id, fb_lead_id) 唯一索引，比给全量查询加一列便宜 7 倍。
+ * 广告线索名单，每人至多取一个消息 id 判定是否联系过。
+ * 不读正文、不依赖消息时间，避免 NULL 时间媒体或 RPC 超时导致老客户误入未联系。
  */
-async function fetchAdLeadIds(org: string): Promise<Set<string>> {
+async function fetchAdLeadIds(org: string): Promise<{ ids: Set<string>; historyIds: Set<string> }> {
   const out = new Set<string>();
+  const historyIds = new Set<string>();
   for (let from = 0; ; from += 1000) {
     const { data, error } = await supabase
       .from('contacts')
-      .select('id')
+      .select('id, messages(id)')
       .eq('org_id', org)
       .not('fb_lead_id', 'is', null)
+      .limit(1, { referencedTable: 'messages' })
       .order('id')
       .range(from, from + 999);
-    if (error) return out;
-    const rows = data ?? [];
-    rows.forEach((r) => out.add(r.id));
+    if (error) throw error;
+    const rows = (data ?? []) as unknown as Array<{ id: string; messages: { id: string }[] }>;
+    rows.forEach((r) => {
+      out.add(r.id);
+      if (r.messages.length > 0) historyIds.add(r.id);
+    });
     if (rows.length < 1000) break;
   }
-  return out;
+  return { ids: out, historyIds };
 }
 
 async function fetchPinnedIds(org: string): Promise<Set<string>> {
@@ -579,7 +589,16 @@ function applyTagChange(
   return { ...prev, tagsByContactId: next };
 }
 
-export function useCrmData(orgId: string | null): CrmData {
+/**
+ * @param myContactIds 当前登录用户主理（contact_handlers）的客户 id 集合。
+ *   传了以后这些客户即使在本机 WhatsApp 里没有会话也会进聊天页列表
+ *   （第 3 路补充）。背景：2026-09-09 新业务员 Sophia 接手 boss 名下 265 个
+ *   客户，她的 WA 是新号一个会话都没有，聊天页只显示其中 43 个广告线索。
+ */
+export function useCrmData(
+  orgId: string | null,
+  myContactIds?: Set<string>,
+): CrmData {
   const [dbState, setDbState] = useState<DbState>(EMPTY_DB);
   const [waState, setWaState] = useState<WaPolledState>(EMPTY_WA);
   /** 触发 DB 重新全量拉取（manual refresh / 30min 兜底 / visibilitychange） */
@@ -662,7 +681,8 @@ export function useCrmData(orgId: string | null): CrmData {
           tagsByContactId: indexTagsByContact(tags),
           msgDirections,
           pinnedIds,
-          adLeadIds,
+          adLeadIds: adLeadIds.ids,
+          adLeadHistoryIds: new Set([...prev.adLeadHistoryIds, ...adLeadIds.historyIds]),
           loading: false,
           error: null,
         }));
@@ -693,14 +713,35 @@ export function useCrmData(orgId: string | null): CrmData {
     let cancelled = false;
     if (msgDirNonce === 0) return; // 初次由 Effect 1 一并拉了
     void (async () => {
-      const msgDirections = await fetchMessageDirections(org);
-      if (cancelled) return;
-      setDbState((s) => ({ ...s, msgDirections }));
+      try {
+        const [msgDirections, leads] = await Promise.all([
+          fetchMessageDirections(org), fetchAdLeadIds(org),
+        ]);
+        if (cancelled) return;
+        setDbState((s) => ({ ...s, msgDirections, adLeadIds: leads.ids,
+          adLeadHistoryIds: new Set([...s.adLeadHistoryIds, ...leads.historyIds]) }));
+      } catch (err) {
+        console.warn('[ad-lead-history]', stringifyError(err));
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, [orgId, msgDirNonce]);
+
+  // 成功保存消息后立即退出未联系；点击聊天 / 填草稿 / 失败的保存不会触发。
+  useEffect(() => {
+    const onSynced = (event: Event) => {
+      const id = (event as CustomEvent<{ contactId: string }>).detail?.contactId;
+      if (!id) return;
+      setDbState((s) => {
+        if (!s.contactsById.has(id) || s.adLeadHistoryIds.has(id)) return s;
+        return { ...s, adLeadHistoryIds: new Set([...s.adLeadHistoryIds, id]) };
+      });
+    };
+    window.addEventListener(MESSAGES_SYNCED_EVENT, onSynced);
+    return () => window.removeEventListener(MESSAGES_SYNCED_EVENT, onSynced);
+  }, [orgId]);
 
   // ----- Effect 3: Realtime 订阅（增量更新本地 state） -----
   useEffect(() => {
@@ -923,6 +964,7 @@ export function useCrmData(orgId: string | null): CrmData {
       msgDirections,
       pinnedIds,
       adLeadIds,
+      adLeadHistoryIds,
     } = dbState;
     const {
       chats,
@@ -990,6 +1032,7 @@ export function useCrmData(orgId: string | null): CrmData {
           classification,
           pinned: pinnedIds.has(c.id),
           isAdLead: adLeadIds.has(c.id),
+          hasMessageHistory: adLeadHistoryIds.has(c.id) || hasMessageEvidence(dir),
           lastOutboundT: dir.lastOutboundT,
         };
       });
@@ -1013,6 +1056,7 @@ export function useCrmData(orgId: string | null): CrmData {
         region: 'other',
         pinned: false,
         isAdLead: false,
+        hasMessageHistory: false,
         lastOutboundT: mergeDirection(undefined, waActivity.get(chat.id))
           .lastOutboundT,
         classification: classifyChat(
@@ -1037,7 +1081,10 @@ export function useCrmData(orgId: string | null): CrmData {
       // 表单、从没在 WhatsApp 说过话的客户。他们没有 chat，原来这个循环只放
       // 置顶的进来，导致他们在聊天 tab 里**完全不显示**——塞进库了却没人看得见。
       const isAdLead = adLeadIds.has(c.id);
-      if (!pinnedIds.has(c.id) && !isAdLead) continue;
+      // 2026-09-09：再加一类——"我主理的客户"。接同事的单 / 换 WA 号登录时，
+      // 本机 WA 缓存里没有会话，但客户在我名下，聊天页不能看不见。
+      const isMine = myContactIds?.has(c.id) ?? false;
+      if (!pinnedIds.has(c.id) && !isAdLead && !isMine) continue;
       if (alreadyMergedIds.has(c.id)) continue;
       // 这条 push 没 chat → classification 也置 null（matchTodoBucket /
       // todoCounts 对 'pinned' / 'ad_lead' 的判定都在 classification 之前，不影响）
@@ -1054,6 +1101,7 @@ export function useCrmData(orgId: string | null): CrmData {
         region: countryToRegion(c.country),
         pinned: pinnedIds.has(c.id),
         isAdLead,
+        hasMessageHistory: adLeadHistoryIds.has(c.id) || hasMessageEvidence(msgDirections.get(c.id)),
         // 这一路没有 WA chat（导入的 / 群聊 / 广告线索），IDB 那边没活跃度，
         // 只有 messages 表这一路
         lastOutboundT: msgDirections.get(c.id)?.lastOutboundT ?? null,
@@ -1065,7 +1113,7 @@ export function useCrmData(orgId: string | null): CrmData {
       contacts: mergedList,
       labels: labels.filter((l) => l.isActive),
     };
-  }, [dbState, waState]);
+  }, [dbState, waState, myContactIds]);
 
   // ----- 副作用：syncAutoStages throttled 跑 -----
   // 历史踩坑：merged.contacts 每次都是新引用（dbState/waState 任一变就重算），
@@ -1116,6 +1164,30 @@ export function useCrmData(orgId: string | null): CrmData {
     [],
   );
 
+  const setLeadStatus = useCallback(async (contactId: string, tag: string | null) => {
+    if (tag !== null && tag !== LEAD_HANDLED_TAG && tag !== LEAD_NO_WHATSAPP_TAG) {
+      throw new Error('无效的线索处理状态');
+    }
+    // 先等持久化成功，再更新内存；网络失败时客户留在列表，允许重试。
+    const query = tag === null
+      ? supabase.from('contact_tags').delete().eq('contact_id', contactId)
+        .in('tag', [LEAD_HANDLED_TAG, LEAD_NO_WHATSAPP_TAG])
+      : supabase.from('contact_tags').upsert({ contact_id: contactId, tag },
+        { onConflict: 'contact_id,tag', ignoreDuplicates: true });
+    const { error } = await query;
+    if (error) throw error;
+    setDbState((s) => {
+      const tags = new Set(s.tagsByContactId.get(contactId) ?? []);
+      if (tag === null) {
+        tags.delete(LEAD_HANDLED_TAG);
+        tags.delete(LEAD_NO_WHATSAPP_TAG);
+      } else tags.add(tag);
+      const next = new Map(s.tagsByContactId);
+      next.set(contactId, [...tags]);
+      return { ...s, tagsByContactId: next };
+    });
+  }, []);
+
   return {
     contacts: merged.contacts,
     labels: merged.labels,
@@ -1123,6 +1195,7 @@ export function useCrmData(orgId: string | null): CrmData {
     error: dbState.error,
     refresh: () => setRefetchNonce((n) => n + 1),
     setPinned,
+    setLeadStatus,
     /** 车型兴趣是否已加载（没加载时「🚗 车型」维度是空的，不是真的没数据） */
     vehicleLoaded,
     /** 按需拉车型兴趣。展开「🚗 车型」筛选区时调 */

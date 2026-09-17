@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePersistedReplyStatus } from '@/panel/hooks/usePersistedReplyStatus';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
@@ -26,6 +26,8 @@ import { ReplyCard } from './ReplyCard';
 import { ClientRecordCard } from './ClaudeReplySection';
 import { GPTTemplatesModal } from './GPTTemplatesModal';
 import { GeneratedAtBadge } from './GeneratedAtBadge';
+import { loadGptApprovedKnowledge } from '@/lib/gpt-template-knowledge';
+import { resolveGptTemplateRoute, isConversationForGptTemplate } from '@/lib/gpt-template-routing';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
 type GptConvRow = Database['public']['Tables']['gpt_conversations']['Row'];
@@ -54,6 +56,7 @@ type Status =
       mode: Mode;
       source: MessageSource;
       count: number;
+      templateName: string;
     }
   | {
       kind: 'done';
@@ -63,6 +66,8 @@ type Status =
       source: MessageSource;
       count: number;
       logId: string | null;
+      templateId?: string;
+      templateName?: string;
       /** 自动由 usePersistedReplyStatus 注入（done 状态写 chrome.storage 时盖戳） */
       generatedAt?: number;
     }
@@ -81,41 +86,92 @@ type Status =
  *   - generate(): 给客户写下一条回复（三段 Client Record / WhatsApp Reply / Translation & Strategy）
  *   - sendDiscussion(): 跟 GPT 商量这客户怎么办（自由中文回答，不走三段格式）
  */
-export function GPTReplySection({ orgId, contact, needsJump }: Props) {
+export function GPTReplySection(props: Props) {
+  // Keep in-flight work and restored UI state bound to the original customer.
+  return <GPTReplyForContact key={`${props.orgId}:${props.contact.id}`} {...props} />;
+}
+
+function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
   const [templates, setTemplates] = useState<GptTemplateRow[]>([]);
   const [conversations, setConversations] = useState<GptConvRow[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
+  // The keyed customer component prevents a manual choice leaking to another contact.
+  const [manualTemplateId, setManualTemplateId] = useState<string>();
   const [showTemplates, setShowTemplates] = useState(false);
   const [foreground, setForeground] = useState(false);
   const [status, setStatus] = usePersistedReplyStatus<Status>('gpt', contact.id, { kind: 'idle' });
   const [guidance, setGuidance] = useState('');
   const [guidanceLoaded, setGuidanceLoaded] = useState(false);
   const [discuss, setDiscuss] = useState('');
+  const [templatesLoaded, setTemplatesLoaded] = useState(false);
+  const [setupError, setSetupError] = useState('');
+  const [routeContext, setRouteContext] = useState<{
+    messages: ChatMessage[];
+    vehicleInterests: VehicleInterestRow[];
+  } | null>(null);
+  const [routeContextError, setRouteContextError] = useState('');
+  const actionLock = useRef(false);
+  const mounted = useRef(true);
+  const templateRequest = useRef(0);
+  const conversationRequest = useRef(0);
+  const routeContextRequest = useRef(0);
+  // A successful owner-directed result stays valid when its one-shot guidance
+  // is cleared. This exemption is local to this view, never restored from cache.
+  const freshResult = useRef<{ templateId: string; chatUrl: string } | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   // ── 前台开关 ──
   useEffect(() => {
+    let cancelled = false;
     void chrome.storage.local.get('gptForeground').then((s) => {
-      setForeground(Boolean(s.gptForeground));
+      if (!cancelled) setForeground(Boolean(s.gptForeground));
     });
+    return () => { cancelled = true; };
   }, []);
 
   // ── 模板 + 对话拉取 ──
   const refreshTemplates = async () => {
-    const { data } = await supabase
+    const request = ++templateRequest.current;
+    const { data, error } = await supabase
       .from('gpt_templates')
       .select('*')
       .eq('org_id', orgId)
       .order('is_default', { ascending: false })
       .order('created_at', { ascending: true });
+    if (!mounted.current || request !== templateRequest.current) return;
+    setTemplatesLoaded(true);
+    if (error) {
+      setSetupError(`读取 GPT 模板失败：${stringifyError(error)}`);
+      return;
+    }
+    setSetupError('');
     setTemplates(data ?? []);
   };
 
   const refreshConversations = async () => {
-    const { data } = await supabase
+    const request = ++conversationRequest.current;
+    const { data, error } = await supabase
       .from('gpt_conversations')
       .select('*')
       .eq('contact_id', contact.id);
+    if (!mounted.current || request !== conversationRequest.current) return;
+    if (error) {
+      setSetupError(`读取 GPT 会话失败：${stringifyError(error)}`);
+      return;
+    }
     setConversations(data ?? []);
+  };
+
+  const loadVehicleInterests = async () => {
+    const { data, error } = await supabase
+      .from('vehicle_interests')
+      .select('*')
+      .eq('contact_id', contact.id);
+    if (error) throw new Error(`读取车型兴趣失败：${stringifyError(error)}`);
+    return data ?? [];
   };
 
   useEffect(() => {
@@ -128,12 +184,38 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
     setDiscuss('');
   }, [contact.id]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const request = ++routeContextRequest.current;
+    void Promise.all([loadMessages(contact.id, 50), loadVehicleInterests()])
+      .then(([rows, vehicleInterests]) => {
+        if (cancelled || request !== routeContextRequest.current) return;
+        setRouteContext({
+          messages: rows.map((r) => ({
+            id: r.wa_message_id,
+            fromMe: r.direction === 'outbound',
+            text: r.text,
+            timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
+            sender: null,
+          })),
+          vehicleInterests,
+        });
+        setRouteContextError('');
+      })
+      .catch((error) => {
+        if (!cancelled && request === routeContextRequest.current) {
+          setRouteContextError(`模板预匹配失败，生成时将重新核对：${stringifyError(error)}`);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [contact.id]);
+
   // ── 一次性迁移：把老的 chrome.storage.local['gptCustomUrl'] 转成第一个模板 ──
   // 0026 之前用户把 Custom GPT URL 存在 chrome.storage 里。改 DB 模板后，
   // 第一次打开看到自己有老 URL 但没模板 → 自动建一个名叫"我的 Custom GPT"的模板，
   // 然后清掉 chrome.storage 那条。一台机器一次。
   useEffect(() => {
-    if (templates.length > 0) return; // 已经有模板就不动
+    if (!templatesLoaded || setupError || templates.length > 0) return;
     let cancelled = false;
     void chrome.storage.local.get('gptCustomUrl').then(async (s) => {
       const legacy =
@@ -157,7 +239,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [orgId, templates.length]);
+  }, [orgId, templates.length, templatesLoaded, setupError]);
 
   // 自动选默认（or 第一个）模板
   useEffect(() => {
@@ -167,27 +249,55 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
     }
   }, [templates, selectedTemplateId]);
 
-  const selectedTemplate = useMemo(
-    () => templates.find((t) => t.id === selectedTemplateId) ?? null,
-    [templates, selectedTemplateId],
+  const previewRoute = useMemo(
+    () => resolveGptTemplateRoute(templates, selectedTemplateId, {
+      messages: routeContext?.messages ?? [],
+      vehicleInterests: routeContext?.vehicleInterests ?? [],
+      salesGuidance: guidance,
+      manualTemplateId,
+    }),
+    [templates, selectedTemplateId, routeContext, guidance, manualTemplateId],
   );
+  const selectedTemplate = previewRoute.template;
+
+  const updateGuidance = (next: string) => {
+    if (freshResult.current) {
+      // With no old customer topic, a non-model edit keeps the result's route;
+      // an explicit instruction changing models invalidates that local result.
+      const nextRoute = resolveGptTemplateRoute(templates, freshResult.current.templateId, {
+        messages: [],
+        vehicleInterests: [],
+        salesGuidance: next,
+        manualTemplateId,
+      });
+      if (nextRoute.error || nextRoute.template?.id !== freshResult.current.templateId) {
+        freshResult.current = null;
+      }
+    }
+    setGuidance(next);
+  };
 
   const existingConv = useMemo(
     () =>
-      conversations.find((c) => c.template_id === selectedTemplateId) ?? null,
-    [conversations, selectedTemplateId],
+      selectedTemplate
+        ? conversations.find((c) => isConversationForGptTemplate(c, contact.id, selectedTemplate)) ?? null
+        : null,
+    [conversations, selectedTemplate, contact.id],
   );
 
   // ── 销售指令（per-contact 持久化） ──
   const guidanceKey = `gptGuidance:${contact.id}`;
   useEffect(() => {
+    let cancelled = false;
     setGuidanceLoaded(false);
     void chrome.storage.local.get(guidanceKey).then((s) => {
+      if (cancelled) return;
       const saved =
         typeof s[guidanceKey] === 'string' ? (s[guidanceKey] as string) : '';
       setGuidance(saved);
       setGuidanceLoaded(true);
     });
+    return () => { cancelled = true; };
   }, [guidanceKey]);
 
   useEffect(() => {
@@ -284,7 +394,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
   };
 
   const loadGroupMemberNames = async (): Promise<string[] | undefined> => {
-    if (!contact.group_jid || existingConv) return undefined;
+    if (!contact.group_jid) return undefined;
     try {
       const { readWhatsAppData } = await import('@/lib/whatsapp-idb');
       const wa = await readWhatsAppData();
@@ -305,16 +415,64 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
     }
   };
 
+  const loadActionContext = async (discussionQuestion?: string) => {
+    const request = ++routeContextRequest.current;
+    const [loaded, vehicleInterests] = await Promise.all([
+      loadChatMessages(),
+      loadVehicleInterests(),
+    ]);
+    if (mounted.current && request === routeContextRequest.current) {
+      setRouteContext({ messages: loaded.messages, vehicleInterests });
+      setRouteContextError('');
+    }
+    const route = resolveGptTemplateRoute(templates, selectedTemplateId, {
+      messages: loaded.messages,
+      vehicleInterests,
+      salesGuidance: guidance.trim() || undefined,
+      discussionQuestion,
+      manualTemplateId,
+    });
+    if (route.error) throw new Error(route.error);
+    const template = route.template;
+    if (!template) throw new Error('请先选择一个 Custom GPT 模板，或点"管理模板"添加。');
+    const approvedKnowledge = await loadGptApprovedKnowledge(supabase, template.id, orgId);
+    const { data, error } = await supabase
+      .from('gpt_conversations')
+      .select('*')
+      .eq('contact_id', contact.id)
+      .eq('template_id', template.id)
+      .maybeSingle();
+    if (error) throw new Error(`读取 GPT 会话失败：${stringifyError(error)}`);
+    // An old/misbound URL is never used with a different Custom GPT's knowledge.
+    const conversation = data && isConversationForGptTemplate(data, contact.id, template) ? data : null;
+    return { ...loaded, vehicleInterests, template, approvedKnowledge, conversation };
+  };
+
+  const saveConversation = async (template: GptTemplateRow, chatUrl: string) => {
+    const record = { contact_id: contact.id, template_id: template.id, chat_url: chatUrl };
+    if (typeof chatUrl !== 'string' || !isConversationForGptTemplate(record, contact.id, template)) {
+      throw new Error('GPT 返回的会话与本次模板不匹配，未保存此会话。请重新生成。');
+    }
+    const { data, error } = await supabase
+      .from('gpt_conversations')
+      .upsert({ ...record, last_used_at: new Date().toISOString() }, { onConflict: 'contact_id,template_id' })
+      .select('*')
+      .single();
+    if (error) throw new Error(`保存 GPT 会话失败：${stringifyError(error)}`);
+    ++conversationRequest.current;
+    if (mounted.current) {
+      setConversations((current) => [
+        ...current.filter((c) => c.contact_id === contact.id && c.template_id !== template.id),
+        data,
+      ]);
+    }
+  };
+
   // ── 主流程 1：写客户回复 ──
 
   const generate = async () => {
-    if (!selectedTemplate) {
-      setStatus({
-        kind: 'error',
-        message: '请先选择一个 Custom GPT 模板，或点"管理模板"添加。',
-      });
-      return;
-    }
+    if (actionLock.current || busy || backgroundBusy || !templatesLoaded || !guidanceLoaded) return;
+    actionLock.current = true;
     setStatus({ kind: 'reading' });
     // 左栏那一行立刻显示「⏳ 生成中」——切走客户也还在，见 reply-progress
     void setReplyProgress(contact.id, 'generating', 'gpt');
@@ -322,31 +480,23 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
     let promptForLog = '';
     let messageSourceForLog: MessageSource = 'dom';
     let messageCountForLog = 0;
+    let wasFollowUp = false;
     const guidanceForLog = guidance.trim();
     // useCustomGpt 总是 true：模板化后所有调用都走用户自建的 Custom GPT URL，
     // 链接里的 instructions 已含 Miles 角色，不再重发 ROLE_PROMPT
     const useCustomGpt = true;
     try {
-      const { messages, source: messageSource } = await loadChatMessages();
-      // loadChatMessages 已经处理了 DOM merge + 持久化（避免 prompt 只有 1 条最新消息的 bug）
+      const { messages, source: messageSource, vehicleInterests, template, approvedKnowledge, conversation } = await loadActionContext();
+      wasFollowUp = !!conversation;
       const isGroup = !!contact.group_jid;
-      const groupMemberNames = isGroup ? await loadGroupMemberNames() : undefined;
-
-      // 续聊也拉 vehicle_interests —— buildFollowUpMessage 现在带精简客户档案 +
-      // 车型兴趣，让 GPT thread 长后也不会忘 Samuel 是谁、要买啥
-      let vehicleInterests: VehicleInterestRow[] = [];
-      const { data: viData } = await supabase
-        .from('vehicle_interests')
-        .select('*')
-        .eq('contact_id', contact.id);
-      vehicleInterests = viData ?? [];
-
-      const url = existingConv?.chat_url ?? selectedTemplate.gpt_url;
-      const prompt = existingConv
+      const groupMemberNames = isGroup && !conversation ? await loadGroupMemberNames() : undefined;
+      const url = conversation?.chat_url ?? template.gpt_url;
+      const prompt = conversation
         ? buildFollowUpMessage({
             newMessages: messages.slice(-50),
             isGroup,
             salesGuidance: guidance.trim() || undefined,
+            approvedKnowledge,
             contact,
             vehicleInterests,
           })
@@ -356,6 +506,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
             messages,
             groupMemberNames,
             salesGuidance: guidance.trim() || undefined,
+            approvedKnowledge,
             useCustomGpt,
           });
       promptForLog = prompt;
@@ -368,6 +519,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         mode: 'reply',
         source: messageSource,
         count: messages.length,
+        templateName: template.name,
       });
       const response = await chrome.runtime.sendMessage({
         type: 'GPT_RUN',
@@ -384,28 +536,13 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
       }
 
       const newChatUrl: string = response.chatUrl;
-      if (existingConv) {
-        await supabase
-          .from('gpt_conversations')
-          .update({
-            chat_url: newChatUrl,
-            last_used_at: new Date().toISOString(),
-          })
-          .eq('id', existingConv.id);
-      } else {
-        await supabase.from('gpt_conversations').insert({
-          contact_id: contact.id,
-          template_id: selectedTemplate.id,
-          chat_url: newChatUrl,
-        });
-      }
-      await refreshConversations();
+      await saveConversation(template, newChatUrl);
 
       const logId = await logAiReply({
         orgId,
         contactId: contact.id,
         source: 'gpt',
-        mode: existingConv ? 'gpt_followup' : 'gpt_first',
+        mode: conversation ? 'gpt_followup' : 'gpt_first',
         prompt,
         response: response.responseText,
         guidance: guidanceForLog || null,
@@ -417,6 +554,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
 
       void setReplyProgress(contact.id, 'ready', 'gpt');
 
+      freshResult.current = { templateId: template.id, chatUrl: newChatUrl };
       setStatus({
         kind: 'done',
         mode: 'reply',
@@ -425,6 +563,8 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         source: messageSource,
         count: messages.length,
         logId,
+        templateId: template.id,
+        templateName: template.name,
       });
       setGuidance('');
     } catch (err) {
@@ -433,7 +573,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         orgId,
         contactId: contact.id,
         source: 'gpt',
-        mode: existingConv ? 'gpt_followup' : 'gpt_first',
+        mode: wasFollowUp ? 'gpt_followup' : 'gpt_first',
         prompt: promptForLog || '(prompt 未构造完成就出错了)',
         guidance: guidanceForLog || null,
         messageSource: messageSourceForLog,
@@ -448,9 +588,11 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
             '需要先登录 ChatGPT。请打开 https://chatgpt.com 登录后再试（同一个 Chrome profile 即可）。',
         });
       } else {
-        void clearReplyProgress(contact.id);
         setStatus({ kind: 'error', message: msg });
       }
+      void clearReplyProgress(contact.id);
+    } finally {
+      actionLock.current = false;
     }
   };
 
@@ -458,66 +600,47 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
 
   const sendDiscussion = async () => {
     const q = discuss.trim();
-    if (!q) return;
-    if (!selectedTemplate) {
-      setStatus({
-        kind: 'error',
-        message: '请先选择一个 Custom GPT 模板，或点"管理模板"添加。',
-      });
-      return;
-    }
+    if (!q || actionLock.current || busy || backgroundBusy || !templatesLoaded || !guidanceLoaded) return;
+    actionLock.current = true;
     setStatus({ kind: 'reading' });
+    void setReplyProgress(contact.id, 'generating', 'gpt');
     const startedAt = Date.now();
     let promptForLog = '';
     let sourceForLog: MessageSource = 'dom';
     let countForLog = 0;
     const useCustomGpt = true;
     try {
-      const url = existingConv?.chat_url ?? selectedTemplate.gpt_url;
+      const { messages, source, vehicleInterests, template, approvedKnowledge, conversation } = await loadActionContext(q);
+      const url = conversation?.chat_url ?? template.gpt_url;
       let prompt: string;
-      let source: MessageSource = 'dom';
-      let count = 0;
-      if (!existingConv) {
+      const count = messages.length;
+      if (!conversation) {
         // 第一次讨论 — 带客户上下文 + 历史
-        const loaded = await loadChatMessages();
-        source = loaded.source;
-        count = loaded.messages.length;
         const isGroup = !!contact.group_jid;
         const groupMemberNames = isGroup ? await loadGroupMemberNames() : undefined;
-        const { data } = await supabase
-          .from('vehicle_interests')
-          .select('*')
-          .eq('contact_id', contact.id);
-        const vehicleInterests = data ?? [];
-
         prompt = buildDiscussionMessage({
           ctx: {
             contact,
             vehicleInterests,
-            messages: loaded.messages,
+            messages,
             groupMemberNames,
             useCustomGpt,
           },
           question: q,
+          approvedKnowledge,
         });
       } else {
         // 续聊讨论也要补发最近 50 条 — GPT 那边 chat thread 看到的只是
         // 上一次 generate 时的历史快照，之后客户陆续发的新消息（最新预算 /
         // 改车型 / 发图）没人喂给它，必须在本次 prompt 里补上。
         // 同时带精简客户档案，防 thread 长后 GPT 忘客户 anchor。
-        const loaded = await loadChatMessages();
-        source = loaded.source;
-        count = loaded.messages.length;
-        const { data: viData } = await supabase
-          .from('vehicle_interests')
-          .select('*')
-          .eq('contact_id', contact.id);
         prompt = buildDiscussionMessage({
-          newMessages: loaded.messages.slice(-50),
+          newMessages: messages.slice(-50),
           isGroup: !!contact.group_jid,
           question: q,
+          approvedKnowledge,
           contact,
-          vehicleInterests: viData ?? [],
+          vehicleInterests,
         });
       }
       promptForLog = prompt;
@@ -530,6 +653,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         mode: 'discuss',
         source,
         count,
+        templateName: template.name,
       });
       const response = await chrome.runtime.sendMessage({
         type: 'GPT_RUN',
@@ -541,22 +665,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
       if (!response?.ok) throw new Error(response?.error ?? 'GPT 调用失败');
 
       const newChatUrl: string = response.chatUrl;
-      if (existingConv) {
-        await supabase
-          .from('gpt_conversations')
-          .update({
-            chat_url: newChatUrl,
-            last_used_at: new Date().toISOString(),
-          })
-          .eq('id', existingConv.id);
-      } else {
-        await supabase.from('gpt_conversations').insert({
-          contact_id: contact.id,
-          template_id: selectedTemplate.id,
-          chat_url: newChatUrl,
-        });
-      }
-      await refreshConversations();
+      await saveConversation(template, newChatUrl);
 
       const logId = await logAiReply({
         orgId,
@@ -571,8 +680,8 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         chatUrl: newChatUrl,
         durationMs: Date.now() - startedAt,
       });
-
-
+      void setReplyProgress(contact.id, 'ready', 'gpt');
+      freshResult.current = { templateId: template.id, chatUrl: newChatUrl };
       setStatus({
         kind: 'done',
         mode: 'discuss',
@@ -581,6 +690,8 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         source,
         count,
         logId,
+        templateId: template.id,
+        templateName: template.name,
       });
       setDiscuss('');
     } catch (err) {
@@ -605,19 +716,33 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
       } else {
         setStatus({ kind: 'error', message: msg });
       }
+      void clearReplyProgress(contact.id);
+    } finally {
+      actionLock.current = false;
     }
   };
 
   const reset = async () => {
-    if (!existingConv) return;
+    if (!existingConv || !selectedTemplate || actionLock.current || busy || backgroundBusy) return;
     if (!confirm('清除此客户在此 Custom GPT 上的对话？下次将开新对话。')) return;
-    await supabase
-      .from('gpt_conversations')
-      .delete()
-      .eq('id', existingConv.id);
-    await refreshConversations();
-    setStatus({ kind: 'idle' });
-    setDiscuss('');
+    actionLock.current = true;
+    try {
+      const { error } = await supabase
+        .from('gpt_conversations')
+        .delete()
+        .eq('id', existingConv.id)
+        .eq('contact_id', contact.id)
+        .eq('template_id', selectedTemplate.id);
+      if (error) throw new Error(`清除 GPT 会话失败：${stringifyError(error)}`);
+      await refreshConversations();
+      freshResult.current = null;
+      setStatus({ kind: 'idle' });
+      setDiscuss('');
+    } catch (error) {
+      setStatus({ kind: 'error', message: stringifyError(error) });
+    } finally {
+      actionLock.current = false;
+    }
   };
 
   const parsed = useMemo(
@@ -626,6 +751,23 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         ? parseClaudeResponse(status.text)
         : null,
     [status],
+  );
+
+  const isFreshResult = status.kind === 'done'
+    && freshResult.current?.templateId === status.templateId
+    && freshResult.current?.chatUrl === status.chatUrl
+    && templates.some((template) => template.id === status.templateId
+      && isConversationForGptTemplate({
+        contact_id: contact.id,
+        template_id: template.id,
+        chat_url: status.chatUrl,
+      }, contact.id, template));
+  const staleResult = status.kind === 'done' && templatesLoaded && !isFreshResult && (
+    !selectedTemplate || !isConversationForGptTemplate({
+      contact_id: contact.id,
+      template_id: status.templateId ?? selectedTemplate.id,
+      chat_url: status.chatUrl,
+    }, contact.id, selectedTemplate)
   );
 
   const copyToClipboard = async (text: string) => {
@@ -638,6 +780,18 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
 
   const fillReply = async (text: string) => {
     try {
+      if (!templatesLoaded || !guidanceLoaded) {
+        alert('正在核对当前客户与模板，请稍后再填入。');
+        return;
+      }
+      if (!routeContext) {
+        alert('尚未核对当前客户的车型，请重新生成以确认回复模板后再填入。');
+        return;
+      }
+      if (staleResult) {
+        alert('旧模板生成，请使用当前模板重新生成后再填入。');
+        return;
+      }
       const wasDirty = wasReplyDirty(text);
       const cleanText = sanitizeReplyForCustomer(text);
       if (!cleanText) {
@@ -705,6 +859,16 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
 
   const backgroundBusy = bgPhase === 'generating' && !busy;
 
+  const actionUnavailable = busy || backgroundBusy || !templatesLoaded || !guidanceLoaded;
+  const generationUnavailable = actionUnavailable || !selectedTemplate || !!previewRoute.error;
+  const discussionRoute = resolveGptTemplateRoute(templates, selectedTemplateId, {
+    messages: routeContext?.messages ?? [],
+    vehicleInterests: routeContext?.vehicleInterests ?? [],
+    salesGuidance: guidance,
+    discussionQuestion: discuss,
+    manualTemplateId,
+  });
+
 
   return (
     <section className="sgc-drawer-section">
@@ -731,7 +895,38 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         </div>
       </div>
 
-      {templates.length === 0 ? (
+      {setupError && <div className="sgc-error">{setupError}</div>}
+      {routeContextError && <div className="sgc-muted">{routeContextError}</div>}
+      {templatesLoaded && previewRoute.error && (
+        <div className="sgc-error">{previewRoute.error}</div>
+      )}
+      {templatesLoaded && !manualTemplateId && previewRoute.isR08 && selectedTemplate && (
+        <div className="sgc-gem-progress">
+          已自动匹配 R08 专用模板：{selectedTemplate.name} · {previewRoute.reason}
+        </div>
+      )}
+      {manualTemplateId && (
+        <div className="sgc-gem-progress">
+          已手动选择：{selectedTemplate?.name ?? '模板不可用'}
+          {' · '}
+          <button
+            type="button"
+            className="sgc-btn-link"
+            disabled={actionUnavailable}
+            onClick={() => {
+              freshResult.current = null;
+              setManualTemplateId(undefined);
+              setSelectedTemplateId('');
+            }}
+          >
+            恢复自动匹配
+          </button>
+        </div>
+      )}
+
+      {!templatesLoaded ? (
+        <div className="sgc-empty">正在读取 GPT 模板…</div>
+      ) : templates.length === 0 ? (
         <div className="sgc-empty">
           还没有 Custom GPT 模板。
           <button
@@ -753,10 +948,16 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
         <div className="sgc-gem-section">
           <div className="sgc-gem-controls">
             <select
-              value={selectedTemplateId}
-              onChange={(e) => setSelectedTemplateId(e.target.value)}
-              disabled={busy || backgroundBusy}
+              value={selectedTemplate?.id ?? ''}
+              onChange={(e) => {
+                freshResult.current = null;
+                setSelectedTemplateId(e.target.value);
+                setManualTemplateId(e.target.value);
+              }}
+              disabled={actionUnavailable}
+              aria-label="GPT 模板"
             >
+              {!selectedTemplate && <option value="">请选择可用模板</option>}
               {templates.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
@@ -780,7 +981,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
               type="button"
               className="sgc-btn-primary"
               onClick={() => generate()}
-              disabled={busy || backgroundBusy || !selectedTemplateId}
+              disabled={generationUnavailable}
             >
               {busy
                 ? status.kind === 'reading'
@@ -804,17 +1005,17 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
             </div>
             <textarea
               value={guidance}
-              onChange={(e) => setGuidance(e.target.value)}
+              onChange={(e) => updateGuidance(e.target.value)}
               onKeyDown={(e) => {
                 if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                   e.preventDefault();
-                  if (!busy && selectedTemplateId) void generate();
+                  if (!generationUnavailable) void generate();
                 }
               }}
               placeholder="可选 · Cmd/Ctrl+Enter 直接生成
 例：用法语回 / 客气一点 / 强调 1 万定金锁车 / 直接报 35k USD / 别问太多问题"
               rows={3}
-              disabled={busy || backgroundBusy}
+              disabled={actionUnavailable}
             />
           </div>
 
@@ -836,6 +1037,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
                 type="button"
                 className="sgc-btn-link sgc-btn-danger-link"
                 onClick={reset}
+                disabled={actionUnavailable}
                 style={{ marginLeft: 8 }}
               >
                 清除并新建
@@ -857,7 +1059,7 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
                 <>📝 仅按销售指令冷启动 ·{' '}</>
               )}
               正在{status.foreground ? '前台' : '后台'}打开 ChatGPT 并
-              {status.mode === 'discuss' ? '发送讨论' : '生成回复'}…
+              {status.mode === 'discuss' ? '发送讨论' : '生成回复'}… · {status.templateName}
             </div>
           )}
 
@@ -866,7 +1068,15 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
           )}
 
           {status.kind === 'done' && (
-            <GeneratedAtBadge generatedAt={status.generatedAt} />
+            <>
+              <GeneratedAtBadge generatedAt={status.generatedAt} />
+              {status.templateName && (
+                <div className="sgc-muted" style={{ fontSize: 11 }}>生成模板：{status.templateName}</div>
+              )}
+              {staleResult && (
+                <div className="sgc-error">旧模板生成，请重新生成。下方保留历史结果供核对。</div>
+              )}
+            </>
           )}
 
           {status.kind === 'done' && status.mode === 'reply' && parsed && (
@@ -911,7 +1121,9 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
               onKeyDown={(e) => {
                 if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                   e.preventDefault();
-                  if (!busy && discuss.trim()) void sendDiscussion();
+                  if (!actionUnavailable && discussionRoute.template && !discussionRoute.error && discuss.trim()) {
+                    void sendDiscussion();
+                  }
                 }
               }}
               placeholder={
@@ -920,14 +1132,22 @@ export function GPTReplySection({ orgId, contact, needsJump }: Props) {
                   : '例：先帮我分析这客户 / 这单值不值得追 / 怎么破他的"再考虑考虑"'
               }
               rows={2}
-              disabled={busy || backgroundBusy}
+              disabled={actionUnavailable}
             />
+            {discuss.trim() && discussionRoute.error && (
+              <div className="sgc-error">{discussionRoute.error}</div>
+            )}
+            {discuss.trim() && discussionRoute.template?.id !== selectedTemplate?.id && discussionRoute.template && (
+              <div className="sgc-muted" style={{ fontSize: 11 }}>
+                本次讨论将使用：{discussionRoute.template.name}
+              </div>
+            )}
             <div className="sgc-gem-result-actions">
               <button
                 type="button"
                 className="sgc-btn-secondary"
                 onClick={() => sendDiscussion()}
-                disabled={busy || backgroundBusy || !discuss.trim()}
+                disabled={actionUnavailable || !discussionRoute.template || !!discussionRoute.error || !discuss.trim()}
               >
                 {busy ? '处理中…' : '💬 发送讨论（Cmd/Ctrl+Enter）'}
               </button>
@@ -991,6 +1211,18 @@ function ResultView({
           onFillReply={onFillReply}
           onCopy={onCopy}
         />
+      )}
+
+      {!parsed.reply && parsed.translation && (
+        <div
+          className="sgc-gem-card"
+          style={{ background: '#fffbeb', borderColor: '#fde68a' }}
+        >
+          <div className="sgc-gem-card-label">💡 内部处理说明（不发送给客户）</div>
+          <div className="sgc-gem-card-body" style={{ whiteSpace: 'pre-wrap' }}>
+            {parsed.translation}
+          </div>
+        </div>
       )}
 
       {parsed.strategy && (

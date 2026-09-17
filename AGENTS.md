@@ -815,6 +815,44 @@ npm run package
 
 **教训**：① **任何写 `messages` 表的 AI 自动化路径都必须 `verifyHeaderMatches`/`waitForActiveChatPhone` 身份校验** —— 加新自动化路径时对照"三个 ReplySection + bulk-extract 都有、auto-reply 曾漏"这个清单，别漏。无人值守路径尤其要在**发送前**再校验一次（防发错人）。② **`isOutboundBubble` 在任何判方向的地方都要传 `panelCenter`**，否则纯媒体 bubble 几何兜底失效 → FB pair 方向判反 → 消息撞 id 丢失。③ 评审驱动的修复也走完整核实（对抗性 re-read 真实代码），评审代理会夸大（这次驳回了"删除当附件/版本闸门锁死/auto-reply 无限挂起"等几条），别照单全收。
 
+### 近期补完（2026-09-13）— GPT 客户语言与段落保留
+
+**起点**：用户反馈西语聊天生成英语回复、ChatGPT 空行进入 CRM 后粘成一大段，要求设置 R08 专用 GPT 并回复几位客户验证。
+
+**根因**：`gpt-prompt.ts` 的默认角色只有笼统的“customer's language”，Custom GPT 首轮会跳过默认角色，续聊也未明确客户入站优先于旧 CRM Language/销售英语出站。`gpt-automation.ts` 两处对 detached clone 读 `innerText`，没有布局时退化为 `textContent`，丢失 `<p>`/`<br>` 边界。界面的 `pre-wrap` 与 parser/sanitizer 本身保留换行。
+
+**修法**：首轮、Custom GPT、续聊统一注入 `[Reply Language]`，把原始客户入站作为语言证据，明确排除销售出站、广告、媒体等干扰。新增可序列化、自包含的 `readGptResponseSnapshot`，两处抓取共用语义 DOM 遍历，保留段落/列表/软换行并过滤思考区、按钮等。`GPTReplySection` 在客户正文为空时仍显示内部说明，方便看到 ASK_BOSS 的问题。
+
+**验证**：12项语言 prompt 回归、7项 DOM→parser→sanitizer 回归、typecheck/build 通过。新 GPT 网页预览已验证“西语客户＋英语档案”输出西语，以及特批价格输出 ASK_BOSS/空客户正文。扩展部署及真实发送结果记录在 `分析导出/R08_GPT自动回复方案_2026-09-13/`；网页预览不等于新扩展已部署。
+
+**教训**：不能依靠默认角色决定 Custom GPT 的语言；每次客户回复都给出入站证据和优先级。不要对脱离文档的克隆节点使用 `innerText` 恢复视觉排版。ChatGPT 提取函数经 `chrome.scripting` 序列化，所有运行时 helper 必须位于函数内部。真实客户试用仅按用户本轮明确授权执行，未授权时仍遵循测试号规则。
+
+### 近期补完（2026-09-14）— 未联系误判与卢旺达线索清理
+
+**起点**：用户要求删除未联系的卢旺达客户，并反馈姓名带 @ 的老客户误入“广告线索·未联系”、无 WhatsApp 号码无法退出列表。
+
+**根因**：`filters.ts` 原判定只有 `isAdLead && !chat`；本机 JID/手机号匹配失败或未同步会话，就把有历史的客户也当作未联系。Chrome 当前列表的 350 个卢旺达相关号码中，166 个在 DB 有消息；其中 3 个邮箱姓名样本也有历史。未发现“@ 字符直接修改阶段”的分支。列表仅对 needsReply 提供处理按钮，广告线索无法操作退出。
+
+**修法**：新增 `ad-lead-status.ts` 统一计数、筛选与行操作条件：无本机 chat、无消息历史、仍为 new、未标 spam、未手动处理。`fetchAdLeadIds` 仅在广告名单嵌入每人一个消息 id，不读正文，涵盖 sent_at=NULL；读取失败保留原状态并报告错误。消息保存成功发本地事件立即更新历史。`FilteredChatList` 加“已处理”“无 WhatsApp”，用 contact_tags 持久化；写成功才更新列表，所有客户右键可撤销。无匹配弹窗改为客观描述，不直接断言未注册。
+
+**数据清理**：按当时“只看我的”列表快照锁定范围，排除任何消息、报价、任务、非 new 和其他归属异常。137 个目标全部仅由当前用户主理；完整备份后逐批校验 updated_at、归属与最新业务数据，再带 org/id/updated_at/new 条件删除。备份目录 `分析导出/rwanda-cleanup-2026-09-14/`；保留 213 条原列表记录，其中 166 条有消息。未清理同事独占的线索。
+
+**验证**：5 项针对未联系的回归测试，连同已有 GPT 段落/知识测试共 26 项通过；typecheck、build、diff check 通过。已通过 Chrome 扩展管理页重载当前 `extension/dist`，恢复“只看我的”，实测未联系 136、卢旺达 0，新按钮可见。未在真实客户上点击处理按钮或发送消息。只构建本机版本，未发布 required_version、未提交或推送其他已有改动。
+
+**教训**：本机无 chat 是匹配状态，不能代表业务联系历史；不能按 @ 姓名判定，不能用缺失消息时间推断没聊天。删除未联系线索前必须先校正筛选误判，再按消息/报价/任务证据核验和备份。新增处置操作要能持久化、报错和撤销。
+
+### 近期补完（2026-09-16）— R08手动切换修复与积累改动发布
+
+**起点**：用户反馈CRM里R08 GPT“点了没反应”，并指出长期未打包。核实最新zip和服务器required_version均停在0.1.0-20260909。
+
+**根因**：GPT模板下拉value使用自动路由结果，其他车型分支会排除手选R08，R08自动识别还会禁用下拉。新加的3个实际React组件离线回归在修复前全部失败，分别复现生成/讨论选择回弹和R08下拉禁用。浏览器当前CRM可见Miles V2与R08选项，网页GPT规则更新与扩展发布是两条独立链路。
+
+**修法**：`gpt-template-routing.ts`增加当前客户的manualTemplateId优先级；`GPTReplySection`在预览、生成、讨论和指导修改中统一传递，解除自动匹配导致的下拉锁定，增加“恢复自动匹配”。切客户重建组件，不串手动选择；会话仍按客户、模板和实际GPT身份校验。将本周积累的语言/段落抓取、模板批准知识、未联系线索判定、名下无本机会话客户展示及认证参考资料分组一起纳入安装包。
+
+**验证**：7个回归脚本全部通过，Node测试报告75项（其中语言脚本内部另有12个case），35项路由/组件测试通过。TypeScript与Vite构建通过，diff检查通过。访问Chrome扩展管理页被浏览器安全策略拒绝，未绕过，因此发布后本机重载和新版真实WhatsApp UI验收仍待用户操作；不能把离线通过写成已在真实客户页面通过。版本发布和安装包校验记录在`分析导出/CRM发布_20260916/`。
+
+**教训**：自动推荐不能覆盖明确的手动选择，生成/讨论必须与界面选中模板一致。区分“GPT网页已更新”“本地代码已构建”“安装包已发布”“用户已加载”四种状态；用户要求打包发布时执行完整发布流程，不能停在本地build。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板
@@ -843,6 +881,10 @@ WhatsApp 绿色主题：
 - 错误：`#b91c1c`
 
 ## 已知问题 / 风险
+
+- **GPT手动选择与发布状态**：手动模板优先于自动车型匹配，保留显式恢复自动；预览、生成、讨论、知识和会话绑定走同一路由。发布前检查zip与服务器required_version；本地build不等于团队已升级，浏览器重载未完成必须如实说明。
+
+- **GPT 语言与段落**：所有客户回复入口都应注入客户语言判定依据，不能让陈旧 CRM Language 或英语销售出站覆盖真实西语入站。网页正文抽取保留语义块边界，不读取 detached clone 的 `innerText`；测试包括 DOM 抓取→parser→sanitizer，不能仅验证 UI 的 `white-space`。
 
 - WhatsApp Web 业务账号（@lid 格式）通过 IndexedDB `contact.phoneNumber` 字段映射到真实手机号
 - MV3 service worker 会休眠，不能做后台 24h 监听（必须打开 WhatsApp Web 标签页）。批量抽取跑大量请求时偶尔会因 SW 休眠而静默停止，重新点继续即可（不会重复抽）

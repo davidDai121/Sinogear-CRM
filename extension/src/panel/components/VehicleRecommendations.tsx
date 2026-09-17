@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { thumbnailUrl } from '@/lib/cloudinary';
+import { displayVehicleMediaCaption, groupVehicleMedia, isCertificationTemplate } from '@/lib/vehicle-media-groups';
 import { CloudinaryImg } from './CloudinaryImg';
 import { scoreVehiclesByText } from '@/lib/vehicle-matcher';
 import { fetchAllPaged } from '@/lib/supabase-paged';
@@ -248,9 +249,7 @@ function extOf(url: string, mime?: string | null): string {
 
 function SelectedVehicleCard({ vehicle, media, onClear }: SelectedCardProps) {
   const tiers = (vehicle.pricing_tiers ?? []) as PricingTier[];
-  const images = media.filter((m) => m.media_type === 'image');
-  const videos = media.filter((m) => m.media_type === 'video');
-  const specs = media.filter((m) => m.media_type === 'spec');
+  const { image: images, video: videos, spec: specs, certificationTemplates } = groupVehicleMedia(media);
   const [sending, setSending] = useState<string | null>(null);
 
   // 通用：把若干 MediaRow 下载成 File，paste 到 WA
@@ -402,6 +401,18 @@ function SelectedVehicleCard({ vehicle, media, onClear }: SelectedCardProps) {
           disabled={!!sending}
         />
       )}
+      {certificationTemplates.length > 0 && (
+        <MediaGroup
+          label="认证模板（参考）"
+          icon="📄"
+          items={certificationTemplates}
+          showThumb={false}
+          allActionLabel="全部预览"
+          onSendAll={() => sendItems(certificationTemplates, '认证模板（参考）')}
+          onSendOne={sendOne}
+          disabled={!!sending}
+        />
+      )}
 
       {sending && <span className="sgc-vehicle-rec-status">{sending}</span>}
     </div>
@@ -413,6 +424,7 @@ interface MediaGroupProps {
   icon: string;
   items: MediaRow[];
   showThumb: boolean;
+  allActionLabel?: string;
   onSendAll: () => void;
   onSendOne: (m: MediaRow) => void;
   disabled: boolean;
@@ -423,6 +435,7 @@ function MediaGroup({
   icon,
   items,
   showThumb,
+  allActionLabel = '全部',
   onSendAll,
   onSendOne,
   disabled,
@@ -440,7 +453,7 @@ function MediaGroup({
             disabled={disabled}
             onClick={onSendAll}
           >
-            💬 全部
+            💬 {allActionLabel}
           </button>
         )}
       </div>
@@ -449,7 +462,7 @@ function MediaGroup({
           <div
             key={m.id}
             className="sgc-vehicle-rec-thumb-wrap"
-            title={m.caption ?? ''}
+            title={displayVehicleMediaCaption(m)}
           >
             {showThumb &&
             (m.media_type === 'image' || m.media_type === 'video') ? (
@@ -461,7 +474,7 @@ function MediaGroup({
               >
                 <CloudinaryImg
                   src={thumbnailUrl(m.url, 120)}
-                  alt={m.caption ?? ''}
+                  alt={displayVehicleMediaCaption(m)}
                   loading="lazy"
                 />
                 {m.media_type === 'video' && (
@@ -474,12 +487,18 @@ function MediaGroup({
                 target="_blank"
                 rel="noreferrer"
                 className="sgc-vehicle-rec-doc-tile"
+                style={isCertificationTemplate(m) ? { width: 140 } : undefined}
               >
                 <span style={{ fontSize: 18 }}>📄</span>
                 <span className="sgc-muted" style={{ fontSize: 9 }}>
                   {extOf(m.url, m.mime_type).toUpperCase()}
                 </span>
               </a>
+            )}
+            {isCertificationTemplate(m) && m.file_name && (
+              <span className="sgc-muted" style={{ display: 'block', width: 140, fontSize: 10, overflowWrap: 'anywhere' }}>
+                {m.file_name}
+              </span>
             )}
             <button
               type="button"
