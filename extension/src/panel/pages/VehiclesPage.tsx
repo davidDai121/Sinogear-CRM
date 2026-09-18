@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { thumbnailUrl } from '@/lib/cloudinary';
-import { fetchAllPaged } from '@/lib/supabase-paged';
+import { fetchAllPaged, fetchAllPagedInChunks } from '@/lib/supabase-paged';
 import type {
   Database,
   PricingTier,
@@ -70,15 +70,18 @@ export function VehiclesPage({ orgId }: Props) {
     if (rows.length > 0) {
       const ids = rows.map((v) => v.id);
       try {
-        const media = await fetchAllPaged<MediaRow>((from, to) =>
-          supabase
-            .from('vehicle_media')
-            .select('*')
-            .in('vehicle_id', ids)
-            .eq('media_type', 'image')
-            .order('sort_order')
-            .order('created_at')
-            .range(from, to),
+        // ids 分批传，防 .in() URL 长度炸弹（90+ 车源时 URL 已 ~3.5KB）
+        const media = await fetchAllPagedInChunks<MediaRow>(
+          ids,
+          (chunk, from, to) =>
+            supabase
+              .from('vehicle_media')
+              .select('*')
+              .in('vehicle_id', chunk)
+              .eq('media_type', 'image')
+              .order('sort_order')
+              .order('created_at')
+              .range(from, to),
         );
         const map: Record<string, MediaRow> = {};
         for (const m of media) {

@@ -4,7 +4,7 @@ import { thumbnailUrl } from '@/lib/cloudinary';
 import { displayVehicleMediaCaption, groupVehicleMedia, isCertificationTemplate } from '@/lib/vehicle-media-groups';
 import { CloudinaryImg } from './CloudinaryImg';
 import { scoreVehiclesByText } from '@/lib/vehicle-matcher';
-import { fetchAllPaged } from '@/lib/supabase-paged';
+import { fetchAllPaged, fetchAllPagedInChunks } from '@/lib/supabase-paged';
 import { readChatMessages } from '@/content/whatsapp-messages';
 import {
   pasteFilesToWhatsApp,
@@ -91,15 +91,18 @@ export function VehicleRecommendations({ orgId, contactId }: Props) {
 
     if (vehicleRows.length > 0) {
       const ids = vehicleRows.map((v) => v.id);
-      const mediaRows = await fetchAllPaged<MediaRow>((from, to) =>
-        supabase
-          .from('vehicle_media')
-          .select('*')
-          .in('vehicle_id', ids)
-          .order('media_type')
-          .order('sort_order')
-          .order('created_at')
-          .range(from, to),
+      // ids 分批传，防 .in() URL 长度炸弹（90+ 车源时 URL 已 ~3.5KB）
+      const mediaRows = await fetchAllPagedInChunks<MediaRow>(
+        ids,
+        (chunk, from, to) =>
+          supabase
+            .from('vehicle_media')
+            .select('*')
+            .in('vehicle_id', chunk)
+            .order('media_type')
+            .order('sort_order')
+            .order('created_at')
+            .range(from, to),
       );
       const map: Record<string, MediaRow[]> = {};
       for (const m of mediaRows) {

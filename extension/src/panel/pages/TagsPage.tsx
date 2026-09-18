@@ -200,34 +200,38 @@ export function TagsPage({ orgId }: Props) {
     setBusyTag(oldTag);
     setError(null);
     try {
-      const { data: oldRows } = await supabase
-        .from('contact_tags')
-        .select('contact_id, contacts!inner(org_id)')
-        .eq('tag', oldTag)
-        .eq('contacts.org_id', orgId);
-      const oldIds = ((oldRows ?? []) as Array<{ contact_id: string }>).map(
-        (r) => r.contact_id,
+      // 热门标签（国家类）可能挂 >1000 客户：select 必须分页防静默截断，
+      // delete 的 .in() 必须分批防 URL 长度炸弹
+      const oldRows = await fetchAllPaged<{ contact_id: string }>((from, to) =>
+        supabase
+          .from('contact_tags')
+          .select('contact_id, contacts!inner(org_id)')
+          .eq('tag', oldTag)
+          .eq('contacts.org_id', orgId)
+          .order('contact_id', { ascending: true })
+          .range(from, to),
       );
+      const oldIds = oldRows.map((r) => r.contact_id);
 
-      const { data: newRows } = await supabase
-        .from('contact_tags')
-        .select('contact_id, contacts!inner(org_id)')
-        .eq('tag', newTag)
-        .eq('contacts.org_id', orgId);
-      const newSet = new Set(
-        ((newRows ?? []) as Array<{ contact_id: string }>).map(
-          (r) => r.contact_id,
-        ),
+      const newRows = await fetchAllPaged<{ contact_id: string }>((from, to) =>
+        supabase
+          .from('contact_tags')
+          .select('contact_id, contacts!inner(org_id)')
+          .eq('tag', newTag)
+          .eq('contacts.org_id', orgId)
+          .order('contact_id', { ascending: true })
+          .range(from, to),
       );
+      const newSet = new Set(newRows.map((r) => r.contact_id));
 
       const idsToTransfer = oldIds.filter((id) => !newSet.has(id));
 
-      if (oldIds.length) {
+      for (let i = 0; i < oldIds.length; i += 100) {
         const { error: delErr } = await supabase
           .from('contact_tags')
           .delete()
           .eq('tag', oldTag)
-          .in('contact_id', oldIds);
+          .in('contact_id', oldIds.slice(i, i + 100));
         if (delErr) throw delErr;
       }
 

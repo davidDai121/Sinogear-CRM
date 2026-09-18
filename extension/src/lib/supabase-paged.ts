@@ -58,3 +58,46 @@ export async function fetchAllPaged<T>(
   }
   return out;
 }
+
+/**
+ * `.in('col', ids)` 的 ids 全塞进 query string，每个 UUID 37 字符——
+ * 90 个车源 id 就 ~3.5KB，库存继续涨迟早撞 URL 上限（~12KB 被网络层
+ * 直接拒，错误是 TypeError: Failed to fetch，不是 PostgrestError）。
+ * CLAUDE.md「.in('id', myIds) URL 长度炸弹」同款坑。
+ *
+ * 这个 helper 把 ids 切成小批（每批 URL 长度恒定可控），批间并行，
+ * 每批内部仍走 fetchAllPaged 规避 1000 行截断。
+ *
+ * 用法：
+ *   const media = await fetchAllPagedInChunks<MediaRow>(ids, (chunk, from, to) =>
+ *     supabase
+ *       .from('vehicle_media')
+ *       .select('*')
+ *       .in('vehicle_id', chunk)
+ *       .order('id', { ascending: true }) // ⚠️ 同样必须
+ *       .range(from, to),
+ *   );
+ *
+ * ⚠️ 跨批的全局排序不保证——需要有序就在拿到全集后客户端再 sort。
+ */
+export const IN_FILTER_CHUNK_SIZE = 30;
+
+export async function fetchAllPagedInChunks<T>(
+  ids: readonly string[],
+  buildQuery: (
+    idChunk: string[],
+    from: number,
+    to: number,
+  ) => PromiseLike<PagedResult<T>>,
+): Promise<T[]> {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += IN_FILTER_CHUNK_SIZE) {
+    chunks.push(ids.slice(i, i + IN_FILTER_CHUNK_SIZE));
+  }
+  const results = await Promise.all(
+    chunks.map((chunk) =>
+      fetchAllPaged<T>((from, to) => buildQuery(chunk, from, to)),
+    ),
+  );
+  return results.flat();
+}
