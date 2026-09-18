@@ -1138,10 +1138,26 @@ Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% 
 
 **教训**：① **「Meta 返回 200」只代表收下了请求，不代表这条数据可用** —— 匹配质量是独立的一层，必须去 Events Manager 看分数。任何回传集成上线后都要过一遍 EMQ，别看 `events_received: 1` 就宣布完成。② **手里已有的识别字段要全发**：邮箱躺在 `field_data` 里几个月没人用，而它是把 0.0 拉起来最便宜的一步。③ **Edge Function 之间互调不能用注入的 `SUPABASE_SERVICE_ROLE_KEY`** —— edge runtime 注入的是新版 `sb_secret_` 格式不是 JWT，下游拿它建 supabase client 直接报「Expected 3 parts in JWT」；转发调用方的 `Authorization` 既能用语义也更对。④ **Management API 手跑通了 ≠ PostgREST 线上通**：管理接口超时更宽，`engaged_lead_candidates` 第一版直接对整张 messages 聚合，手跑正常、线上 57014（跟 0032 同一个坑第三次重演 —— 正则读 `text` 肥字段让覆盖索引的 index-only scan 作废）。新写聚合类 RPC 一律先用汇总表压候选集，再对小集合精确算。
 
+### 近期补完（2026-09-18）— 重构清理：.in() URL 炸弹三处 + chat-context 共享模块 + 首批单测
+
+**起点**：boss 让 Claude 跟踪浏览器 20 分钟找问题，抓到 vehicle_media 查询把 90 个车源 UUID 全塞 URL（~3.5KB）；接着问"我的代码是不是屎山"，整体审计后 boss 拍板"这些问题一起都改了"。全部改动在分支 `refactor/cleanup-20260918`，**未打包发版**。
+
+**修法**（4 个 commit）：
+1. **`.in()` URL 长度炸弹**：`supabase-paged.ts` 新增 `fetchAllPagedInChunks`（ids 30 个/批、批间并行、批内分页）。改掉 VehiclesPage / VehicleRecommendations 的 vehicle_media 查询；TagsPage 标签改名/合并顺带修掉两个没分页的 select（标签挂 >1000 客户只迁前 1000 个）+ delete 的 .in() 不分批
+2. **`lib/chat-context.ts` 共享模块**（backlog P1 落地）：GPT / Gem / Tags / Tasks 四处「jumpToChat + 身份校验 + DOM 读取 + syncMessages + DB 兜底」合一。`loadChatContext` 编排逻辑依赖注入（真实依赖惰性 import，node --test 可注入 fake）；`loadGroupMemberNames` 合并 GPT/Gem 各一份的群成员读取。**顺带堵洞：TagsSection / ContactTasksSection 的 jumpToChat 一直没传 requireMatch、syncMessages 前没身份校验**——跨聊天污染 P0 同款（auto-reply 2026-06-20 修过，这两处漏了）。两组件 props 从 contactId/contactPhone 改传整个 contact
+3. **`scripts/test-chat-context.mjs`**：11 个用例（requireMatch 必传五档字段 / race 时丢 DOM 绝不 sync / 冷启动三分支 / awaitSync 抛错 / 群聊 groupJid），`npm run test:chat-context`
+4. **归档 8 个已完成使命的一次性脚本**到 `scripts/archive/`（带 README 说明为什么不要再跑）
+
+**没改的**（审过后有意跳过）：① useCrmData / chat-media-capture / service-worker 三个胖文件不做机械拆分——久经实战、无 UI 层测试覆盖，盲拆风险大于收益，等下次要大改哪个再顺手拆哪个；② DOM 路径的空 catch 是刻意的"拿不到不致命"兜底，不批量加日志；③ contact_events 疑似重复埋点经查库证伪（近 24h 1000 条、5 分钟窗口零重复）
+
+**验证**：tsc 0 错；vite build 通过；原有 4 套测试 94 例 + 新增 11 例全过。⚠️ 线上 UI 未实测，靠装新包后观察。
+
+**教训**：① Claude/GPT/Gem 三套 ReplySection 在 CLAUDE.md 里的行数记录早已过时（ClaudeReplySection 整个文件已删），backlog 条目要在动手前先核对现状；② 新写「跨模块复用」的编排逻辑一开始就做依赖注入 + 惰性 import，否则 supabase client 的 `import.meta.env` 会让 node 测试在 import 时就崩。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
-- [ ] **三个 ReplySection 抽共享模块 + 起测试**（代码评审 P1）：ClaudeReplySection(1440)/GPTReplySection(1035)/GemReplySection(928) 真重复约 450–500 行（消息加载 + 身份校验 + fillReply），三套各打一遍 DOM fix 易漂移。抽成一个**带单测**的工具模块，顺带给 parser（claude/gem-parser）+ prompt 分段边界起第一批测试（全仓库目前零自动化测试）
+- [ ] **parser + prompt 分段边界起测试**（代码评审 P1 的剩余部分）：ReplySection 共享模块已于 2026-09-18 落地（`lib/chat-context.ts` + `test-chat-context.mjs`，见上方章节），剩 claude/gem-parser 和 prompt 分段边界还没有测试
 - [ ] **`database.types.ts` 改 CI 自动生成**（代码评审 P1）：手维护，enum/列一改就跟真库漂移（`stalled` 那次就是），直接把过时 `customer_stage` 喂给 AI prompt
 - [ ] 暂存盘"刷新即清空"在用户预期外，未来可考虑 IndexedDB 持久化（含 File）
 - [ ] Chrome Web Store 私有发布（$5 + 1-3 天审核 → 全员自动更新，告别 zip 分发）
