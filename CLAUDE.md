@@ -1150,9 +1150,11 @@ Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% 
 
 **没改的**（审过后有意跳过）：① useCrmData / chat-media-capture / service-worker 三个胖文件不做机械拆分——久经实战、无 UI 层测试覆盖，盲拆风险大于收益，等下次要大改哪个再顺手拆哪个；② DOM 路径的空 catch 是刻意的"拿不到不致命"兜底，不批量加日志；③ contact_events 疑似重复埋点经查库证伪（近 24h 1000 条、5 分钟窗口零重复）
 
-**验证**：tsc 0 错；vite build 通过；原有 4 套测试 94 例 + 新增 11 例全过。⚠️ 线上 UI 未实测，靠装新包后观察。
+**验证**（Chrome MCP 实测，测试号 13552592187）：tsc 0 错；vite build 通过；原有 4 套测试 94 例 + 新增 11 例全过。实机：CRM 面板正常加载、车源库 88 台封面全渲染（分批查询生效）、测试号上点「🤖 AI 建议标签」端到端跑通（跳转 → 五档身份校验 → 读 DOM → sync → GLM 返回 3 个建议）、控制台零报错。GPT/Gem 生成路径未实机跑（会动真实 ChatGPT/Gemini 会话），差异逻辑（awaitSync / collectRecent）由单测覆盖。
 
-**教训**：① Claude/GPT/Gem 三套 ReplySection 在 CLAUDE.md 里的行数记录早已过时（ClaudeReplySection 整个文件已删），backlog 条目要在动手前先核对现状；② 新写「跨模块复用」的编排逻辑一开始就做依赖注入 + 惰性 import，否则 supabase client 的 `import.meta.env` 会让 node 测试在 import 时就崩。
+**中途踩掉一个自己引入的 bug**：第一版为了让 node 测试不 import supabase，把真实依赖改成 `await import(...)` 惰性加载——Vite 因此生成新的异步 chunk，content script 里 CSS 预加载按页面 origin 解析，点 AI 建议直接报 `Unable to preload CSS for /assets/styles-*.css`，功能整个被打断（实测抓到）。改成：纯编排逻辑拆到 `chat-context-core.ts`（只 import 类型，测试直接测它），`chat-context.ts` 静态 import 真实依赖后注入。
+
+**教训**：① Claude/GPT/Gem 三套 ReplySection 在 CLAUDE.md 里的行数记录早已过时（ClaudeReplySection 整个文件已删），backlog 条目要在动手前先核对现状；② **content script 里不要为了可测性引入新的动态 import 边界**——chunk 带 CSS 就会踩 preload 路径解析炸弹；正确姿势是「纯逻辑拆 core 文件（type-only import）+ 壳文件静态 import 注入」。已有的 whatsapp-idb 动态 import 没事是因为那个 chunk 恰好无 CSS，别当成安全先例；③ 重构后光过 typecheck/单测/build 不够，这次 CSS preload 炸弹三关全绿、一上真实页面就炸——**动了模块边界（import 方式、chunk 结构）的改动必须实机点一遍**。
 
 ### 还可以做的（不急）
 

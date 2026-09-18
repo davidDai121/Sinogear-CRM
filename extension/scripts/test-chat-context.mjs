@@ -20,8 +20,10 @@ async function source(path) {
   );
 }
 
+// 只测 core（纯逻辑）——chat-context.ts 静态 import 了 supabase/chrome 依赖，
+// node 里 import 会崩；core 只有类型依赖
 const { loadChatContextWith, dbRowsToChatMessages } = await source(
-  '../src/lib/chat-context.ts',
+  '../src/lib/chat-context-core.ts',
 );
 
 const target = {
