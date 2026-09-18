@@ -15,6 +15,47 @@ test('fuel and RoRo do not receive EV container DG; all-in ground is not duplica
  const x=fixture(),p=x.plans[0];p.propulsion='fuel';p.freight.groundIncluded=true;assert.equal(calc(x,now)[0].dgUsd,'0.00');assert.equal(calc(x,now)[0].groundCny,'0.00');
  p.propulsion='bev';p.shippingMode='roro';p.containers=null;assert.equal(calc(x,now)[0].dgUsd,'0.00');
 });
+test('CIF default applies ten percent to transport only for five and six FOB cars',()=>{
+ const x=fixture(),p=x.plans[0]; x.fx=null;p.propulsion='fuel';p.quantity=5;p.containers=3;
+ p.vehicle.amount='15100';p.vehicle.groundIncluded=true;p.freight.amountUsd='12000';
+ p.insurance={basis:'freight_10_percent',source:'老板2026-09-18：总运费x1.1'};
+ x.plans.push({...structuredClone(p),label:'六台',quantity:6});
+ const [five,six]=calc(x,now);
+ assert.equal(five.insuranceUsd,'1200.00');assert.equal(five.transportWithInsuranceUsd,'13200.00');
+ assert.equal(five.totalUsd,'88700.00');assert.equal(five.perVehicleUsd,'17740.00');
+ assert.equal(six.totalUsd,'103800.00');assert.equal(six.perVehicleUsd,'17300.00');
+ assert.equal(six.groundCny,'0.00');assert.equal(six.insuranceBasis,'freight_10_percent');
+});
+test('CIF insurance uses uncovered fuel surcharge budget with currency conversion',()=>{
+ const x=fixture(),p=x.plans[0];p.propulsion='fuel';p.vehicle.amount='15100';p.quantity=5;p.containers=3;
+ p.freight.amountUsd='12000';x.fx.cnyPerUsd='10';
+ p.insurance={basis:'freight_10_percent',source:'老板通用公式'};
+ const [r]=calc(x,now);assert.equal(r.groundCny,'10000.00');assert.equal(r.dgUsd,'0.00');
+ assert.equal(r.transportBeforeInsuranceUsd,'13000.00');assert.equal(r.insuranceUsd,'1300.00');assert.equal(r.totalUsd,'89800.00');
+});
+test('CIF BEV transport includes DG per container and counts all-in charges only once',()=>{
+ const x=fixture(),p=x.plans[0];x.fx.cnyPerUsd='10';p.freight.amountUsd='10000';
+ p.insurance={basis:'freight_10_percent',source:'老板通用公式'};
+ let [r]=calc(x,now);assert.equal(r.transportBeforeInsuranceUsd,'11600.00');assert.equal(r.insuranceUsd,'1160.00');assert.equal(r.totalUsd,'62760.00');
+ p.freight.dgIncluded=true;p.freight.groundIncluded=true;x.fx=null;
+ [r]=calc(x,now);assert.equal(r.transportWithInsuranceUsd,'11000.00');assert.equal(r.totalUsd,'61000.00');
+});
+test('fixed insurance overrides remain supported and mixed/doubled insurance inputs fail',()=>{
+ const x=fixture(),p=x.plans[0];p.insurance={amountUsdTotal:'100',source:'本单明确覆盖'};
+ assert.equal(calc(x,now)[0].insuranceUsd,'100.00');assert.equal(calc(x,now)[0].insuranceBasis,'fixed');
+ p.insurance={basis:'freight_10_percent',amountUsdTotal:'100',source:'不能两种叠加'};assert.throws(()=>calc(x,now),/字段/);
+ p.insurance={basis:'cargo_110_percent',source:'错误乘数'};assert.throws(()=>calc(x,now),/保险/);
+ p.insurance={basis:'freight_10_percent',source:''};assert.throws(()=>calc(x,now),/来源/);
+});
+test('CIF calculated insurance reaches the final composition without asking for a premium',async()=>{
+ const x=fixture(),p=x.plans[0];p.propulsion='fuel';p.vehicle.groundIncluded=true;p.vehicle.amount='15100';p.quantity=5;p.freight.amountUsd='12000';
+ p.insurance={basis:'freight_10_percent',source:'老板通用公式'};
+ const r=await complete('<quote_input>'+JSON.stringify(x)+'</quote_input>','reply',async prompt=>{
+  assert.match(prompt,/"insuranceUsd":"1200.00"/);assert.match(prompt,/"transportWithInsuranceUsd":"13200.00"/);
+  return '[WhatsApp Reply]\nCIF reference: USD 88,700 total, USD 17,740 per vehicle.\n[Full Translation & Strategy]\n老板授权运输保险预算已含。';
+ },now);
+ assert.equal(r.result[0].totalUsd,'88700.00');
+});
 test('original lookup expires at seven days or earlier source expiry',()=>{
  const x=fixture();x.plans[0].freight.checkedAt='2026-09-10T17:00:00Z';assert.throws(()=>calc(x,now),/到期/);assert.doesNotThrow(()=>calc(x,now-1));
  x.plans[0].freight.checkedAt='2026-09-17T00:00:00Z';x.plans[0].freight.validUntil='2026-09-17T16:00:00Z';assert.throws(()=>calc(x,now),/到期/);
@@ -57,4 +98,37 @@ test('observed owner_approved enum repairs once without changing monetary eviden
  assert.equal(calls,2);assert.equal(r.input.plans[0].freight.kind,'owner_estimate');assert.equal(r.result[0].totalUsd,'63159.14');
  const altered=structuredClone(repaired);altered.plans[0].freight.amountUsd='1';await assert.rejects(complete(wrap(input),'discuss',async()=>wrap(altered),now),/改变/);
  calls=0;await assert.rejects(complete(wrap(input),'discuss',async()=>{calls++;return wrap(input)},now),/kind/);assert.equal(calls,1);
+});
+
+test('Carlos PHEV with confirmed included DG quotes once without relabelling or double charging',async()=>{
+ const x=fixture(),p=x.plans[0];x.fx=null;x.destination='Caucedo';
+ Object.assign(p,{model:'ZEEKR 9X Hyper 70kWh',quantity:1,propulsion:'phev'});
+ Object.assign(p.vehicle,{amount:'106300',groundIncluded:true});
+ Object.assign(p.freight,{amountUsd:'11000',dgIncluded:true,groundIncluded:true,source:'海运10000 + 本单老板确认DG1000'});
+ p.insurance={basis:'freight_10_percent',source:'老板：运费x1.1'};
+ const draft='[WhatsApp Reply]\nCarlos, CIF reference: USD {{quote.1.totalUsd}}.\n[Full Translation & Strategy]\nCIF参考总额{{quote.1.totalUsd}}美元，保险预算{{quote.1.insuranceUsd}}美元。';
+ const r=await complete(draft+'\n<quote_input>'+JSON.stringify(x)+'</quote_input>','reply',async()=>{throw Error('Unnecessary GPT call')},now);
+ assert.equal(r.input.plans[0].propulsion,'phev');assert.equal(r.result[0].dgUsd,'0.00');assert.equal(r.result[0].totalUsd,'118400.00');
+ assert.match(r.text,/USD 118,400.00/);assert.match(r.text,/保险预算1,100.00/);assert.doesNotMatch(r.text,/\{\{|quote_input/);
+ p.freight.dgIncluded=false;assert.throws(()=>calc(x,now),/DG/);
+ p.freight.dgIncluded=true;p.freight.groundIncluded=false;p.vehicle.groundIncluded=false;x.fx=fixture().fx;
+ assert.throws(()=>calc(x,now));
+});
+
+test('multiple plan placeholders map totals and per-unit values locally in reply and discussion',async()=>{
+ const x=fixture(),p=x.plans[0];p.vehicle.groundIncluded=true;p.freight.dgIncluded=true;p.freight.amountUsd='15000';
+ x.plans.unshift({...structuredClone(p),label:'一台',quantity:1,freight:{...p.freight,amountUsd:'14000'}});
+ const draft='[WhatsApp Reply]\nOne: USD {{quote.1.totalUsd}}; two: USD {{quote.2.totalUsd}}, each USD {{quote.2.perVehicleUsd}}.\n[Full Translation & Strategy]\n节省{{quote.2.savingsTotalUsd}}';
+ for(const mode of ['reply','discuss']) {
+  const r=await complete(draft+'<quote_input>'+JSON.stringify(x)+'</quote_input>',mode,async()=>{throw Error('Unnecessary GPT call')},now);
+  assert.match(r.text,/One: USD 39,000.00; two: USD 65,000.00, each USD 32,500.00/);assert.match(r.text,/节省13,000.00/);
+ }
+});
+
+test('invalid private placeholder repairs once and cannot leak internal amounts',async()=>{
+ const x=fixture();let calls=0;
+ const draft='[WhatsApp Reply]{{quote.1.totalUsd}} {{quote.1.perVehicleUsd}} {{quote.1.internalProfitCny}}[Full Translation & Strategy]';
+ const r=await complete(draft+'<quote_input>'+JSON.stringify(x)+'</quote_input>','reply',async()=>{calls++;return '[WhatsApp Reply]USD 63,159.14 total; USD 31,579.57 each.[Full Translation & Strategy]';},now);
+ assert.equal(calls,1);assert.doesNotMatch(r.text,/internalProfit|\{\{/);
+ await assert.rejects(complete(draft,'reply',async()=>{throw Error('Should not run')},now),/缺少计算输入/);
 });

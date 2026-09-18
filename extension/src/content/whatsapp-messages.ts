@@ -1,3 +1,5 @@
+import { readOriginalMessageText, messageBubbles, isVirtualMessageShell } from './whatsapp-message-dom';
+
 export interface ChatMessage {
   id: string;
   fromMe: boolean;
@@ -15,11 +17,7 @@ function findMainPane(): Element | null {
 }
 
 function readStrippingInjections(el: HTMLElement): string {
-  const clone = el.cloneNode(true) as HTMLElement;
-  clone
-    .querySelectorAll('.sgc-translation, .sgc-translate-btn')
-    .forEach((n) => n.remove());
-  return (clone.innerText || clone.textContent || '').trim();
+  return readOriginalMessageText(el);
 }
 
 /**
@@ -531,7 +529,7 @@ export function readChatMessages(limit = 30): ChatMessage[] {
   // 一次性收集 bubble + 候选 date header span，按 DOM 顺序合并遍历。
   // 维护 currentDate：每次遇到日期分隔栏（"2026年5月18日" / "星期四" / "今天" / "昨天"）就更新。
   // bubble 用最近的 currentDate 推断 sent_at（仅 fallback，pre-plain-text 优先）。
-  let bubbles = Array.from(panel.querySelectorAll<Element>('.message-in, .message-out'));
+  let bubbles = messageBubbles(panel);
   // 兜底：FB ad-originated chats / WA Web 某些版本里 message-in/out class 命名
   // 可能不同。conv-msg- wrapper 是消息级 testid，命中后用 querySelector 反查
   // 子树里的 .message-in / .message-out 子层（如果有）来判方向；没有就根据
@@ -593,6 +591,7 @@ export function readChatMessages(limit = 30): ChatMessage[] {
       : undefined;
 
   for (const el of all) {
+    if (isVirtualMessageShell(el)) continue;
     // Date header span
     if (el.tagName === 'SPAN') {
       const text = el.textContent?.trim() ?? '';
@@ -704,8 +703,8 @@ export function maybeLogReadFailure(reason: string): void {
 
 export function chatFingerprint(messages: ChatMessage[]): string {
   if (!messages.length) return 'empty';
-  const tail = messages.slice(-5).map((m) => m.id).join('|');
-  return `${messages.length}:${tail}`;
+  // IDs/count alone miss hydration, edits, direction corrections and retractions.
+  return JSON.stringify(messages.map(m => [m.id, m.fromMe, m.text, m.timestamp]));
 }
 
 /**
@@ -730,16 +729,17 @@ export async function waitForChatMessages(
   const start = Date.now();
   let last: ChatMessage[] = [];
   let stableHits = 0;
-  let prevLen = -1;
+  let previous = '';
   while (Date.now() - start < timeoutMs) {
     last = readChatMessages(limit);
     if (last.length >= minCount) {
-      if (last.length === prevLen) {
+      const fingerprint = chatFingerprint(last);
+      if (fingerprint === previous) {
         stableHits++;
         if (stableHits >= STABLE_POLLS) return last;
       } else {
         stableHits = 0;
-        prevLen = last.length;
+        previous = fingerprint;
       }
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL));

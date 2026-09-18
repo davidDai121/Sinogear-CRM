@@ -116,7 +116,7 @@ export function ContactDetailDrawer({ contactId, orgId, onClose, onChanged }: Pr
             <span className="sgc-drawer-subtitle">
               {contact?.phone ?? (contact?.group_jid ? '群聊' : '')}
             </span>
-            {contact?.phone && <LocalTimeBadge phone={contact.phone} />}
+            {contact?.phone && <LocalTimeBadge phone={contact.phone} country={contact.country} />}
           </div>
           <button
             className="sgc-drawer-close"

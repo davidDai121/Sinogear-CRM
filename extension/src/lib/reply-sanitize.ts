@@ -39,6 +39,7 @@ const KNOWN_SECTION_HEADERS = [
   'Anti-Patterns',
   // Chinese
   'GPT跟进安排',
+  'GPT跟进状态',
   '摘要',
   '客户档案',
   '客户记录',
@@ -83,6 +84,8 @@ const NEED_FROM_BOSS_RE =
  */
 export function sanitizeReplyForCustomer(text: string): string {
   if (!text) return '';
+  // A failed/unrun quote substitution must never reach the WhatsApp composer.
+  if (/\{\{\s*quote(?:\.|\s)/i.test(text)) return '';
 
   // Internal machine records are never customer prose, including malformed blocks.
   const internal = text.search(/<\/?(?:quote_input|freight_research|crm_followup)\b/i);

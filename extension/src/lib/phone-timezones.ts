@@ -262,7 +262,15 @@ export interface LocalTimeInfo {
  */
 export function timezoneForCountry(country: string | null | undefined): string | null {
   if (!country) return null;
-  return COUNTRY_TIMEZONE[country] ?? null;
+  const normalize = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  const name = normalize(country);
+  const aliases: Record<string, string> = {
+    'republica dominicana': 'Dominican Republic', 'republique dominicaine': 'Dominican Republic',
+    '多米尼加共和国': 'Dominican Republic', '多米尼加': 'Dominican Republic',
+    'cote d’ivoire': "Côte d'Ivoire", 'ivory coast': "Côte d'Ivoire", '科特迪瓦': "Côte d'Ivoire",
+  };
+  const canonical = aliases[name] ?? Object.keys(COUNTRY_TIMEZONE).find(k => normalize(k) === name);
+  return canonical ? COUNTRY_TIMEZONE[canonical] : null;
 }
 
 /**
@@ -274,9 +282,9 @@ export function timezoneForCountry(country: string | null | undefined): string |
 export function localTimeForPhone(
   phone: string | null | undefined,
   now: Date = new Date(),
+  confirmedCountry?: string | null,
 ): LocalTimeInfo | null {
-  if (!phone) return null;
-  const country = phoneToCountry(phone);
+  const country = confirmedCountry?.trim() || (phone ? phoneToCountry(phone) : null);
   if (!country) return null;
   const tz = timezoneForCountry(country);
   if (!tz) return null;

@@ -27,7 +27,7 @@ const mocks = {
   '@/lib/gpt-followup': `${common}
     export const loadFollowupContext = async (_db,orgId,contactId) => ({orgId,contactId});
     export const followupPrompt = () => '';
-    export const extractFollowup = text => ({text,decision:{title:'等待条件',reason:'离线边界替身'}});
+    export const extractFollowup = text => { if(h().followupError) throw Error(h().followupError); return {text,decision:{title:'等待条件',reason:'离线边界替身'}}; };
     export const saveFollowup = async (_db,ctx,decision) => ({decision,after:null,protected:false});`,
   '@/lib/sales-work-memory': `${common}
     export const loadSalesWorkMemory = async (_db, org, contactId) => {
@@ -44,6 +44,8 @@ const mocks = {
   '@/lib/supabase': `${common}export const supabase = { from: table => h().query(table) };`,
   '@/lib/errors': 'export const stringifyError = e => e instanceof Error ? e.message : String(e);',
   '@/lib/jump-to-chat': `${common}export const jumpToChat = async () => true; export const verifyHeaderMatches = () => h().headerMatches;`,
+  '@/content/whatsapp-message-snapshot': `${common}export const collectRecentChatMessages = async () => h().domMessages;`,
+  './DraftFreshnessNotice': 'export const DraftFreshnessNotice = () => null;',
   '@/content/whatsapp-messages': `${common}export const waitForChatMessages = async () => h().domMessages; export const maybeLogReadFailure = () => {};`,
   '@/lib/message-sync': `${common}
     export const loadMessages = async id => h().readMessages(id);
@@ -76,7 +78,10 @@ const compiled = await build({
   bundle: true, platform: 'node', format: 'cjs', write: false, logLevel: 'silent',
   jsx: 'automatic', external: ['react', 'react/jsx-runtime'],
   plugins: [{ name: 'offline-boundaries', setup(builder) {
-    builder.onResolve({ filter: /.*/ }, args => args.path in mocks ? { path: args.path, namespace: 'offline-mock' } : null);
+    builder.onResolve({ filter: /.*/ }, args => {
+      const path = args.path === './gpt-followup' ? '@/lib/gpt-followup' : args.path;
+      return path in mocks ? { path, namespace: 'offline-mock' } : null;
+    });
     builder.onLoad({ filter: /.*/, namespace: 'offline-mock' }, args => ({ contents: mocks[args.path], loader: 'js' }));
   } }],
 });
@@ -170,7 +175,7 @@ function makeHarness(options = {}) {
 
 globalThis.chrome = {
   storage: { local: {
-    async get(key) { const h = globalThis.__gptRoutingIntegration; return { [key]: h.store[key] }; },
+    async get(key) { const h = globalThis.__gptRoutingIntegration; return Object.fromEntries((Array.isArray(key) ? key : [key]).map(k => [k, h.store[k]])); },
     async set(value) { Object.assign(globalThis.__gptRoutingIntegration.store, value); },
     async remove(key) { delete globalThis.__gptRoutingIntegration.store[key]; },
   } },
@@ -382,6 +387,8 @@ test('auto R08 leaves selector enabled; manual Miles and restore automatic both 
   await render('customer-b');
   select = container.querySelector('select');
   assert.equal(select.value, r08.id, 'manual choice must not leak across customers');
+  await render('customer-a');
+  assert.equal(container.querySelector('select').value, miles.id, 'manual choice survives switching away and back');
 });
 
 for (const action of ['generate', 'discussion']) {
@@ -470,8 +477,37 @@ for(const action of ['generate','discussion']) {
    assert.equal(h.memoryWrites.filter(x=>x.entry.kind==='assistant_draft').length,1);assert.doesNotMatch(h.logs[0].response,/quote_input/);assert.match(container.textContent,/报价核算历史/);
  });
 }
+for(const action of ['generate','discussion']) {
+ test(`${action} completes PHEV CIF draft with one GPT call and persists substituted prices`,async t=>{
+   const plan={label:'一台',model:'ZEEKR 9X Hyper 70kWh',quantity:1,propulsion:'phev',shippingMode:'container',containers:1,loadingBasis:'测试一柜一台',vehicle:{basis:'approved_fob',amount:'106300',currency:'USD',source:'本单批准价',groundIncluded:true},freight:{amountUsd:'11000',source:'海运10000和老板确认DG1000已含',dgIncluded:true,groundIncluded:true,checkedAt:new Date().toISOString(),validUntil:null,kind:'owner_estimate'},profit:null,groundOverride:null,insurance:{basis:'freight_10_percent',source:'老板总运费x1.1'},fixedSelling:null};
+   const input={schema:'quote-input.v1',origin:'Shanghai',destination:'Caucedo',fx:null,plans:[plan]};
+   const first='[WhatsApp Reply]\nCIF reference: USD {{quote.1.totalUsd}}.\n[Full Translation & Strategy]\nCIF参考{{quote.1.totalUsd}}美元，保险预算{{quote.1.insuranceUsd}}美元。\n<quote_input>'+JSON.stringify(input)+'</quote_input>';
+   const {h,container}=await mount(t,{responseTexts:[first]});
+   if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
+   assert.equal(h.calls.length,1);
+   assert.equal(h.quoteRows.length,1);assert.equal(h.quoteRows[0].payload.result[0].totalUsd,'118400.00');
+   assert.equal(h.quoteRows[0].payload.input.plans[0].propulsion,'phev');
+   assert.match(h.logs[0].response,/USD 118,400.00/);assert.doesNotMatch(h.logs[0].response,/\{\{|quote_input/);
+   assert.equal(h.memoryWrites.filter(x=>x.entry.kind==='assistant_draft').length,1);
+ });
+}
 test('failed quote version write does not display a falsely saved/sendable quote',async t=>{
  const input={schema:'quote-input.v1',origin:'Shanghai',destination:'Tema',fx:null,plans:[{label:'一台',model:'柴油',quantity:1,propulsion:'fuel',shippingMode:'roro',containers:null,loadingBasis:'滚装',vehicle:{basis:'approved_fob',amount:'10000',currency:'USD',source:'本单批准',groundIncluded:true},freight:{amountUsd:'2000',source:'测试',dgIncluded:false,groundIncluded:false,checkedAt:new Date().toISOString(),validUntil:null,kind:'owner_estimate'},profit:null,groundOverride:null,insurance:null,fixedSelling:null}]};
  const {h,container}=await mount(t,{quoteSaveError:'offline',responseTexts:['[WhatsApp Reply]\n[Full Translation & Strategy]<quote_input>'+JSON.stringify(input)+'</quote_input>','[WhatsApp Reply]USD 12000.00\n[Full Translation & Strategy]参考']});
  await click(button(container,x=>x==='生成'));assert.equal(h.calls.length,2);assert.equal(h.quoteRows.length,0);assert.equal(h.memoryWrites.filter(x=>x.entry.kind==='assistant_draft').length,0);assert.match(container.textContent,/报价版本保存失败/);
 });
+
+for (const action of ['generate','discussion']) {
+ test(`${action} preserves draft and displays warning if follow-up metadata fails`,async t=>{
+  const raw='[Client Record]\n\n[WhatsApp Reply]\n\nMy friend, both cars use the same container option.\n\n[Full Translation & Strategy]\n继续核查其他运输方式。\n<crm_followup>{incomplete';
+  const {h,container}=await mount(t,{responseText:raw});
+  h.followupError='GPT未返回唯一的跟进判断，未创建任务';
+  if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
+  assert.equal(h.calls.length,1);
+  const draft=h.memoryWrites.find(w=>w.entry.kind==='assistant_draft');
+  assert.match(draft.entry.text,/My friend, both cars/);
+  assert.doesNotMatch(draft.entry.text,/<crm_followup/);
+  assert.match(container.querySelector('[role="status"]').textContent,/正文已保留/);
+  assert.equal(h.writes.length,1,'the conversation remains resumable');
+ });
+}

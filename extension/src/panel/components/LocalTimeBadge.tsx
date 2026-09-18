@@ -9,11 +9,12 @@ import { localTimeForPhone } from '@/lib/phone-timezones';
 interface Props {
   phone: string | null | undefined;
   /** 紧凑模式：只显示 14:23，省偏移；用于客户列表表格 */
+  country?: string | null;
   compact?: boolean;
   className?: string;
 }
 
-export function LocalTimeBadge({ phone, compact, className }: Props) {
+export function LocalTimeBadge({ phone, country, compact, className }: Props) {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -30,7 +31,7 @@ export function LocalTimeBadge({ phone, compact, className }: Props) {
     };
   }, []);
 
-  const lt = useMemo(() => localTimeForPhone(phone, now), [phone, now]);
+  const lt = useMemo(() => localTimeForPhone(phone, now, country), [phone, now, country]);
   if (!lt) return null;
 
   const isNight = lt.hour >= 22 || lt.hour < 7;

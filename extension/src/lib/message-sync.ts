@@ -69,34 +69,16 @@ export async function syncMessages(
     });
 
   if (error) return { inserted: 0, error: error.message };
+  // Re-reading a hydrated bubble must replace an old empty-shell/media row or
+  // translated text. Finish this BEFORE GPT loads its evidence ledger.
+  const repaired = await repairObservedMessages(contactId, upsertRows);
+  if (repaired) return { inserted: count ?? 0, error: repaired };
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(MESSAGES_SYNCED_EVENT, { detail: { contactId } }));
   }
-
-  // upsert 成功后，对归因到的 ai_reply_log 标 was_sent —— fire and forget
   for (const row of rows) {
-    if (row._attributedLogId) {
-      void markAiReplyFilled(row._attributedLogId);
-    }
+    if (row._attributedLogId) void markAiReplyFilled(row._attributedLogId);
   }
-
-  // Backfill 历史 NULL sent_at —— 之前因为 WA Web 纯媒体 bubble 没 data-pre-plain-text
-  // 而 syncMessages 写入时 sent_at=null；现在 readChatMessages 修源头后能从 bubble 时间字串
-  // + date header 解析出真实时间。upsert + ignoreDuplicates 不更新已存行，单独 PATCH 把
-  // sent_at IS NULL 的老行用本次解析到的时间填上。filter sent_at=is.null 保证不覆盖
-  // 已有非 null 值。fire-and-forget，不阻塞本次同步。
-  void backfillNullSentAt(contactId, rows);
-
-  // 已删除消息覆盖：DOM 抓到 [已删除] 占位时，DB 里同 wa_message_id 可能还存着销售
-  // 删除前发出去的原文（之前 sync 过）。upsert + ignoreDuplicates 不会更新，需要强制
-  // PATCH 把 DB 的 text 也改成 [已删除]。否则 prompt 还是会把销售已撤回的话喂给 AI。
-  void overwriteDeletedMessages(contactId, rows);
-
-  // 方向自愈：早期 build（WA Web 删了 .message-in/.message-out class 后、方向判定还用
-  // el.classList.contains('message-out') 时）把**所有**消息写成了 inbound（"我发的图片被
-  // 识别成客户发的"）。ignoreDuplicates:true 让这些错行永远改不掉。现在 DOM 方向判定修对了，
-  // 用本次重新读到的 direction 把 DB 里方向不符的行 UPDATE 回来。
-  void fixDirectionMismatch(contactId, rows);
 
   // 广告线索重号自愈：客户在 FB 表单里填的号码，跟他实际发 WhatsApp 的号经常不是
   // 同一个（填座机 / 填旧号 / 手滑打错，实测有一对只差两位）。fb-lead-webhook 按
@@ -203,100 +185,27 @@ async function reconcileFbLeadDuplicate(
   }
 }
 
-/**
- * 方向自愈：用本次 DOM 重新判定的 direction 纠正 DB 里方向写反的历史行。
- *
- * 2 条批量 UPDATE（出站一批 / 入站一批）+ `.neq` 只动方向不符的行 → 幂等、省请求
- * （纠正过一次后再 sync 这 2 条更新 0 行）。每批 wa_message_id ≤ readChatMessages 的
- * limit（默认 30）个进 `.in()`，URL 长度安全。
- */
-async function fixDirectionMismatch(
+/** Repair only messages actually observed again; never guess historical content. */
+export async function repairObservedMessages(
   contactId: string,
-  rows: Array<{ wa_message_id: string; direction: 'inbound' | 'outbound' }>,
-): Promise<void> {
-  const outIds = rows
-    .filter((r) => r.direction === 'outbound')
-    .map((r) => r.wa_message_id);
-  const inIds = rows
-    .filter((r) => r.direction === 'inbound')
-    .map((r) => r.wa_message_id);
-  try {
-    if (outIds.length > 0) {
-      await supabase
-        .from('messages')
-        .update({ direction: 'outbound' })
-        .eq('contact_id', contactId)
-        .in('wa_message_id', outIds)
-        .neq('direction', 'outbound');
-    }
-    if (inIds.length > 0) {
-      await supabase
-        .from('messages')
-        .update({ direction: 'inbound' })
-        .eq('contact_id', contactId)
-        .in('wa_message_id', inIds)
-        .neq('direction', 'inbound');
-    }
-  } catch (e) {
-    console.warn('[fixDirectionMismatch]', e);
-  }
-}
-
-/** WA Web 已删除消息占位的内部统一标记，跟 content/whatsapp-messages.ts 同步 */
-const DELETED_TEXT_MARKER = '[已删除]';
-
-/**
- * DOM 抓到 [已删除] 占位时，把 DB 里同 wa_message_id 的 text 也改成 [已删除]
- * （之前 sync 过的原文被覆盖）。filter text=neq.[已删除] 保证幂等。
- */
-async function overwriteDeletedMessages(
-  contactId: string,
-  rows: Array<{ wa_message_id: string; text: string }>,
-): Promise<void> {
-  const deleted = rows.filter((r) => r.text === DELETED_TEXT_MARKER);
-  if (deleted.length === 0) return;
-  for (const r of deleted) {
-    try {
-      const { error } = await supabase
-        .from('messages')
-        .update({ text: DELETED_TEXT_MARKER })
-        .eq('contact_id', contactId)
-        .eq('wa_message_id', r.wa_message_id)
-        .neq('text', DELETED_TEXT_MARKER);
-      if (error) {
-        console.warn('[overwriteDeletedMessages]', r.wa_message_id, error.message);
-      }
-    } catch (e) {
-      console.warn('[overwriteDeletedMessages]', r.wa_message_id, e);
-    }
-  }
-}
-
-/**
- * 老 NULL row 在新 DOM 解析到 timestamp 时反向回填 sent_at。
- * 单条 PATCH 因为 PostgREST 不支持"不同行给不同值"的 batch update。
- * 用 sent_at=is.null filter 保证只填空，不覆盖已有时间。
- */
-async function backfillNullSentAt(
-  contactId: string,
-  rows: Array<{ wa_message_id: string; sent_at: string | null }>,
-): Promise<void> {
-  const candidates = rows.filter((r) => r.sent_at != null);
-  if (candidates.length === 0) return;
-  for (const r of candidates) {
-    try {
-      const { error } = await supabase
-        .from('messages')
-        .update({ sent_at: r.sent_at })
-        .eq('contact_id', contactId)
-        .eq('wa_message_id', r.wa_message_id)
-        .is('sent_at', null);
-      if (error) {
-        console.warn('[backfillNullSentAt]', r.wa_message_id, error.message);
-      }
-    } catch (e) {
-      console.warn('[backfillNullSentAt]', r.wa_message_id, e);
-    }
+  rows: Array<{ wa_message_id: string; text: string; direction: 'inbound'|'outbound'; sent_at: string|null }>,
+): Promise<string | undefined> {
+  const { data, error } = await supabase.from('messages')
+    .select('id,wa_message_id,text,direction,sent_at').eq('contact_id', contactId)
+    .in('wa_message_id', rows.map(r => r.wa_message_id));
+  if (error) return `核对已同步消息失败：${error.message}`;
+  for (const old of data ?? []) {
+    const observed = rows.find(r => r.wa_message_id === old.wa_message_id);
+    if (!observed) continue;
+    // A generic fallback cannot erase previously captured original text.
+    const text = observed.text === '[媒体]' && old.text !== '[媒体]' ? old.text : observed.text;
+    const patch = { text, direction: observed.direction, sent_at: old.sent_at ?? observed.sent_at };
+    if (patch.text === old.text && patch.direction === old.direction && patch.sent_at === old.sent_at) continue;
+    let update = supabase.from('messages').update(patch).eq('contact_id', contactId)
+      .eq('id', old.id).eq('text', old.text).eq('direction', old.direction);
+    update = old.sent_at === null ? update.is('sent_at', null) : update.eq('sent_at', old.sent_at);
+    const { data: saved, error: writeError } = await update.select('id');
+    if (writeError || !saved?.length) return `消息修正尚未保存：${writeError?.message ?? '消息已更新，稍后重试'}`;
   }
 }
 

@@ -1,4 +1,9 @@
-import { loadFollowupContext, followupPrompt, extractFollowup, saveFollowup, type FollowupContext } from '@/lib/gpt-followup';
+import { quoteConversationId, saveQuotePreview } from '@/lib/quote-preview';
+import { snapshotDraftEvidence, type DraftEvidence } from '@/lib/draft-freshness';
+import { DraftFreshnessNotice } from './DraftFreshnessNotice';
+import { completeFollowupResult } from '@/lib/gpt-followup-result';
+import { collectRecentChatMessages } from '@/content/whatsapp-message-snapshot';
+import { loadFollowupContext, followupPrompt, saveFollowup, type FollowupContext } from '@/lib/gpt-followup';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePersistedReplyStatus } from '@/panel/hooks/usePersistedReplyStatus';
 import { supabase } from '@/lib/supabase';
@@ -28,7 +33,7 @@ import { ClientRecordCard } from './ClientRecordCard';
 import { GPTTemplatesModal } from './GPTTemplatesModal';
 import { GeneratedAtBadge } from './GeneratedAtBadge';
 import type { GptSkill } from '@/lib/gpt-skill';
-import { completeQuoteCalculation, saveQuoteVersion } from '@/lib/quote-workflow';
+import { publicQuoteAmounts, completeQuoteCalculation, saveQuoteVersion } from '@/lib/quote-workflow';
 import { extractFreightResearch } from '@/lib/freight-research';
 import { loadSalesWorkMemory, saveSalesWorkEntry, type SalesWorkMemory } from '@/lib/sales-work-memory';
 import { loadGptApprovedKnowledge } from '@/lib/gpt-template-knowledge';
@@ -75,6 +80,8 @@ type Status =
       templateName?: string;
       /** 自动由 usePersistedReplyStatus 注入（done 状态写 chrome.storage 时盖戳） */
       generatedAt?: number;
+      followupWarning?: string;
+      inputEvidence?: DraftEvidence;
     }
   | { kind: 'error'; message: string };
 
@@ -323,14 +330,17 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
 
   // ── 销售指令（per-contact 持久化） ──
   const guidanceKey = `gptGuidance:${contact.id}`;
+  const manualTemplateKey = `gptManualTemplate:${orgId}:${contact.id}`;
   useEffect(() => {
     let cancelled = false;
     setGuidanceLoaded(false);
-    void chrome.storage.local.get(guidanceKey).then((s) => {
+    void chrome.storage.local.get([guidanceKey, manualTemplateKey]).then((s) => {
       if (cancelled) return;
       const saved =
         typeof s[guidanceKey] === 'string' ? (s[guidanceKey] as string) : '';
       setGuidance(saved);
+      const manual = s[manualTemplateKey];
+      if (typeof manual === 'string' && manual) { setManualTemplateId(manual); setSelectedTemplateId(manual); }
       setGuidanceLoaded(true);
     });
     return () => { cancelled = true; };
@@ -397,6 +407,9 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         { contactId: contact.id, phone: contact.phone },
       );
       messages = [];
+    }
+    if (verifyHeaderMatches(requireMatch)) {
+      messages = await collectRecentChatMessages(() => verifyHeaderMatches(requireMatch));
     }
     if (messages.length > 0) {
       // DOM 路径：持久化 + merge
@@ -520,7 +533,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     }
   };
 
-  const saveGeneratedWork = async (text: string, chatUrl: string, template: GptTemplateRow, memory: SalesWorkMemory, mode: Mode, followupContext: FollowupContext, skill?: GptSkill) => {
+  const saveGeneratedWork = async (text: string, chatUrl: string, template: GptTemplateRow, memory: SalesWorkMemory, mode: Mode, followupContext: FollowupContext, skill?: GptSkill, messageId?: string) => {
     const templateId = template.id, scopeId = memory.scopeId;
     const research = extractFreightResearch(text);
     if (research.record) {
@@ -534,6 +547,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       const next = await chrome.runtime.sendMessage({ type:'GPT_RUN', url:chatUrl, prompt: prompt + followupPrompt(followupContext), skill, active:foreground, ensureThinking:false });
       if (!next?.ok) throw new Error(next?.error ?? '报价核算后的整理失败');
       if (typeof next.chatUrl !== 'string' || next.chatUrl.split('#')[0] !== chatUrl.split('#')[0]) throw new Error('核算后的会话身份变化，未保存或展示报价');
+      messageId = next.messageId;
       return next.responseText;
     });
     if (calculated.input && calculated.result) {
@@ -544,25 +558,27 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         chatUrl, computedAt:new Date().toISOString(),
       });
     }
-    let followup;
-    try { followup = extractFollowup(calculated.text, followupContext); }
-    catch (error) {
-      // An old online skill may omit the new block. One same-chat repair avoids asking
-      // the salesperson to repeat their instruction; malformed existing blocks fail closed.
-      if (/<crm_followup/i.test(calculated.text)) throw error;
+    const outcome = await completeFollowupResult(calculated.text, followupContext, async () => {
       const repaired = await chrome.runtime.sendMessage({ type: 'GPT_RUN', url: chatUrl, skill, active: foreground, ensureThinking: false,
         prompt: '上一条遗漏了CRM跟进块。保留上一条客户正文及业务事实，不改报价，不查运费，不输出其他文字；只补一个crm_followup块。' + followupPrompt(followupContext) });
       if (!repaired?.ok || typeof repaired.chatUrl !== 'string' || repaired.chatUrl.split('#')[0] !== chatUrl.split('#')[0]) throw new Error('跟进格式补全失败，未创建任务');
-      const extracted = extractFollowup(repaired.responseText, followupContext);
-      followup = { decision: extracted.decision, text: calculated.text };
-    }
-    const plan = await saveFollowup(supabase, followupContext, followup.decision, templateId, chatUrl);
-    const summary = `\n\n[GPT跟进安排]\n${plan.decision.title}\n${plan.decision.reason}\n${plan.protected ? '保留人工任务安排；以上为GPT建议。' : plan.after?.due_at ? '安排时间：' + new Date(plan.after.due_at).toLocaleString() : '等待条件/已结束，无自动催促日期。'}`;
-    const finalText = followup.text + summary;
+      return repaired.responseText;
+    }, decision => saveFollowup(supabase, followupContext, decision, templateId, chatUrl));
+    const finalText = outcome.text;
     await saveSalesWorkEntry(supabase, orgId, contact.id, {
       id: crypto.randomUUID(), scopeId, kind: 'assistant_draft', text:finalText, templateId, chatUrl,
     });
-    return finalText;
+    const conversationId = quoteConversationId(chatUrl);
+    if (mode === 'reply' && conversationId && messageId && calculated.result) {
+      const reply = sanitizeReplyForCustomer(parseClaudeResponse(finalText).reply ?? '');
+      try {
+        await saveQuotePreview({ conversationId, messageId, reply,
+          amounts: publicQuoteAmounts(calculated.result), savedAt: Date.now() });
+      } catch {
+        return { text: finalText, warning: [outcome.warning, '报价已保存在CRM；ChatGPT页面的金额展示未同步，请以本页报价为准。'].filter(Boolean).join('；') };
+      }
+    }
+    return outcome;
   };
 
   // ── 主流程 1：写客户回复 ──
@@ -575,6 +591,8 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     void setReplyProgress(contact.id, 'generating', 'gpt');
     const startedAt = Date.now();
     let promptForLog = '';
+    let rawResponseForLog: string | null = null;
+    let chatUrlForLog: string | null = null;
     let messageSourceForLog: MessageSource = 'dom';
     let messageCountForLog = 0;
     let wasFollowUp = false;
@@ -636,11 +654,14 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         throw new Error(response?.error ?? 'GPT 调用失败');
       }
 
+      rawResponseForLog = response.responseText;
+      chatUrlForLog = response.chatUrl;
       const newChatUrl: string = response.chatUrl;
       if (!isConversationForGptTemplate({contact_id: contact.id, template_id: template.id, chat_url: newChatUrl}, contact.id, template)) {
         throw new Error('GPT返回的会话与本次模板不匹配，未保存工作记录。');
       }
-      response.responseText = await saveGeneratedWork(response.responseText, newChatUrl, template, workMemory, 'reply', followupContext, approvedKnowledge?.skill);
+      const savedWork = await saveGeneratedWork(response.responseText, newChatUrl, template, workMemory, 'reply', followupContext, approvedKnowledge?.skill, response.messageId);
+      response.responseText = savedWork.text;
       await saveConversation(template, newChatUrl);
       const savedMemory = await loadSalesWorkMemory(supabase, orgId, contact.id);
       if (mounted.current) { setWorkMemory(savedMemory); setMemoryError(''); }
@@ -665,6 +686,8 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       setStatus({
         kind: 'done',
         mode: 'reply',
+        followupWarning: savedWork.warning,
+        inputEvidence: snapshotDraftEvidence(messages),
         text: response.responseText,
         chatUrl: newChatUrl,
         source: messageSource,
@@ -682,6 +705,8 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         source: 'gpt',
         mode: wasFollowUp ? 'gpt_followup' : 'gpt_first',
         prompt: promptForLog || '(prompt 未构造完成就出错了)',
+        response: rawResponseForLog,
+        chatUrl: chatUrlForLog,
         guidance: guidanceForLog || null,
         messageSource: messageSourceForLog,
         messageCount: messageCountForLog,
@@ -713,6 +738,8 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     void setReplyProgress(contact.id, 'generating', 'gpt');
     const startedAt = Date.now();
     let promptForLog = '';
+    let rawResponseForLog: string | null = null;
+    let chatUrlForLog: string | null = null;
     let sourceForLog: MessageSource = 'dom';
     let countForLog = 0;
     const useCustomGpt = true;
@@ -775,11 +802,14 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       });
       if (!response?.ok) throw new Error(response?.error ?? 'GPT 调用失败');
 
+      rawResponseForLog = response.responseText;
+      chatUrlForLog = response.chatUrl;
       const newChatUrl: string = response.chatUrl;
       if (!isConversationForGptTemplate({contact_id: contact.id, template_id: template.id, chat_url: newChatUrl}, contact.id, template)) {
         throw new Error('GPT返回的会话与本次模板不匹配，未保存工作记录。');
       }
-      response.responseText = await saveGeneratedWork(response.responseText, newChatUrl, template, workMemory, 'discuss', followupContext, approvedKnowledge?.skill);
+      const savedWork = await saveGeneratedWork(response.responseText, newChatUrl, template, workMemory, 'discuss', followupContext, approvedKnowledge?.skill, response.messageId);
+      response.responseText = savedWork.text;
       await saveConversation(template, newChatUrl);
       const savedMemory = await loadSalesWorkMemory(supabase, orgId, contact.id);
       if (mounted.current) { setWorkMemory(savedMemory); setMemoryError(''); }
@@ -802,6 +832,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       setStatus({
         kind: 'done',
         mode: 'discuss',
+        followupWarning: savedWork.warning,
         text: response.responseText,
         chatUrl: newChatUrl,
         source,
@@ -819,6 +850,8 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         source: 'gpt',
         mode: 'gpt_discuss',
         prompt: promptForLog || '(prompt 未构造完成就出错了)',
+        response: rawResponseForLog,
+        chatUrl: chatUrlForLog,
         guidance: q,
         messageSource: sourceForLog,
         messageCount: countForLog,
@@ -1032,6 +1065,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
             disabled={actionUnavailable}
             onClick={() => {
               freshResult.current = null;
+              void chrome.storage.local.remove(manualTemplateKey);
               setManualTemplateId(undefined);
               setSelectedTemplateId('');
             }}
@@ -1070,6 +1104,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
                 freshResult.current = null;
                 setSelectedTemplateId(e.target.value);
                 setManualTemplateId(e.target.value);
+                void chrome.storage.local.set({ [manualTemplateKey]: e.target.value });
               }}
               disabled={actionUnavailable}
               aria-label="GPT 模板"
@@ -1216,9 +1251,14 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
             <div className="sgc-error">{status.message}</div>
           )}
 
+          {status.kind === 'done' && status.followupWarning && (
+            <div role="status" className="sgc-gem-error">{status.followupWarning}</div>
+          )}
+
           {status.kind === 'done' && (
             <>
               <GeneratedAtBadge generatedAt={status.generatedAt} />
+              <DraftFreshnessNotice evidence={status.inputEvidence} identity={{ phone: contact.phone, name: contact.name, waName: contact.wa_name, groupJid: contact.group_jid }} />
               {status.templateName && (
                 <div className="sgc-muted" style={{ fontSize: 11 }}>生成模板：{status.templateName}</div>
               )}

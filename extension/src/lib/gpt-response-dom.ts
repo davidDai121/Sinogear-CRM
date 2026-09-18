@@ -34,6 +34,7 @@ export function readGptResponseSnapshot(prevId: string | null): GptResponseSnaps
   if (!last || curId === null || curId === prevId) return state;
 
   const ignored = [
+    '[data-sgc-quote-preview]',
     'button', 'script', 'style', 'noscript', '[role="toolbar"]',
     '[hidden]', '[aria-hidden="true"]',
     '[data-testid*="thinking" i]', '[aria-label*="Thinking" i]',

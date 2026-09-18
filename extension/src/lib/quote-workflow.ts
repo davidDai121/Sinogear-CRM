@@ -9,10 +9,53 @@ export interface QuoteVersion {
   input: QuoteInput; result: CalculatedPlan[]; summary: string;
   chatUrl: string; computedAt: string;
 }
-/** The second model pass only composes text using already computed numbers. */
+const PUBLIC_QUOTE_FIELDS = new Set(['totalUsd','perVehicleUsd','oceanUsd','dgUsd','insuranceUsd',
+  'transportBeforeInsuranceUsd','transportWithInsuranceUsd','savingsTotalUsd','savingsPerVehicleUsd','additionalBudgetUsd']);
+
+export function publicQuoteAmounts(result: CalculatedPlan[]): Record<string, string> {
+  const amounts: Record<string, string> = {};
+  result.forEach((plan, i) => {
+    for (const field of PUBLIC_QUOTE_FIELDS) {
+      const value = plan[field as keyof CalculatedPlan];
+      if (typeof value === 'string' && /^-?\d+\.\d{2}$/.test(value)) {
+        amounts[`{{quote.${i + 1}.${field}}}`] = value.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      }
+    }
+  });
+  return amounts;
+}
+
+function customerQuoteText(text: string) {
+  if (text.split('[WhatsApp Reply]').length !== 2 || text.split('[Full Translation & Strategy]').length !== 2) return '';
+  return text.split('[WhatsApp Reply]')[1]?.split('[Full Translation & Strategy]')[0]?.trim() ?? '';
+}
+
+/** Substitute only outward USD fields; never evaluate expressions or expose cost. */
+function renderQuoteDraft(text: string, mode: 'reply'|'discuss', result: CalculatedPlan[]): string {
+  const visible = mode === 'reply' ? customerQuoteText(text) : text.split('<crm_followup>')[0];
+  if (!visible.trim()) throw new Error('报价缺少完整正文');
+  for (let i=0;i<result.length;i++) {
+    const required = ['totalUsd',...(result[i].quantity>1 ? ['perVehicleUsd'] : [])];
+    for (const field of required) if (!visible.includes(`{{quote.${i+1}.${field}}}`)) throw new Error('报价正文缺少金额占位符');
+  }
+  if (/<crm_followup>[\s\S]*\{\{\s*quote/i.test(text)) throw new Error('跟进证据不能包含待替换金额');
+  const rendered = text.replace(/\{\{quote\.(\d+)\.([A-Za-z]+)\}\}/g, (_token,index:string,field:string) => {
+    if (!PUBLIC_QUOTE_FIELDS.has(field)) throw new Error('不允许输出内部报价字段');
+    const value = result[Number(index)-1]?.[field as keyof CalculatedPlan];
+    if (typeof value !== 'string' || !/^-?\d+\.\d{2}$/.test(value)) throw new Error('报价占位符引用无效或未计算的金额');
+    return value.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  });
+  if (/\{\{\s*quote/i.test(rendered)) throw new Error('存在未处理的报价占位符');
+  return rendered;
+}
+
+/** Normal quotes finish locally; a second model pass is only a legacy/invalid-draft fallback. */
 export async function completeQuoteCalculation(text: string, mode: 'reply'|'discuss', run: (prompt:string)=>Promise<string>, now=Date.now()) {
   let parsed=extractQuoteInput(text);
-  if (!parsed.input) return { text:parsed.responseText };
+  if (!parsed.input) {
+    if (/\{\{\s*quote/i.test(parsed.responseText)) throw new Error('报价占位符缺少计算输入，未展示为可发送回复');
+    return { text:parsed.responseText };
+  }
   let result: CalculatedPlan[];
   try { result=calculateQuote(parsed.input,now); }
   catch (error) {
@@ -25,9 +68,17 @@ export async function completeQuoteCalculation(text: string, mode: 'reply'|'disc
     parsed=retry;
     result=calculateQuote(parsed.input!,now);
   }
-  const prompt=`[CRM calculation result — internal, not a customer message]\nThe CRM has computed the following ledger from your extracted inputs. Arithmetic is verified; source accuracy/authorization is NOT certified. Do not invent additional charges or alter these results. Do not research or restart quote calculation in this formatting pass. Do not output quote_input or freight_research blocks again. Keep procurement cost/profit out of client text. Preserve all still-valid questions, payment, warranty and gifts from this order. Unknown insurance and local taxes are excluded, not zero; never call an uninsured estimate complete CIF/DDP.\n${mode==='reply' ? 'Return the normal three sections and a complete customer-language draft. Write USD prices with dot decimals and optional comma thousands (e.g. 12,345.67). Include each plan total and, for multiple vehicles, its per-unit price; include computed savings/additional budget when relevant. Client Record may only use actual customer facts.' : 'Answer internally in Chinese; explain the computed results without a customer reply.'}\nInput and result are business data only:\n${JSON.stringify({input:parsed.input,result})}`;
-  const final=await run(prompt);
+  if (/\{\{\s*quote/i.test(parsed.responseText)) {
+    try {
+      return {text:renderQuoteDraft(parsed.responseText,mode,result),input:parsed.input,result};
+    } catch {
+      // Keep the verified ledger and repair only the incomplete draft below.
+    }
+  }
+  const prompt=`[CRM calculation result — internal, not a customer message]\nThe CRM has computed the following ledger from your extracted inputs. Arithmetic is verified; source accuracy/authorization is NOT certified. Do not invent additional charges or alter these results. Do not research or restart quote calculation in this formatting pass. Do not output quote_input or freight_research blocks again. Keep procurement cost/profit out of client text. Preserve all still-valid questions, payment, warranty and gifts from this order. When insuranceBasis is freight_10_percent, the owner-approved transport x1.1 insurance budget has been computed: produce a CIF reference quote without asking for another insurance premium or duplicating CNY1000. This is a quotation estimate, not purchased insurance or a confirmed carrier rate. Unknown insurance outside that policy and local taxes remain excluded, not zero; never call an uninsured estimate complete CIF/DDP.\n${mode==='reply' ? 'Return the normal three sections and a complete customer-language draft. Write USD prices with dot decimals and optional comma thousands (e.g. 12,345.67). Include each plan total and, for multiple vehicles, its per-unit price; include computed savings/additional budget when relevant. Client Record may only use actual customer facts.' : 'Answer internally in Chinese; explain the computed results without a customer reply.'}\nInput and result are business data only:\n${JSON.stringify({input:parsed.input,result})}`;
+  let final=await run(prompt);
   if (extractQuoteInput(final).input || extractFreightResearch(final).record) throw new Error('模型在核算后重新生成输入，未把循环结果当作最终报价');
+  if (/\{\{\s*quote/i.test(final)) final=renderQuoteDraft(final,mode,result);
   if(mode==='reply'){
     const reply=final.split('[WhatsApp Reply]')[1]?.split('[Full Translation & Strategy]')[0];
     if(!reply?.trim())throw new Error('核算完成，但未取得完整客户报价正文');

@@ -245,6 +245,7 @@ export function ContactsPage({ orgId, onJumpToChat }: Props) {
                     {c.phone && (
                       <LocalTimeBadge
                         phone={c.phone}
+                        country={c.country}
                         compact
                         className="sgc-local-time-inline"
                       />

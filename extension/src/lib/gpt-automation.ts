@@ -1,3 +1,4 @@
+import { GPT_RESPONSE_TIMEOUT_MS, GptResponseTimeoutError, waitForCompletedGptResponse } from './gpt-response-wait';
 import { readGptResponseSnapshot } from './gpt-response-dom';
 import { bindSkillConversation, fillGptSkillPrompt, validateGptSkill, type GptSkill } from './gpt-skill';
 
@@ -31,7 +32,7 @@ export interface GptRunOptions {
   prompt: string;
   /** 前台（active tab）开 true 便于调试，默认 false 后台跑 */
   active?: boolean;
-  /** 响应总超时，默认 360s（GPT-5 Thinking 推理慢） */
+  /** 响应总超时，默认20分钟，包含查资料和最终正文生成 */
   responseTimeoutMs?: number;
   /** 是否尝试切到 GPT-5 Thinking 模型（仅新对话需要；续聊保留上次模型） */
   ensureThinking?: boolean;
@@ -40,6 +41,7 @@ export interface GptRunOptions {
 
 export interface GptRunResult {
   responseText: string;
+  messageId?: string;
   /** 发送后 chatgpt.com 跳转到的 chat URL（chatgpt.com/c/<uuid>） */
   chatUrl: string;
 }
@@ -94,17 +96,20 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
     }
     const responseText = await waitForResponse(
       tabId,
-      opts.responseTimeoutMs ?? 360000,
+      opts.responseTimeoutMs ?? GPT_RESPONSE_TIMEOUT_MS,
       baseline,
     );
 
     const finalTab = await chrome.tabs.get(tabId);
+    const messageId = (await readTurnAnchors(tabId)).lastAssistantId ?? undefined;
     const chatUrl = skill ? bindSkillConversation(finalTab.url ?? '', skill) : finalTab.url ?? opts.url;
 
     await chrome.tabs.remove(tabId).catch(() => {});
-    return { responseText, chatUrl };
+    return { responseText, chatUrl, messageId };
   } catch (err) {
-    if (tabId !== null) {
+    // Keep a timed-out research conversation available; closing its tab may
+    // interrupt generation and makes the error's "open original chat" unhelpful.
+    if (tabId !== null && !(err instanceof GptResponseTimeoutError)) {
       await chrome.tabs.remove(tabId).catch(() => {});
     }
     throw err;
@@ -832,69 +837,10 @@ async function waitForResponse(
     throw new Error('ChatGPT 未开始回复（90 秒内无响应迹象）');
   }
 
-  // 2. 给 GPT 时间真正开始
-  await sleep(3000);
-
-  let lastContent = '';
-  let stableCount = 0;
-  let sawGenerating = false;
-
-  while (Date.now() - start < timeoutMs) {
-    const state = await execute(
-      tabId,
-      readGptResponseSnapshot,
-      [baselineId],
-    );
-
-    if (state.generating) sawGenerating = true;
-
-    // 主路径：曾看到 Stop + 现在消失 → 候选完成。
-    //
-    // 阈值 100 字符（之前 30 太低）：GPT-5 Thinking "思考完→开始回复" 之间
-    // 短暂藏 Stop 按钮时，content 可能只有几十字符的 [Client Record] 前导
-    // (40-80 chars)，超 30 阈值就误判完成；提到 100 把这类 race 挡掉，
-    // 真实完整回复几乎都是 500+ chars，门槛绝不会卡住。
-    if (sawGenerating && !state.generating && state.content.length > 100) {
-      // sleep 4s（之前 2.5s）：给 Thinking→Reply 的过渡期足够时间让 Stop
-      // 按钮重新出现，避开把过渡期当完成的 race
-      await sleep(4000);
-      const final = await execute(
-        tabId,
-        readGptResponseSnapshot,
-        [baselineId],
-      );
-      if (!final.generating && final.content.length >= state.content.length) {
-        return final.content;
-      }
-      lastContent = final.content;
-      stableCount = 0;
-      await sleep(2500);
-      continue;
-    }
-
-    // 后备：从未看到 Stop → 靠内容稳定 + Copy 按钮判定
-    if (!sawGenerating) {
-      if (
-        state.content &&
-        state.content.length > 100 &&
-        state.content === lastContent &&
-        state.hasCopyBtn
-      ) {
-        stableCount++;
-        if (stableCount >= 3) return state.content;
-      } else {
-        stableCount = 0;
-      }
-    }
-
-    lastContent = state.content;
-    await sleep(3000);
-  }
-
-  if (lastContent && lastContent.length > 50) {
-    return lastContent;
-  }
-  throw new Error('ChatGPT 响应超时');
+  return waitForCompletedGptResponse(
+    () => execute(tabId, readGptResponseSnapshot, [baselineId]),
+    { timeoutMs: Math.max(0, timeoutMs - (Date.now() - start)) },
+  );
 }
 
 // ── helpers ──

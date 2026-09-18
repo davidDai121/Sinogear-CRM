@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Calculate and append a quote record from JSON; no network or customer writes.
-compare: {mode, unit_price_usd, price_source, options:[{quantity,freight_usd,freight_source,insurance_usd?:null|number,insurance_source?:string}]}
+compare: {mode, unit_price_usd, price_source, options:[{quantity,freight_usd,freight_source,insurance_usd?:null|number,insurance_basis?:"freight_10_percent",insurance_source?:string}]}
 cost: {mode, procurement_cny, procurement_source, ground_cny, ground_source,
        profit_cny, profit_source, cny_per_usd, fx_source, extra:[{amount_cny,source,approved}], fixed_price_usd?:number, fixed_price_source?:string}
 All inputs are per vehicle in cost mode. Comparison freight/insurance are totals per option.
+freight_usd includes uncovered approved surcharges/DG converted to USD, excluding costs already in FOB.
 """
 import argparse, json, uuid
 from pathlib import Path
@@ -31,6 +32,11 @@ def calculate(data):
             source(item,'freight_source');freight=number(item['freight_usd'])
             # Per-option insurance avoids treating one vehicle's insurance as two vehicles'.
             insurance=item.get('insurance_usd')
+            if 'insurance_basis' in item:
+                if item['insurance_basis']!='freight_10_percent': raise ValueError('不支持的保险预算口径')
+                if insurance is not None: raise ValueError('不能同时指定固定保险费和总运费10%保险预算')
+                source(item,'insurance_source')
+                insurance=freight*D('0.1')
             if insurance is not None: source(item,'insurance_source')
             total=unit*q+freight+(number(insurance) if insurance is not None else D(0))
             plans.append({'quantity':q,'total_usd':money(total),'per_vehicle_usd':money(total/q),

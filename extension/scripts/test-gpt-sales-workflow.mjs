@@ -41,3 +41,11 @@ test('fresh customer gets general workflow but no prior customer-specific approv
  assert.ok(a.includes('ALPHA-GIFT'));assert.ok(!b.includes('ALPHA-GIFT'));assert.ok(!b.includes('14000'));
  assert.ok(b.includes(header));
 });
+
+test('all prompt entrypoints carry single-pass quoting and pending owner clarification continuity',()=>{
+ for(const prompt of [first({contact,messages,useCustomGpt:true,salesGuidance:'就是dg'}),follow({contact,newMessages:messages,salesGuidance:'就是dg'}),discuss({ctx:{contact,messages,useCustomGpt:true},question:'报价'}),discuss({contact,newMessages:messages,question:'报价'})]){
+  assert.match(prompt,/ONE-PASS QUOTING/);assert.match(prompt,/continues the pending instruction/);
+  assert.doesNotMatch(prompt,/Leave WhatsApp Reply empty for this intermediate/);
+  assert.match(prompt,/PHEV is supported/);
+ }
+});

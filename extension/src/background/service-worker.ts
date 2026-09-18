@@ -467,6 +467,7 @@ async function handleGptRun(req: GptRunRequest) {
       ok: true,
       responseText: result.responseText,
       chatUrl: result.chatUrl,
+      messageId: result.messageId,
     };
   } catch (err) {
     return { ok: false, error: String((err as Error)?.message ?? err) };

@@ -21,6 +21,8 @@ function mount() {
 
   const host = document.createElement('div');
   host.id = HOST_ID;
+  host.className = 'notranslate';
+  host.setAttribute('translate', 'no');
   document.body.appendChild(host);
 
   const root = createRoot(host);

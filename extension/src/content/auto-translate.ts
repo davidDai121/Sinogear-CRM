@@ -5,6 +5,8 @@
  * 由 chrome.storage.local.autoTranslate 控制；同时给每个气泡注入手动 🌐 按钮。
  */
 
+import { readOriginalMessageText, messageBubbles, isVirtualMessageShell } from './whatsapp-message-dom';
+
 const TRANSLATED_ATTR = 'data-sgc-translated';
 const TRANSLATION_CLASS = 'sgc-translation';
 const PROCESSING_ATTR = 'data-sgc-translating';
@@ -56,18 +58,12 @@ function shouldTranslate(text: string): boolean {
  * 跟 whatsapp-messages.ts 的 readChatMessages 同源（那边已经加过 conv-msg- 兜底）。
  */
 function getBubbles(root: ParentNode): Element[] {
-  const legacy = root.querySelectorAll('.message-in, .message-out');
-  if (legacy.length > 0) return Array.from(legacy);
-  return Array.from(root.querySelectorAll('[data-testid^="conv-msg-"]'));
+  return messageBubbles(root).filter(el => !isVirtualMessageShell(el));
 }
 
 /** 读元素文本，先剥掉我们自己注入的翻译行 / 翻译按钮，避免再翻译被污染 */
 function cleanText(el: HTMLElement): string {
-  const clone = el.cloneNode(true) as HTMLElement;
-  clone
-    .querySelectorAll(`.${TRANSLATION_CLASS}, .${TRANSLATE_BTN_CLASS}`)
-    .forEach((n) => n.remove());
-  return (clone.innerText || clone.textContent || '').trim();
+  return readOriginalMessageText(el);
 }
 
 function readBubbleText(bubble: Element): string {
@@ -124,6 +120,8 @@ function injectTranslation(bubble: Element, translation: string) {
   bubble.querySelector(`.${TRANSLATION_CLASS}`)?.remove();
   const div = document.createElement('div');
   div.className = TRANSLATION_CLASS;
+  div.classList.add('notranslate');
+  div.setAttribute('translate', 'no');
   div.textContent = `🌐 ${translation}`;
 
   injectionContainer(bubble).appendChild(div);

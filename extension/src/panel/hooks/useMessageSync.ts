@@ -96,11 +96,15 @@ export function useMessageSync(
         if (!ok) return; // header 不匹配 → 当前可见聊天不是这个 contact，跳过
       }
       inFlightRef.current = true;
-      lastFingerprint = fp;
       setSyncing(true);
       try {
         const result = await syncMessages(contactId, messages);
         if (cancelled) return;
+        if (result.error) {
+          console.warn('[useMessageSync] retry pending:', result.error);
+          return;
+        }
+        lastFingerprint = fp;
         setLastInserted(result.inserted);
         if (result.inserted > 0) {
           setRefreshKey((k) => k + 1);

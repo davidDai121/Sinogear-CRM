@@ -225,7 +225,7 @@ export function ChatPage({ orgId }: Props) {
             {chat.phone && headerName !== chat.phone && (
               <span className="sgc-side-panel-phone">{chat.phone}</span>
             )}
-            {chat.phone && <LocalTimeBadge phone={chat.phone} />}
+            {chat.phone && <LocalTimeBadge phone={chat.phone} country={currentCrmContact?.contact?.country} />}
           </div>
           <div className="sgc-side-panel-body">
             <ContactCard chat={chat} orgId={orgId} />
