@@ -1,13 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Database, TaskStatus } from '@/lib/database.types';
-import { jumpToChat } from '@/lib/jump-to-chat';
-import {
-  waitForChatMessages,
-  maybeLogReadFailure,
-  type ChatMessage,
-} from '@/content/whatsapp-messages';
-import { loadMessages, mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
+import { loadChatContext, type ChatContextTarget } from '@/lib/chat-context';
 import { stringifyError } from '@/lib/errors';
 import { logContactEvent } from '@/lib/events-log';
 import type {
@@ -18,9 +12,9 @@ import type {
 type TaskRow = Database['public']['Tables']['tasks']['Row'];
 
 interface Props {
-  contactId: string;
+  /** 传整个 contact（ContactRow 结构兼容）——AI 建议读消息时要做身份校验 */
+  contact: ChatContextTarget;
   orgId: string;
-  contactPhone?: string;
 }
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
@@ -48,7 +42,8 @@ function dueDateFromDays(days: number | null): string | null {
   return d.toISOString();
 }
 
-export function ContactTasksSection({ contactId, orgId, contactPhone }: Props) {
+export function ContactTasksSection({ contact, orgId }: Props) {
+  const contactId = contact.id;
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -127,40 +122,13 @@ export function ContactTasksSection({ contactId, orgId, contactPhone }: Props) {
     setAiError(null);
     setSuggestions([]);
     try {
-      // 1. 先试 DOM（WA Web 当前打开的聊天）；跳不到（如 David Eze 这类 WA Web
-      //    本地无 chat 但已导入 .txt 的客户）就让 messages 留空，下面 fallback
-      //    到 messages 表。这里 jumpToChat 不开 deep-link：reload 会中断这次 AI 调用。
-      let messages: ChatMessage[] = [];
-      if (contactPhone) {
-        const queryDigits = contactPhone.replace(/^\+/, '');
-        const ok = await jumpToChat(queryDigits);
-        if (ok) messages = await waitForChatMessages(5000, 30, 1);
-      } else {
-        // 群聊：用轮询版，WA Web 冷启动单发会空
-        messages = await waitForChatMessages(5000, 30, 1);
-      }
-      // 2. DOM 有消息：fire-and-forget 持久化 + merge DB 老消息（DOM 渲染从下往上慢慢出现，
-      //    可能只有最新 1 条，必须靠 DB 兜底——参见 GPT/Claude/Gem section 一样的处理）
-      if (messages.length > 0) {
-        void syncMessages(contactId, messages);
-        messages = await mergeDomWithDbMessages(messages, contactId, 50);
-      } else {
-        // 3. DOM 空 → fallback 到数据库（导入的历史 + 之前 useMessageSync 同步过的）
-        const rows = await loadMessages(contactId, 50);
-        if (!rows.length) {
-          maybeLogReadFailure('ContactTasksSection AI suggest cold-start');
-          throw new Error(
-            '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，或在「客户」tab 用「📥 导入手机聊天」导入 .txt 历史。',
-          );
-        }
-        messages = rows.map((r) => ({
-          id: r.wa_message_id,
-          fromMe: r.direction === 'outbound',
-          text: r.text,
-          timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
-          sender: null,
-        }));
-      }
+      // DOM 优先 + DB 兜底，共享实现见 lib/chat-context.ts。
+      // 以前这里 jumpToChat 没传 requireMatch、syncMessages 前也没身份校验
+      //（跨聊天污染洞），统一后补上了
+      const { messages } = await loadChatContext(contact, {
+        needsJump: true,
+        logTag: 'ContactTasksSection.suggest',
+      });
 
       const existingOpenTitles = tasks
         .filter((t) => t.status === 'open')

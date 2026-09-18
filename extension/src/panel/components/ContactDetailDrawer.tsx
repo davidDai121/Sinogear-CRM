@@ -169,14 +169,10 @@ export function ContactDetailDrawer({ contactId, orgId, onClose, onChanged }: Pr
 
                   {contact.group_jid && <GroupMembersSection groupJid={contact.group_jid} />}
 
-                  <TagsSection contactId={contact.id} contactPhone={contact.phone ?? undefined} />
+                  <TagsSection contact={contact} />
                   <VehicleInterestsSection contactId={contact.id} />
                   <QuotesSection contactId={contact.id} />
-                  <ContactTasksSection
-                    contactId={contact.id}
-                    orgId={orgId}
-                    contactPhone={contact.phone ?? undefined}
-                  />
+                  <ContactTasksSection contact={contact} orgId={orgId} />
                   <MessagesHistorySection
                     contactId={contact.id}
                     contactName={contact.name || contact.wa_name || contact.phone || '群聊'}

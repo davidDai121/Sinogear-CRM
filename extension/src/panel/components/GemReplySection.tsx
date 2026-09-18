@@ -3,13 +3,12 @@ import { usePersistedReplyStatus } from '@/panel/hooks/usePersistedReplyStatus';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
-import { jumpToChat, verifyHeaderMatches, type RequireMatch } from '@/lib/jump-to-chat';
+import { jumpToChat } from '@/lib/jump-to-chat';
 import {
-  waitForChatMessages,
-  maybeLogReadFailure,
-  type ChatMessage,
-} from '@/content/whatsapp-messages';
-import { loadMessages, mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
+  loadChatContext,
+  loadGroupMemberNames,
+  type MessageSource,
+} from '@/lib/chat-context';
 import { formatNewCustomer, formatUpdate } from '@/lib/gem-prompt';
 import {
   parseBudgetValue,
@@ -47,10 +46,6 @@ interface Props {
   /** 如果不在当前 WhatsApp 聊天窗口，传手机号让我们 jumpToChat */
   needsJump?: boolean;
 }
-
-/** 'dom' = 实时 WA 聊天；'db' = 导入的历史；
- *  'guidance' = 完全没历史，仅按销售指令冷启动生成（新客户首条开场白） */
-type MessageSource = 'dom' | 'db' | 'guidance';
 
 type Status =
   | { kind: 'idle' }
@@ -182,81 +177,15 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
     const modeForLog = existingConv ? 'gem_followup' : 'gem_first';
     try {
       // 1. Read chat messages — DOM 优先 + DB merge + 持久化；DOM 空时 fallback 到
-      // messages 表（导入的历史）
-      //
-      // DOM 路径必须 merge DB：WA Web 渲染从下往上慢慢出现，刚发完图就点 Generate
-      // DOM 可能只有最新 1 条 bubble。waitForChatMessages 改稳态判定后好了很多，
-      // 但 DB 兜底仍然关键。同时 fire-and-forget syncMessages 把本次 DOM 持久化，
-      // 下次 Generate 即使 DOM 全丢（虚拟滚动）也能从 DB 完整恢复。
-      //
-      // jumpToChat 不开启 deep-link fallback——若开启会触发 reload，中断当前 generate()。
-      const loadAiMessages = async (): Promise<{
-        messages: ChatMessage[];
-        source: MessageSource;
-      }> => {
-        // 严格身份校验 —— 必传，防止 jumpToChat 跳错 chat 后 DOM 读到的是别人的消息
-        // 被 syncMessages 写错位到当前 contact，污染 messages 表
-        const requireMatch: RequireMatch = {
-          phone: contact.phone,
-          name: contact.name,
-          waName: contact.wa_name,
-          groupJid: contact.group_jid,
-        };
-        let dom: ChatMessage[] = [];
-        if (needsJump) {
-          // 个人按手机号跳，群按群名跳（jumpToChat 会按搜索匹配上）
-          const query = contact.phone
-            ? contact.phone.replace(/^\+/, '')
-            : contact.name?.trim() || contact.wa_name?.trim() || '';
-          if (query) {
-            const ok = await jumpToChat(query, { requireMatch });
-            if (ok) dom = await waitForChatMessages(5000, 30, 1);
-          } else {
-            dom = await waitForChatMessages(5000, 30, 1);
-          }
-        } else {
-          // needsJump=false 也 verify 一遍防 React state 跟 WA chat 之间的 race
-          if (verifyHeaderMatches(requireMatch)) {
-            dom = await waitForChatMessages(5000, 30, 1);
-          }
-        }
-        // 写 DB 前最后一次 sanity check（防 race：generate 期间用户切走 WA chat）
-        if (dom.length > 0 && !verifyHeaderMatches(requireMatch)) {
-          console.warn(
-            '[GemReplySection] DOM 不再是目标客户（用户切了 WA chat？），放弃 DOM 消息走 DB',
-            { contactId: contact.id, phone: contact.phone },
-          );
-          dom = [];
-        }
-        if (dom.length > 0) {
-          void syncMessages(contact.id, dom);
-          const merged = await mergeDomWithDbMessages(dom, contact.id, 50);
-          return { messages: merged, source: 'dom' };
-        }
-        // DOM 没消息（手机端聊天 / WA Web 还没加载），用导入的历史
-        const rows = await loadMessages(contact.id, 50);
-        if (rows.length === 0) {
-          // 冷启动：完全没历史，但用户在销售指令里写了意图 → 按指令冷开
-          if (followup.trim()) return { messages: [], source: 'guidance' };
-          maybeLogReadFailure('GemReplySection.generate cold-start');
-          throw new Error(
-            '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，「客户」tab 用「📥 导入手机聊天」导入 .txt 历史，或在下方"销售指令"里写明意图来冷启动。',
-          );
-        }
-        return {
-          messages: rows.map((r) => ({
-            id: r.wa_message_id,
-            fromMe: r.direction === 'outbound',
-            text: r.text,
-            timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
-            // DB 加载的历史消息没存 sender；群聊从 messages 表 fallback 时拿不到，
-            // 但 Gem prompt 里仍能正常按 fromMe 区分销售/客户
-            sender: null,
-          })),
-          source: 'db',
-        };
-      };
-      const { messages, source: messageSource } = await loadAiMessages();
+      // messages 表（导入的历史）。共享实现见 lib/chat-context.ts。
+      const { messages, source: messageSource } = await loadChatContext(
+        contact,
+        {
+          needsJump: Boolean(needsJump),
+          logTag: 'GemReplySection.generate',
+          guidance: followup,
+        },
+      );
 
       // 2. Load vehicle interests for richer context —— 续聊也拉（formatUpdate 现在带
       // 精简客户档案 + 车型兴趣，让 Gem 对话长后也不会忘客户 anchor）
@@ -267,28 +196,10 @@ export function GemReplySection({ orgId, contact, needsJump }: Props) {
       const vehicleInterests: VehicleInterestRow[] = viData ?? [];
 
       // 2.5. 群聊：从 IDB 拉成员名单给 Gem 用
-      let groupMemberNames: string[] | undefined;
-      if (isGroup && contact.group_jid && !existingConv) {
-        try {
-          const { readWhatsAppData } = await import('@/lib/whatsapp-idb');
-          const wa = await readWhatsAppData();
-          const chat = wa.chats.find((c) => c.id === contact.group_jid);
-          if (chat) {
-            const contactByJid = new Map(wa.contacts.map((c) => [c.id, c]));
-            groupMemberNames = chat.participants.map((jid) => {
-              const c = contactByJid.get(jid);
-              return (
-                (c?.name ?? '').trim() ||
-                (c?.shortName ?? '').trim() ||
-                (c?.pushname ?? '').trim() ||
-                jid.split('@')[0]
-              );
-            });
-          }
-        } catch {
-          // 拿不到成员不致命
-        }
-      }
+      const groupMemberNames =
+        isGroup && !existingConv
+          ? await loadGroupMemberNames(contact.group_jid)
+          : undefined;
 
       // 3. Build prompt + url
       const url = existingConv?.gem_chat_url ?? template.gem_url;

@@ -2,20 +2,20 @@ import { quoteConversationId, saveQuotePreview } from '@/lib/quote-preview';
 import { snapshotDraftEvidence, type DraftEvidence } from '@/lib/draft-freshness';
 import { DraftFreshnessNotice } from './DraftFreshnessNotice';
 import { completeFollowupResult } from '@/lib/gpt-followup-result';
-import { collectRecentChatMessages } from '@/content/whatsapp-message-snapshot';
+import {
+  loadChatContext,
+  loadGroupMemberNames,
+  type MessageSource,
+} from '@/lib/chat-context';
 import { loadFollowupContext, followupPrompt, saveFollowup, type FollowupContext } from '@/lib/gpt-followup';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePersistedReplyStatus } from '@/panel/hooks/usePersistedReplyStatus';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
-import { jumpToChat, verifyHeaderMatches, type RequireMatch } from '@/lib/jump-to-chat';
-import {
-  waitForChatMessages,
-  maybeLogReadFailure,
-  type ChatMessage,
-} from '@/content/whatsapp-messages';
-import { loadMessages, mergeDomWithDbMessages, syncMessages } from '@/lib/message-sync';
+import { jumpToChat } from '@/lib/jump-to-chat';
+import { type ChatMessage } from '@/content/whatsapp-messages';
+import { loadMessages } from '@/lib/message-sync';
 import {
   buildFirstMessage,
   buildFollowUpMessage,
@@ -52,10 +52,6 @@ interface Props {
 }
 
 type Mode = 'reply' | 'discuss';
-
-/** 'dom' = 实时 WA 聊天；'db' = 导入的历史；
- *  'guidance' = 完全没历史，仅按销售指令冷启动生成（新客户首条开场白） */
-type MessageSource = 'dom' | 'db' | 'guidance';
 
 type Status =
   | { kind: 'idle' }
@@ -360,110 +356,18 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     void chrome.storage.local.set({ gptForeground: next });
   };
 
-  // ── 公共：读 messages（DOM 优先，DB merge 补齐，最后 fallback 纯 DB） ──
-  //
-  // 关键：DOM 路径下也强制 merge DB —— 因为 WA Web 渲染消息从下往上慢慢出现，
-  // 销售刚发完图就点 Generate 时 DOM 可能只有最新 1 条 bubble，DB 必须兜底
-  // 把老消息加回来（waitForChatMessages 改稳态判定后好了很多，但仍可能漏）。
-  // 同时 fire-and-forget syncMessages 让本次 DOM 持久化到 DB，下次 Generate
-  // 即使 DOM 全丢（虚拟滚动）也能从 DB 完整恢复。
-  const loadChatMessages = async (): Promise<{
-    messages: ChatMessage[];
-    source: MessageSource;
-  }> => {
-    // 严格身份校验 —— 必传，防止 jumpToChat 跳错 chat 后 DOM 读到的是别人的消息
-    // 被 syncMessages 写错位到当前 contact，污染 messages 表（历史已经踩过：1349 条
-    // sent_at=NULL 媒体占位就是这么来的相关变种）
-    const requireMatch: RequireMatch = {
-      phone: contact.phone,
-      name: contact.name,
-      waName: contact.wa_name,
-      groupJid: contact.group_jid,
-    };
-    let messages: ChatMessage[] = [];
-    if (needsJump) {
-      const query = contact.phone
-        ? contact.phone.replace(/^\+/, '')
-        : contact.name?.trim() || contact.wa_name?.trim() || '';
-      if (query) {
-        const ok = await jumpToChat(query, { requireMatch });
-        if (ok) {
-          messages = await waitForChatMessages(5000, 30, 1);
-        }
-      } else {
-        messages = await waitForChatMessages(5000, 30, 1);
-      }
-    } else {
-      // needsJump=false（聊天 tab ContactCard 模式）也要 verify —— React state 跟
-      // 当前 WA chat 之间有短暂 race，verify 拦得住
-      if (verifyHeaderMatches(requireMatch)) {
-        messages = await waitForChatMessages(5000, 30, 1);
-      }
-    }
-    // 写 DB 前最后一次 sanity check（防 race：generate 期间用户切走 WA chat）
-    if (messages.length > 0 && !verifyHeaderMatches(requireMatch)) {
-      console.warn(
-        '[GPTReplySection] DOM 不再是目标客户（用户切了 WA chat？），放弃 DOM 消息走 DB',
-        { contactId: contact.id, phone: contact.phone },
-      );
-      messages = [];
-    }
-    if (verifyHeaderMatches(requireMatch)) {
-      messages = await collectRecentChatMessages(() => verifyHeaderMatches(requireMatch));
-    }
-    if (messages.length > 0) {
-      // DOM 路径：持久化 + merge
-      const synced = await syncMessages(contact.id, messages);
-      if (synced?.error) throw new Error(`最新消息未同步，未用旧记录判断跟进：${synced.error}`);
-      const merged = await mergeDomWithDbMessages(messages, contact.id, 50);
-      return { messages: merged, source: 'dom' };
-    }
-    // DOM 空 → 纯 DB
-    const rows = await loadMessages(contact.id, 50);
-    if (rows.length === 0) {
-      // 冷启动：完全没历史，但用户在销售指令里写了意图 → 按指令冷开。
-      // 用于新客户首条开场白（如 FB lead 注册没说话就要主动推车）。
-      if (guidance.trim()) {
-        return { messages: [], source: 'guidance' };
-      }
-      maybeLogReadFailure('GPTReplySection.generate cold-start');
-      throw new Error(
-        '当前聊天没有可读消息，且数据库里也没历史记录。请先打开 WhatsApp 聊天加载消息，「客户」tab 用「📥 导入手机聊天」导入 .txt 历史，或在下方"销售指令"里写明意图来冷启动。',
-      );
-    }
-    return {
-      messages: rows.map((r) => ({
-        id: r.wa_message_id,
-        fromMe: r.direction === 'outbound',
-        text: r.text,
-        timestamp: r.sent_at ? new Date(r.sent_at).getTime() : null,
-        sender: null,
-      })),
-      source: 'db',
-    };
-  };
-
-  const loadGroupMemberNames = async (): Promise<string[] | undefined> => {
-    if (!contact.group_jid) return undefined;
-    try {
-      const { readWhatsAppData } = await import('@/lib/whatsapp-idb');
-      const wa = await readWhatsAppData();
-      const chat = wa.chats.find((c) => c.id === contact.group_jid);
-      if (!chat) return undefined;
-      const contactByJid = new Map(wa.contacts.map((c) => [c.id, c]));
-      return chat.participants.map((jid) => {
-        const c = contactByJid.get(jid);
-        return (
-          (c?.name ?? '').trim() ||
-          (c?.shortName ?? '').trim() ||
-          (c?.pushname ?? '').trim() ||
-          jid.split('@')[0]
-        );
-      });
-    } catch {
-      return undefined;
-    }
-  };
+  // 读 messages：DOM 优先 + DB merge + 持久化，DOM 空 fallback 纯 DB。
+  // 共享实现见 lib/chat-context.ts（含身份校验 / 冷启动语义的完整注释）。
+  const loadChatMessages = () =>
+    loadChatContext(contact, {
+      needsJump: Boolean(needsJump),
+      logTag: 'GPTReplySection.generate',
+      guidance,
+      // GPT 跟进保存前必须确保最新消息已入库，sync 失败要抛错
+      awaitSync: true,
+      // DOM 路径向上滚动补采更多历史
+      collectRecent: true,
+    });
 
   const loadActionContext = async (discussionQuestion?: string) => {
     const request = ++routeContextRequest.current;
@@ -604,7 +508,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       const { messages, source: messageSource, vehicleInterests, template, approvedKnowledge, workMemory, conversation, followupContext } = await loadActionContext();
       wasFollowUp = !!conversation;
       const isGroup = !!contact.group_jid;
-      const groupMemberNames = isGroup && !conversation ? await loadGroupMemberNames() : undefined;
+      const groupMemberNames = isGroup && !conversation ? await loadGroupMemberNames(contact.group_jid) : undefined;
       const url = conversation?.chat_url ?? template.gpt_url;
       let prompt = conversation
         ? buildFollowUpMessage({
@@ -751,7 +655,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       if (!conversation) {
         // 第一次讨论 — 带客户上下文 + 历史
         const isGroup = !!contact.group_jid;
-        const groupMemberNames = isGroup ? await loadGroupMemberNames() : undefined;
+        const groupMemberNames = isGroup ? await loadGroupMemberNames(contact.group_jid) : undefined;
         prompt = buildDiscussionMessage({
           ctx: {
             contact,
