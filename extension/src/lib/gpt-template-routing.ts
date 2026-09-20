@@ -4,8 +4,11 @@ import { isSalesPitch } from './sales-pitch';
 import { decodeGptTemplateDescription } from './gpt-template-knowledge';
 import { R08_SKILL_ID } from './gpt-skill';
 
-// This is the owner's verified R08 GPT identity, not a template display name.
+// Verified R08 GPT identities in the owners' separate ChatGPT accounts.
+// Routing may recognize both; conversation reuse still requires the exact ID.
 export const R08_GPT_ID = 'g-6aa7711ad9cc8191aa3d3693cfd7ad9f';
+export const MENGLONG_R08_GPT_ID = 'g-6aaff2e20f848191a17b81f6786cdebe';
+const R08_GPT_IDS = new Set([R08_GPT_ID, MENGLONG_R08_GPT_ID]);
 
 interface Template {
   id: string;
@@ -102,7 +105,8 @@ function templateSkill(template: { description?: string | null }) {
 }
 
 function isR08Template(template: Template): boolean {
-  return templateSkill(template)?.id === R08_SKILL_ID || customGptId(template.gpt_url) === R08_GPT_ID;
+  const gptId = customGptId(template.gpt_url);
+  return templateSkill(template)?.id === R08_SKILL_ID || (gptId !== null && R08_GPT_IDS.has(gptId));
 }
 
 export function resolveGptTemplateRoute<T extends Template>(

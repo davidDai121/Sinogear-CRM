@@ -80,10 +80,29 @@ type Status =
       templateName?: string;
       /** 自动由 usePersistedReplyStatus 注入（done 状态写 chrome.storage 时盖戳） */
       generatedAt?: number;
+      requestId?: string;
       followupWarning?: string;
       inputEvidence?: DraftEvidence;
     }
   | { kind: 'error'; message: string };
+
+interface PendingGptAction {
+  requestId: string;
+  orgId: string;
+  contactId: string;
+  mode: Mode;
+  template: GptTemplateRow;
+  workMemory: SalesWorkMemory;
+  followupContext: FollowupContext;
+  skill?: GptSkill;
+  source: MessageSource;
+  count: number;
+  prompt: string;
+  guidance: string | null;
+  startedAt: number;
+  wasFollowUp?: boolean;
+  inputEvidence?: DraftEvidence;
+}
 
 /**
  * GPT 回复 — 走 chatgpt.com 网页端自动化。
@@ -128,20 +147,52 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
   const [routeContextError, setRouteContextError] = useState('');
   const actionLock = useRef(false);
   const requestMetrics = useRef({ requests: 0, inputChars: 0, outputChars: 0 });
-  const runGpt = async (options: Record<string, unknown>) => {
-    requestMetrics.current.requests++;
-    requestMetrics.current.inputChars += typeof options.prompt === 'string' ? options.prompt.length : 0;
-    const requestId = crypto.randomUUID();
+  const activeRequestId = useRef<string>();
+  const recoveryKey = `gpt.pendingAction:${orgId}:${contact.id}`;
+  const [pendingAction, setPendingAction] = useState<PendingGptAction | null>(null);
+  const [recoveryLoaded, setRecoveryLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void chrome.storage.local.get(recoveryKey).then(saved => {
+      const action = saved[recoveryKey] as PendingGptAction | undefined;
+      if (!cancelled) {
+        if (action?.orgId === orgId && action.contactId === contact.id) setPendingAction(action);
+        setRecoveryLoaded(true);
+      }
+    }).catch(error => { if (!cancelled) setStatus({ kind:'error', message:`读取生成记录失败，请刷新重试：${stringifyError(error)}` }); });
+    return () => { cancelled = true; };
+  }, [recoveryKey, orgId, contact.id]);
+  const awaitGptResult = async (requestId: string, initial?: any) => {
     const started = Date.now();
-    let result;
-    try { result = await chrome.runtime.sendMessage({...options, requestId}); }
-    catch { result = await chrome.runtime.sendMessage({type:'GPT_RESULT', requestId}); }
+    let result = initial ?? await chrome.runtime.sendMessage({type:'GPT_RESULT', requestId});
     while (result?.pending && Date.now() - started < 22 * 60 * 1000) {
       await new Promise(resolve => setTimeout(resolve, 1500));
       try { result = await chrome.runtime.sendMessage({type:'GPT_RESULT', requestId}); }
-      catch { /* 短暂通道断开后继续取同一个结果，不重发 prompt。 */ }
+      catch { /* Poll the same request after a temporary channel interruption. */ }
     }
-    if (result?.pending) throw new Error('GPT 仍未交付，原会话和已完成结果会保留，请稍后检查');
+    if (result?.pending) throw new Error('GPT 仍未交付，原会话和已完成结果会保留，请稍后取回结果');
+    return result;
+  };
+  const runGpt = async (options: Record<string, unknown>, action?: Omit<PendingGptAction, 'requestId' | 'orgId' | 'contactId'>) => {
+    requestMetrics.current.requests++;
+    requestMetrics.current.inputChars += typeof options.prompt === 'string' ? options.prompt.length : 0;
+    const requestId = crypto.randomUUID();
+    if (action) {
+      const saved = { ...action, requestId, orgId, contactId: contact.id };
+      // Save the customer binding and delivery context BEFORE sending. Refresh must
+      // not lose the only pointer to a durable background result.
+      activeRequestId.current = requestId;
+      await chrome.storage.local.set({ [recoveryKey]: saved });
+      setPendingAction(saved);
+    }
+    let initial;
+    try { initial = await chrome.runtime.sendMessage({...options, requestId}); }
+    catch { /* Poll, never resubmit an uncertain send. */ }
+    const result = await awaitGptResult(requestId, initial);
+    if (action && result?.ok === false) {
+      await chrome.storage.local.remove(recoveryKey);
+      setPendingAction(null);
+    }
     requestMetrics.current.outputChars += typeof result?.responseText === 'string' ? result.responseText.length : 0;
     return result;
   };
@@ -538,10 +589,100 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     return outcome;
   };
 
+  const deliverGptResponse = async (response: any, action: Omit<PendingGptAction, 'requestId' | 'orgId' | 'contactId'>, requestId = activeRequestId.current) => {
+    if (!response?.ok) throw new Error(response?.error ?? 'GPT 调用失败');
+    const finalize = async () => {
+      const pending = (await chrome.storage.local.get(recoveryKey))[recoveryKey] as PendingGptAction | undefined;
+      if (!pending || pending.requestId !== requestId) {
+        // Another mounted receiver already delivered this exact task. Never save it twice.
+        const doneKey = `replyStatus:gpt:${contact.id}`;
+        const done = (await chrome.storage.local.get(doneKey))[doneKey];
+        if (done?.kind === 'done' && done.requestId === requestId) setStatus(done);
+        if (mounted.current) setPendingAction(null);
+        return;
+      }
+      const { template, workMemory: memory, mode, followupContext, skill } = action;
+      const chatUrl: string = response.chatUrl;
+      if (!isConversationForGptTemplate({ contact_id:contact.id, template_id:template.id, chat_url:chatUrl }, contact.id, template)) {
+        throw new Error('GPT返回的会话与本次模板不匹配，未保存工作记录。');
+      }
+      const savedWork = await saveGeneratedWork(response.responseText, chatUrl, template, memory, mode, followupContext, skill, response.messageId);
+      await saveConversation(template, chatUrl);
+      const savedMemory = await loadSalesWorkMemory(supabase, orgId, contact.id);
+      if (mounted.current) { setWorkMemory(savedMemory); setMemoryError(''); }
+      const logId = await logAiReply({ orgId, contactId:contact.id, source:'gpt',
+        mode:mode === 'discuss' ? 'gpt_discuss' : action.wasFollowUp ? 'gpt_followup' : 'gpt_first',
+        prompt:action.prompt, response:savedWork.text, guidance:action.guidance,
+        messageSource:action.source, messageCount:action.count, chatUrl,
+        durationMs:Date.now()-action.startedAt, metrics:{...requestMetrics.current} });
+      freshResult.current = { templateId:template.id, chatUrl };
+      const done: Extract<Status, {kind:'done'}> = { kind:'done', mode, text:savedWork.text, chatUrl, source:action.source,
+        count:action.count, logId, templateId:template.id, templateName:template.name,
+        inputEvidence:action.inputEvidence, followupWarning:savedWork.warning, generatedAt:Date.now(), requestId };
+      await chrome.storage.local.set({ [`replyStatus:gpt:${contact.id}`]: done });
+      setStatus(done);
+      await setReplyProgress(contact.id, 'ready', 'gpt');
+      await chrome.storage.local.remove(recoveryKey);
+      if (mounted.current) setPendingAction(null);
+    };
+    // Both original and refreshed receivers may exist (including multiple WA tabs).
+    // Serialize final delivery and recheck the durable request under the lock.
+    if (navigator.locks) await navigator.locks.request(recoveryKey, finalize);
+    else await finalize();
+  };
+
+  const recoverGptResult = async () => {
+    if (!pendingAction || actionLock.current || busy) return;
+    actionLock.current = true;
+    setStatus({ kind:'reading' });
+    try {
+      const saved = (await chrome.storage.local.get(recoveryKey))[recoveryKey] as PendingGptAction | undefined;
+      if (!saved || saved.requestId !== pendingAction.requestId || saved.orgId !== orgId || saved.contactId !== contact.id) {
+        throw new Error('生成记录已变化，请刷新后检查');
+      }
+      const current = await loadFollowupContext(supabase, orgId, contact.id);
+      if (current.userId !== saved.followupContext.userId || current.scopeId !== saved.followupContext.scopeId) {
+        throw new Error('账号或本单需求已变化，未自动归入当前客户；请打开原ChatGPT会话核对');
+      }
+      const template = templates.find(t => t.id === saved.template.id);
+      if (!template || template.gpt_url !== saved.template.gpt_url || template.description !== saved.template.description) {
+        throw new Error('原生成模板已变化，未自动恢复，请检查原ChatGPT会话');
+      }
+      setStatus({ kind:'sending', foreground:false, mode:saved.mode, source:saved.source,
+        count:saved.count, templateName:saved.template.name });
+      // Recovery only polls the original request; it never invokes GPT_RUN.
+      const response = await awaitGptResult(saved.requestId);
+      if (response?.ok === false) {
+        await chrome.storage.local.remove(recoveryKey);
+        await clearReplyProgress(contact.id);
+        setPendingAction(null);
+        throw new Error(response.error ?? 'GPT 任务已结束，未产生回复，可重新生成');
+      }
+      await deliverGptResponse(response, saved, saved.requestId);
+    } catch (err) {
+      setStatus({kind:'error', message:stringifyError(err)});
+    } finally { actionLock.current = false; }
+  };
+
+  const releaseRecoveryWait = async () => {
+    if (!pendingAction || actionLock.current || busy) return;
+    actionLock.current = true;
+    try {
+      // Keep the original binding for diagnosis/manual recovery. This releases
+      // only this panel's wait; it does not cancel a remote ChatGPT generation.
+      await chrome.storage.local.set({ [`gpt.archivedAction:${pendingAction.requestId}`]: pendingAction });
+      await chrome.storage.local.remove(recoveryKey);
+      await clearReplyProgress(contact.id);
+      setPendingAction(null);
+      setStatus({kind:'error', message:'已解除等待并保留原生成记录。这不会取消ChatGPT中的任务；再次生成前请先核对原会话。'});
+    } catch (err) { setStatus({kind:'error', message:stringifyError(err)}); }
+    finally { actionLock.current = false; }
+  };
+
   // ── 主流程 1：写客户回复 ──
 
   const generate = async () => {
-    if (actionLock.current || busy || backgroundBusy || !templatesLoaded || !guidanceLoaded) return;
+    if (actionLock.current || busy || backgroundBusy || !templatesLoaded || !guidanceLoaded || !recoveryLoaded) return;
     actionLock.current = true;
     setStatus({ kind: 'reading' });
     // 左栏那一行立刻显示「⏳ 生成中」——切走客户也还在，见 reply-progress
@@ -606,55 +747,16 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         // Custom GPT 里已设了模型；默认 URL 也带了 ?model=gpt-5-thinking query param。
         // ensureThinking 是 DOM 点击切换的保险路径，默认不开（避免误点）。
         ensureThinking: false,
-      });
+      }, { mode:'reply', template, workMemory, followupContext, skill:approvedKnowledge?.skill,
+        source:messageSource, count:messages.length, prompt, guidance:guidanceForLog || null,
+        startedAt, wasFollowUp, inputEvidence:snapshotDraftEvidence(messages) });
 
-      if (!response?.ok) {
-        throw new Error(response?.error ?? 'GPT 调用失败');
-      }
-
-      rawResponseForLog = response.responseText;
-      chatUrlForLog = response.chatUrl;
-      const newChatUrl: string = response.chatUrl;
-      if (!isConversationForGptTemplate({contact_id: contact.id, template_id: template.id, chat_url: newChatUrl}, contact.id, template)) {
-        throw new Error('GPT返回的会话与本次模板不匹配，未保存工作记录。');
-      }
-      const savedWork = await saveGeneratedWork(response.responseText, newChatUrl, template, workMemory, 'reply', followupContext, approvedKnowledge?.skill, response.messageId);
-      response.responseText = savedWork.text;
-      await saveConversation(template, newChatUrl);
-      const savedMemory = await loadSalesWorkMemory(supabase, orgId, contact.id);
-      if (mounted.current) { setWorkMemory(savedMemory); setMemoryError(''); }
-
-      const logId = await logAiReply({
-        orgId,
-        contactId: contact.id,
-        source: 'gpt',
-        mode: conversation ? 'gpt_followup' : 'gpt_first',
-        prompt,
-        response: response.responseText,
-        guidance: guidanceForLog || null,
-        messageSource,
-        messageCount: messages.length,
-        chatUrl: newChatUrl,
-        durationMs: Date.now() - startedAt,
-        metrics: { ...requestMetrics.current },
-      });
-
-      void setReplyProgress(contact.id, 'ready', 'gpt');
-
-      freshResult.current = { templateId: template.id, chatUrl: newChatUrl };
-      setStatus({
-        kind: 'done',
-        mode: 'reply',
-        followupWarning: savedWork.warning,
-        inputEvidence: snapshotDraftEvidence(messages),
-        text: response.responseText,
-        chatUrl: newChatUrl,
-        source: messageSource,
-        count: messages.length,
-        logId,
-        templateId: template.id,
-        templateName: template.name,
-      });
+      rawResponseForLog = response?.responseText ?? null;
+      chatUrlForLog = response?.chatUrl ?? null;
+      await deliverGptResponse(response, { mode:'reply', template, workMemory, followupContext,
+        skill:approvedKnowledge?.skill, source:messageSource, count:messages.length, prompt,
+        guidance:guidanceForLog || null, startedAt, wasFollowUp,
+        inputEvidence:snapshotDraftEvidence(messages) });
       setGuidance('');
     } catch (err) {
       const msg = stringifyError(err);
@@ -692,7 +794,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
 
   const sendDiscussion = async () => {
     const q = discuss.trim();
-    if (!q || actionLock.current || busy || backgroundBusy || !templatesLoaded || !guidanceLoaded) return;
+    if (!q || actionLock.current || busy || backgroundBusy || !templatesLoaded || !guidanceLoaded || !recoveryLoaded) return;
     actionLock.current = true;
     setStatus({ kind: 'reading' });
     void setReplyProgress(contact.id, 'generating', 'gpt');
@@ -760,49 +862,12 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         skill: approvedKnowledge?.skill,
         active: foreground,
         ensureThinking: false,
-      });
-      if (!response?.ok) throw new Error(response?.error ?? 'GPT 调用失败');
-
-      rawResponseForLog = response.responseText;
-      chatUrlForLog = response.chatUrl;
-      const newChatUrl: string = response.chatUrl;
-      if (!isConversationForGptTemplate({contact_id: contact.id, template_id: template.id, chat_url: newChatUrl}, contact.id, template)) {
-        throw new Error('GPT返回的会话与本次模板不匹配，未保存工作记录。');
-      }
-      const savedWork = await saveGeneratedWork(response.responseText, newChatUrl, template, workMemory, 'discuss', followupContext, approvedKnowledge?.skill, response.messageId);
-      response.responseText = savedWork.text;
-      await saveConversation(template, newChatUrl);
-      const savedMemory = await loadSalesWorkMemory(supabase, orgId, contact.id);
-      if (mounted.current) { setWorkMemory(savedMemory); setMemoryError(''); }
-
-      const logId = await logAiReply({
-        orgId,
-        contactId: contact.id,
-        source: 'gpt',
-        mode: 'gpt_discuss',
-        prompt,
-        response: response.responseText,
-        guidance: q,
-        messageSource: source,
-        messageCount: count,
-        chatUrl: newChatUrl,
-        durationMs: Date.now() - startedAt,
-        metrics: { ...requestMetrics.current },
-      });
-      void setReplyProgress(contact.id, 'ready', 'gpt');
-      freshResult.current = { templateId: template.id, chatUrl: newChatUrl };
-      setStatus({
-        kind: 'done',
-        mode: 'discuss',
-        followupWarning: savedWork.warning,
-        text: response.responseText,
-        chatUrl: newChatUrl,
-        source,
-        count,
-        logId,
-        templateId: template.id,
-        templateName: template.name,
-      });
+      }, { mode:'discuss', template, workMemory, followupContext, skill:approvedKnowledge?.skill,
+        source, count, prompt, guidance:q, startedAt });
+      rawResponseForLog = response?.responseText ?? null;
+      chatUrlForLog = response?.chatUrl ?? null;
+      await deliverGptResponse(response, { mode:'discuss', template, workMemory, followupContext,
+        skill:approvedKnowledge?.skill, source, count, prompt, guidance:q, startedAt });
       setDiscuss('');
     } catch (err) {
       const msg = stringifyError(err);
@@ -893,7 +958,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
 
   const fillReply = async (text: string) => {
     try {
-      if (!templatesLoaded || !guidanceLoaded) {
+      if (!templatesLoaded || !guidanceLoaded || !recoveryLoaded) {
         alert('正在核对当前客户与模板，请稍后再填入。');
         return;
       }
@@ -970,9 +1035,9 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
 
   const bgPhase = replyProgress[contact.id]?.phase;
 
-  const backgroundBusy = bgPhase === 'generating' && !busy;
+  const backgroundBusy = (bgPhase === 'generating' || !!pendingAction) && !busy;
 
-  const actionUnavailable = busy || backgroundBusy || !templatesLoaded || !guidanceLoaded;
+  const actionUnavailable = busy || backgroundBusy || !templatesLoaded || !guidanceLoaded || !recoveryLoaded;
   const generationUnavailable = actionUnavailable || !selectedTemplate || !!previewRoute.error;
   const discussionRoute = resolveGptTemplateRoute(templates, selectedTemplateId, {
     messages: routeContext?.messages ?? [],
@@ -1214,7 +1279,11 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
           )}
       {backgroundBusy && (
         <div className="sgc-gem-progress">
-          ⏳ 这个客户的回复正在后台生成 —— 可以先去处理别的客户，好了左栏那一行会变成「📝 待填入」
+          {pendingAction ? '已保留本次生成记录。刷新后可取回原结果，无需重新生成。' : '⏳ 这个客户的回复正在后台生成 —— 可以先去处理别的客户，好了左栏那一行会变成「📝 待填入」'}
+          {pendingAction && <button type="button" className="sgc-btn-link" disabled={busy || !templatesLoaded}
+            onClick={() => void recoverGptResult()}>取回生成结果</button>}
+          {pendingAction && status.kind === 'error' && <button type="button" className="sgc-btn-link"
+            onClick={() => void releaseRecoveryWait()}>保留原记录并解除等待</button>}
         </div>
       )}
 

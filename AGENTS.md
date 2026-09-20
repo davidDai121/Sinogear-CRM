@@ -1,3 +1,17 @@
+## 2026-09-20 Menglong R08 独立GPT与404修复
+
+旧R08链接在Menglong账号实见404。已新建私有Sino Gear R08 Miles（g-6aaff2e20f848191a17b81f6786cdebe），页面作者Menglong Dai，完整K01–K11内置知识及最新首回复/费用规则已保存并模拟验收。其R08专用模板仅替换URL；Miles V2默认、其他模板、Yang原GPT和技能不变。路由增加新GPT ID，旧会话按GPT身份隔离、不删除；79项测试/build通过，本机扩展Reloaded且WA已刷新。上传受限未增加知识附件，不声称真实CRM新生成全链路验收或团队发版。详见docs/Menglong_R08_GPT副本_2026-09-20.md。
+
+## 2026-09-20 Menglong GPT 生成后刷新卡住
+
+实查 Menglong Chrome：Issa 的原 GPT 已完成且存在 `gpt.delivery`，但页面刷新丢失 requestId，只剩 generating 标志，CRM 无法取回。GPTReplySection 现于发送前按组织/客户持久化请求及交付上下文；刷新可手动“取回生成结果”，校验账号/本单/模板，不重复发送原 prompt。原接收端与取回端用 Web Locks 串行交付，完成后清等待；明确失败解锁，异常可保留原记录解除等待，不声称取消远端任务。
+
+本机 extension/dist 已构建并在 Menglong 原生 Chrome 点击 Reload（观察到 Reloaded）、刷新 WhatsApp。旧任务缺少新版恢复元数据：核对原会话内客户 ID 后，通过 DevTools Extension storage 恢复该客户本机草稿（正文保留，机器跟进标签去除），实见英文稿/中文策略和可用生成按钮。旧单未补建 CRM 会话映射、工作记忆、AI 日志或跟进任务；页面明确提示跟进未补建。未重新调用 GPT、未填入或发送客户消息、未全员发版。49 项相关离线测试及构建通过；新版请求刷新取回流程为离线覆盖，不冒充新在线全链路测试。细节见 docs/GPT刷新取回修复_2026-09-20.md。
+
+## 2026-09-20 Menglong Dai 的 R08 首回复与技能入口
+
+Miles V2本体已追加三类起价首回复规则并发布，独立模拟测试通过。Menglong账号原先没有skill，现已导入完整私有R08技能，ID `6aafbaf4f53c8191a8d6ff2bf5d9812a`，显示名`sino gear r08 miles`，配置和成本附件保留。CRM其名下Miles V2、R08专用、R08技能试点三模板已同步首回复，技能试点绑定新ID；两份旧R08知识用9月18日已批准费用/保险覆盖旧冲突条款。三场景Work实测通过，未发送客户消息、未做真实CRM生成链路验收。当前需手动选「R08 技能试点 · Miles」，自动R08识别仍未识别新ID；默认、旧Miles本体及Yang Hu技能副本本轮未改。完整备份和证据在分析导出/Miles与团队技能核查_2026-09-20/已实施与使用说明.md。不要混淆不同ChatGPT账号的技能权限，也不要声称副本自动同步。
+
 ## 2026-09-20 销售 skill 与后台复核更新
 
 用户五条用于研究和核查，不作为通用清单写进skill。正式review/follow-up/R08及CRM共享提示采纳采购背景、决定点、真实合作价值、信息节奏；正常报价不以背景问卷为前提。R08线上私人同ID已保存并完整回读；报价授权保持，重复运费规程合并。普通模式固定六类画像及多段心理分析已移除。
@@ -1008,6 +1022,18 @@ npm run package
 
 **起点**：老板要求更新skill，精简提示词并检查“没点生成，GPT也会自己打开或跑起来”，随后明确“发布吧”。**根因**：固定六类画像与新版简短策略重复；复核只在入口检查开关，异步读资料后仍可能继续启动。本机任务页当时显示关闭，不能据此断言历史自动启动来源。**修法**：统一采购背景、决定点、合作价值和信息节奏；压缩角色及共享提示，runner在任务准备及实际调用前重查开关和GPT占用。保留人工任务和正常报价。**验证**：发布前295项Node测试通过；私人线上R08 skill保存后完整回读一致；本机重载尚未确认，正式安装包与线上required_version已独立核验为0.1.0-20260920，32文件逐字节一致，见docs/销售技能与后台复核发布_20260920.md。**教训**：入口检查不能代替异步准备后的执行检查；线上skill、构建产物、本机加载及团队发版分别记录。
 
+### 近期补完（2026-09-20）— 发布孟龙R08 GPT账号副本与刷新取回修复
+
+**起点**：用户反映CRM「R08专用 · Miles」持续404，要求在daimenglong账号建GPT，随后指出需要打包发布。
+
+**根因**：Menglong已登录页面实见旧GPT链接404，My GPTs没有R08；CRM模板仍指向旧ID，自动匹配也只识别旧ID。另一个已完成修复是GPT生成后刷新丢失请求上下文，导致CRM无法取回原结果。
+
+**修法**：在Menglong账号创建私有R08 GPT，模板只更新gpt_url；gpt-template-routing.ts的isR08Template识别两个已核验GPT ID，isConversationForGptTemplate继续严格隔离新旧GPT会话。GPTReplySection在请求前持久化PendingGptAction，recoverGptResult只取原请求，deliverGptResponse串行交付，避免刷新后重发或重复保存。
+
+**验证**：新GPT显示By Menglong Dai、Settings Saved；三种独立模拟回复通过；CRM模板界面回读新链接。本机已Reloaded并刷新WA。发布前224项GPT/报价/销售记忆测试通过；npm run package生成安装包并更新required_version后，独立检查ZIP、版本和服务器回读。详细产物记录见docs/R08副本与生成恢复发布_20260920.md。未向客户发送消息。
+
+**教训**：跨ChatGPT账号复制GPT后，必须同时核对所有者、可访问链接、CRM个人模板及自动匹配；更新模板URL不能继续复用旧GPT会话。本机build/reload不等于团队安装包发布。发布当前构建时，提交须涵盖进入包内的已完成源码修复，不能仅提交版本说明。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板
@@ -1036,6 +1062,8 @@ WhatsApp 绿色主题：
 - 错误：`#b91c1c`
 
 ## 已知问题 / 风险
+
+- **GPT副本账号与路由**：私人GPT不能假定跨账号可访问。复制后核对页面作者和保存状态，再改对应用户模板及已验证ID列表；旧会话必须按精确GPT ID拒绝续用。团队使用代码修复需单独打包发布，不把本机重载称为全员生效。
 
 - 后台GPT入口和异步资料读取后的实际调用前都需核对启用状态与占用；关闭不等于撤回已发送的远端请求。提示词精简不能删除客户原话和批准条件，不将普通模式减少量宣传为所有模板的减少量。
 

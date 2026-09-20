@@ -8,7 +8,7 @@ const built = await build({
   entryPoints: [fileURLToPath(new URL('../src/lib/gpt-template-routing.ts', import.meta.url))],
   bundle: true, platform: 'node', format: 'esm', write: false, logLevel: 'silent',
 });
-const { resolveGptTemplateRoute, isConversationForGptTemplate, mentionsR08, R08_GPT_ID } =
+const { resolveGptTemplateRoute, isConversationForGptTemplate, mentionsR08, R08_GPT_ID, MENGLONG_R08_GPT_ID } =
   await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
 const miles = { id: 'miles', name: 'Miles V2', is_default: true, gpt_url: 'https://chatgpt.com/g/g-6a2f7081d85c8191babfad41e1131be6-sino-gear-miles-v2' };
 const r08 = { id: 'r08', name: 'R08 专用 · Miles', is_default: false, gpt_url: `https://chatgpt.com/g/${R08_GPT_ID}-sino-gear-r08-miles` };
@@ -25,6 +25,18 @@ test('R08 Spanish customer overrides the general default and selects its own kno
   assert.equal(route.template.id, r08.id);
   assert.equal(route.isR08, true);
   assert.equal(route.error, null);
+});
+
+test('Menglong R08 copy routes automatically but cannot reuse the other account GPT conversation', () => {
+  const copy = { ...r08, gpt_url: `https://chatgpt.com/g/${MENGLONG_R08_GPT_ID}-sino-gear-r08-miles` };
+  const route = resolve({ messages: [msg('Quiero R08 diésel')] }, miles.id, [miles, copy]);
+  assert.equal(route.template, copy);
+  assert.equal(route.isR08, true);
+  assert.equal(route.error, null);
+  assert.equal(isConversationForGptTemplate(conv(r08), 'customer-a', copy), false);
+  assert.equal(isConversationForGptTemplate(conv(copy), 'customer-a', r08), false);
+  assert.equal(isConversationForGptTemplate(conv(copy), 'customer-a', copy), true);
+  assert.equal(resolve({ messages: [msg('Now show me Hilux')] }, copy.id, [miles, copy]).template, miles);
 });
 
 test('strict model matching accepts common separators/Chinese adjacency and RELY R8', () => {

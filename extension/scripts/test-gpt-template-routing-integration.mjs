@@ -188,8 +188,12 @@ globalThis.chrome = {
   } },
   runtime: { async sendMessage(request) {
     const h = globalThis.__gptRoutingIntegration;
+    if (request.type === 'GPT_RESULT') {
+      (h.polls ??= []).push(request.requestId);
+      return h.pollResult ?? {ok:true,responseText:'Recovered original response',chatUrl:`${r08.gpt_url}/c/offline-result`};
+    }
     assert.equal(request.type, 'GPT_RUN'); h.calls.push(request);
-    const result = { ok: true, responseText: h.responseTexts?.[h.calls.length-1] ?? h.responseText ?? 'Offline synthetic reply',
+    const result = h.runResult ?? { ok: true, responseText: h.responseTexts?.[h.calls.length-1] ?? h.responseText ?? 'Offline synthetic reply',
       chatUrl: h.returnedUrl ?? `${request.url.split('/c/')[0]}/c/offline-result` };
     if (h.holdRuntime) return new Promise(resolve => { h.releaseRuntime = () => resolve(result); });
     return result;
@@ -548,3 +552,65 @@ for (const action of ['generate','discussion']) {
   assert.equal(h.followupPrompts[0].opts.includedCustomerNotes,notes);
  });
 }
+
+for (const mode of ['reply','discuss']) test(`${mode}: refresh recovers original request without sending again or crossing customer`, async t => {
+  const {h,container,render} = await mount(t,{holdRuntime:true});
+  if(mode==='reply') await click(button(container,text=>text==='生成'));
+  else await discuss(container);
+  const key=`gpt.pendingAction:${ORG}:customer-a`;
+  assert.equal(h.store[key].requestId,h.calls[0].requestId);
+  assert.equal(h.store[key].contactId,'customer-a');
+  assert.equal(h.store[key].template.id,r08.id);
+  await render('customer-b');
+  assert.equal(button(container,text=>text==='取回生成结果'),undefined);
+  await render('customer-a');
+  await click(button(container,text=>text==='取回生成结果'));
+  assert.equal(h.calls.length,1,'no second GPT_RUN');
+  assert.deepEqual(h.polls,[h.calls[0].requestId]);
+  assert.equal(h.writes.length,1);
+  assert.equal(h.writes[0].payload.contact_id,'customer-a');
+  assert.equal(h.store[key],undefined);
+  assert.match(h.store['replyStatus:gpt:customer-a'].text,/^Recovered original response/);
+  assert.equal(h.store['replyStatus:gpt:customer-a'].mode,mode);
+  h.releaseRuntime();
+  await settle();
+  assert.equal(h.writes.length,1,'late original receiver cannot save a second time');
+  assert.equal(h.memoryWrites.filter(w=>w.entry.kind==='assistant_draft').length,1);
+  assert.equal(button(container,text=>/^(续聊)?生成$/.test(text)).disabled,false);
+});
+test('failed recovered task releases the stale generating lock without resubmission',async t=>{
+  const {h,container,render}=await mount(t,{holdRuntime:true});
+  await click(button(container,text=>text==='生成'));
+  h.pollResult={ok:false,error:'发送阶段被中断'};
+  await render('customer-b');await render('customer-a');
+  await click(button(container,text=>text==='取回生成结果'));
+  assert.equal(h.calls.length,1);assert.equal(h.writes.length,0);
+  assert.equal(h.store[`gpt.pendingAction:${ORG}:customer-a`],undefined);
+  assert.equal(button(container,text=>/^(续聊)?生成$/.test(text)).disabled,false);
+  assert.match(container.textContent,/发送阶段被中断/);
+});
+test('recovery rejects changed template before polling or saving',async t=>{
+  const {h,container,render}=await mount(t,{holdRuntime:true});
+  await click(button(container,text=>text==='生成'));
+  h.templates.find(t=>t.id===r08.id).description='new configuration';
+  await render('customer-b');await render('customer-a');
+  await click(button(container,text=>text==='取回生成结果'));
+  assert.equal(h.calls.length,1);assert.equal(h.writes.length,0);assert.equal(h.polls,undefined);
+  assert.match(container.textContent,/原生成模板已变化/);
+  const original=h.store[`gpt.pendingAction:${ORG}:customer-a`];
+  await click(button(container,text=>text==='保留原记录并解除等待'));
+  assert.equal(h.store[`gpt.pendingAction:${ORG}:customer-a`],undefined);
+  assert.equal(h.store[`gpt.archivedAction:${original.requestId}`].requestId,original.requestId);
+  assert.equal(h.calls.length,1);
+  assert.equal(button(container,text=>text==='生成').disabled,false);
+});
+
+test('failed original generation reports error after releasing its pending record',async t=>{
+  const {h,container}=await mount(t);
+  h.runResult={ok:false,error:'GPT发送失败'};
+  await click(button(container,text=>text==='生成'));
+  assert.equal(h.store[`gpt.pendingAction:${ORG}:customer-a`],undefined);
+  assert.equal(h.writes.length,0);
+  assert.match(container.textContent,/GPT发送失败/);
+  assert.equal(button(container,text=>text==='生成').disabled,false);
+});
