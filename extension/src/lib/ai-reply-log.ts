@@ -21,7 +21,10 @@
 
 export type AiReplySource = 'claude' | 'gem' | 'gem_auto' | 'gpt';
 
+export interface ReplyMetrics { requests: number; inputChars: number; outputChars: number }
+
 export interface AiReplyLog {
+  metrics?: ReplyMetrics;
   id: string;
   org_id: string;
   contact_id: string;
@@ -55,6 +58,7 @@ const KEY_PREFIX = 'aiReplyLog:';
 const MAX_ENTRIES = 800;
 
 export interface LogAiReplyParams {
+  metrics?: ReplyMetrics;
   orgId: string;
   contactId: string;
   source: AiReplySource;
@@ -95,6 +99,7 @@ export async function logAiReply(
     const now = Date.now();
     const log: AiReplyLog = {
       id,
+      ...(params.metrics ? { metrics: params.metrics } : {}),
       org_id: params.orgId,
       contact_id: params.contactId,
       source: params.source,
@@ -271,6 +276,7 @@ export function formatLogAsMarkdown(
   lines.push(
     `- **Context**: ${log.message_count ?? '?'} messages from \`${log.message_source ?? '?'}\``,
   );
+  if (log.metrics) lines.push(`- **Model calls**: ${log.metrics.requests}; input ${log.metrics.inputChars} chars; output ${log.metrics.outputChars} chars`);
   if (log.duration_ms) {
     lines.push(`- **Duration**: ${(log.duration_ms / 1000).toFixed(1)}s`);
   }

@@ -4,12 +4,14 @@ import {
   observeCurrentChat,
   refreshChatNameCache,
   maybeLogChatInspect,
+  readCurrentChat,
   type CurrentChat,
 } from './whatsapp-dom';
 import { ensureJidPhoneCacheLoaded } from '@/lib/jid-phone-cache';
 import { initAutoTranslate } from './auto-translate';
 import { initChatMediaCapture } from './chat-media-capture';
 import { initAutoReply } from './auto-reply';
+import { installChatBridgeClient } from './chat-bridge-client';
 import '@/panel/styles.css';
 
 const HOST_ID = 'sgc-extension-host';
@@ -28,19 +30,17 @@ function mount() {
   const root = createRoot(host);
   root.render(<AppShell />);
 
-  // 请求 SW 往页面 MAIN world 注入 fiber bridge（isolated world 看不到
-  // 页面 React 的 __reactFiber$ expando，@lid 业务号的手机号只有 fiber 有）。
-  // 注入完成后重读当前聊天。
-  try {
-    void chrome.runtime
-      .sendMessage({ type: 'INJECT_FIBER_BRIDGE' })
-      .then(() => {
-        window.dispatchEvent(new CustomEvent('sgc:refresh-chat'));
-      })
-      .catch(() => {});
-  } catch {
-    // 扩展刚更新导致 context 失效时忽略，刷新页面自愈
-  }
+  let inspectTimer: ReturnType<typeof setTimeout> | undefined;
+  // 校验后台结果、有限重试；UI 的重新识别也走同一入口，避免并发注入。
+  installChatBridgeClient(() => {
+    window.dispatchEvent(new CustomEvent('sgc:refresh-chat'));
+    void refreshChatNameCache().then(() => {
+      window.dispatchEvent(new CustomEvent('sgc:refresh-chat'));
+    });
+    // 启动快照可能早于注入。再记录稳定后的失败状态，区分注入与模型读取失败。
+    if (inspectTimer !== undefined) clearTimeout(inspectTimer);
+    inspectTimer = setTimeout(() => maybeLogChatInspect(readCurrentChat()), 5500);
+  });
 
   void refreshChatNameCache().then(() => {
     // After cache populated, re-detect current chat (in case initial read missed phone)

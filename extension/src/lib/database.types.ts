@@ -1,3 +1,4 @@
+import type { SalesFact, NewSalesFact } from './sales-fact-types';
 export type CustomerStage =
   | 'new'
   | 'qualifying'
@@ -39,6 +40,18 @@ export interface PricingTier {
 export interface Database {
   public: {
     Tables: {
+      sales_facts: {
+        Row: SalesFact;
+        Insert: NewSalesFact;
+        Update: Partial<Omit<SalesFact, 'id' | 'org_id' | 'version' | 'created_by' | 'created_at' | 'updated_at'>>;
+        Relationships: [];
+      };
+      sales_fact_history: {
+        Row: { id: number; org_id: string; fact_id: string; version: number; snapshot: Record<string, unknown>; changed_by: string | null; changed_at: string };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
       organizations: {
         Row: { id: string; name: string; created_at: string };
         Insert: { id?: string; name: string; created_at?: string };

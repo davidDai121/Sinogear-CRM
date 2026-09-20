@@ -4,7 +4,7 @@ import { extractFollowup, type FollowupContext, type FollowupDecision, type Foll
 export async function completeFollowupResult(
   text: string,
   ctx: FollowupContext,
-  repair: () => Promise<string>,
+  repair: (() => Promise<string>) | null,
   save: (decision: FollowupDecision) => Promise<FollowupPlan>,
 ): Promise<{ text: string; warning?: string }> {
   const marker = text.search(/<\/?crm_followup\b/i);
@@ -21,6 +21,7 @@ export async function completeFollowupResult(
     try { parsed = extractFollowup(text, ctx); }
     catch (error) {
       if (marker >= 0) throw error;
+      if (!repair) throw new Error('本轮未返回跟进判断，未追加GPT调用或改动已有任务。');
       parsed = extractFollowup(await repair(), ctx);
     }
     const plan = await save(parsed.decision);

@@ -331,7 +331,7 @@ function parseClientRecord(text: string): ParsedClientRecord {
 
     const key = line.slice(0, colon).trim().toLowerCase();
     const value = line.slice(colon + 1).trim();
-    if (!value || /^(unknown|n\/a|未知|无|none|\-+)$/i.test(value)) continue;
+    if (!value || /^(unknown|n\/a|未知|无|none|no change|unchanged|不变|无变化|未变化|保持不变|\-+)$/i.test(value)) continue;
 
     switch (key) {
       case 'phone':

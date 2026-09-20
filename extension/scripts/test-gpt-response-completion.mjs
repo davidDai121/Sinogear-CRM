@@ -66,6 +66,14 @@ test('missing metadata repair cannot replace original customer text',async()=>{
  let calls=0;const result=await complete(prose,ctx,async()=>{calls++;return 'A different answer\n'+block;},save);
  assert.equal(calls,1);assert.equal(sanitizeReplyForCustomer(parseClaudeResponse(result.text).reply),reply);
 });
+test('interactive missing metadata returns the finished draft without another call or task write',async()=>{
+ let writes=0;
+ const result=await complete(prose,ctx,null,async d=>{writes++;return save(d);});
+ assert.equal(writes,0);assert.match(result.warning,/未追加GPT调用/);
+ assert.equal(sanitizeReplyForCustomer(parseClaudeResponse(result.text).reply),reply);
+ const valid=await complete(prose+'\n'+block,ctx,null,async d=>{writes++;return save(d);});
+ assert.equal(writes,1);assert.equal(valid.warning,undefined);
+});
 test('repair or save failure keeps draft and reports no confirmed save',async()=>{
  for(const stage of ['repair','save']){
   const result=await complete(prose+(stage==='save'?'\n'+block:''),ctx,async()=>{throw Error('GPT忙');},async()=>{throw Error('写入失败');});

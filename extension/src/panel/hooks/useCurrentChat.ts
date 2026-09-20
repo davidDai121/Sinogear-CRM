@@ -16,7 +16,7 @@ export function useCurrentChat(): CurrentChat {
     };
     const refreshHandler = () => {
       const current = readCurrentChat();
-      if (current.phone || current.groupJid || current.name) setChat(current);
+      setChat(current);
     };
     window.addEventListener('sgc:chat-changed', handler);
     window.addEventListener('sgc:refresh-chat', refreshHandler);

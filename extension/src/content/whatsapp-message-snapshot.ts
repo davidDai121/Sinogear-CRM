@@ -1,3 +1,4 @@
+import { expandRenderedMessages } from './whatsapp-expand-messages';
 import { readChatMessages, type ChatMessage } from './whatsapp-messages';
 
 /** Hydrate recent virtualized rows on an explicit generation request. */
@@ -20,14 +21,16 @@ export async function collectRecentChatMessages(
     if (!main.isConnected || !isTargetChat()) throw new Error('采集期间客户已切换，本次未使用其他客户消息');
     if (interrupted) throw new Error('聊天正在手动滚动，本次采集已停止；停稳后可重新生成');
   };
-  const capture = () => {
+  const capture = async () => {
+    check();
+    await expandRenderedMessages(main, check);
     check();
     for (const m of readChatMessages(limit * 2)) captured.set(m.id, m);
   };
   main.addEventListener('wheel', interrupt, { passive: true });
   main.addEventListener('touchstart', interrupt, { passive: true });
   try {
-    capture();
+    await capture();
     const started = Date.now();
     // Going newest to oldest usually hydrates several adjacent messages at once.
     for (const target of [...targets].reverse()) {
@@ -35,14 +38,15 @@ export async function collectRecentChatMessages(
       if (!id || captured.has(id) || captured.has(`${id}::in`) || captured.has(`${id}::out`)) continue;
       check();
       if (Date.now() - started > 12_000) break;
-      target.scrollIntoView({ block: 'center', behavior: 'instant' });
-      for (let attempt = 0; attempt < 5; attempt++) {
+      const liveTarget = wraps().find(t => t.getAttribute('data-id') === id) ?? target;
+      liveTarget.scrollIntoView({ block: 'center', behavior: 'instant' });
+      for (let attempt = 0; attempt < 12; attempt++) {
         await new Promise(r => setTimeout(r, 120));
-        capture();
+        await capture();
         if (captured.has(id) || captured.has(`${id}::in`) || captured.has(`${id}::out`)) break;
       }
     }
-    capture();
+    await capture();
     const missing = targets.filter(t => {
       const id = t.getAttribute('data-id');
       return id && !captured.has(id) && !captured.has(`${id}::in`) && !captured.has(`${id}::out`);

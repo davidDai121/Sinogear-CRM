@@ -25,6 +25,18 @@ import { bindSkillConversation, fillGptSkillPrompt, validateGptSkill, type GptSk
  * 如果 DOM 变了：调整 selector 字符串，多重 fallback 已留好位置。
  */
 
+/**
+ * 后台标签的三个坑（2026-09-18 老板实测：约 90% 的新 GPT 标签要他手动点一下才完成）：
+ *   - Chrome 对从未前台显示过的标签，隐藏超过约 5 分钟后冻结/强节流页面定时器，
+ *     ChatGPT 的流式渲染和 Stop/Copy 按钮状态停在半路；老板一点标签页面追平，
+ *     几秒内"完成"
+ *   - Memory Saver 可能直接丢弃后台标签
+ *   - 关标签前结果没有任何落地：SW 或消息通道在长等待里死掉就丢结果
+ * 对策：创建后 autoDiscardable=false；停滞检测 → 有限唤醒（默认把标签挪进一个
+ * 不抢焦点的小窗口，页面变"可见"；失败才短暂激活再切回原标签；每次运行最多
+ * WAKE_MAX_ATTEMPTS 次）；关标签前先走 beforeClose 交付，失败保留标签并把结果
+ * 随错误抛回；SW 重启后可用 resumeGptRun 回到还开着的标签继续读，不重发。
+ */
 export interface GptRunOptions {
   /** 打开的 URL：新对话用 chatgpt.com/?model=gpt-5-thinking；续聊用上次的 chat URL */
   url: string;
@@ -37,6 +49,23 @@ export interface GptRunOptions {
   /** 是否尝试切到 GPT-5 Thinking 模型（仅新对话需要；续聊保留上次模型） */
   ensureThinking?: boolean;
   skill?: GptSkill;
+  /**
+   * 进度回调。SW 可以把 tab_created / sent 事件里的 tabId + baseline 落盘，
+   * 自己重启后用 resumeGptRun 接着等同一个标签，不重发 prompt。
+   */
+  onProgress?: (event: GptRunProgress) => void | Promise<void>;
+  /**
+   * 关闭标签前先交付结果（SW 落盘 / 回传 UI）。抛错 → 标签保留不关，
+   * 以 GptResultUnsavedError 抛出，result 挂在错误上，不丢。
+   */
+  beforeClose?: (result: GptRunResult) => Promise<void>;
+  /**
+   * 停滞时的唤醒方式，默认 'window'：先把标签挪进不抢焦点的小窗口，仍停滞
+   * 再短暂激活并切回原标签；'activate' 直接走激活；'none' 不唤醒。
+   */
+  wake?: WakeMethod;
+  /** 测试注入用的时钟；生产不传 */
+  _timing?: { now: () => number; sleep: (ms: number) => Promise<void> };
 }
 
 export interface GptRunResult {
@@ -44,6 +73,55 @@ export interface GptRunResult {
   messageId?: string;
   /** 发送后 chatgpt.com 跳转到的 chat URL（chatgpt.com/c/<uuid>） */
   chatUrl: string;
+  /** 本轮用的 ChatGPT 标签；beforeClose 抛错时标签仍开着，可凭它 resumeGptRun */
+  tabId: number;
+}
+
+export type WakeMethod = 'window' | 'activate' | 'none';
+
+export type GptRunProgress =
+  | { phase: 'tab_created'; tabId: number }
+  | { phase: 'sent'; tabId: number; baseline: TurnAnchors }
+  | { phase: 'woken'; tabId: number; method: Exclude<WakeMethod, 'none'>; attempt: number; reason: string }
+  | { phase: 'completed'; tabId: number; chatUrl: string };
+
+/** 结果已经拿到，但 beforeClose 交付失败：标签保留，结果随错误一起带回 */
+export class GptResultUnsavedError extends Error {
+  constructor(public readonly result: GptRunResult, public readonly cause: unknown) {
+    super(`GPT 回复已生成但未能交付保存（标签 ${result.tabId} 已保留）：${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'GptResultUnsavedError';
+  }
+}
+
+/** 不改变 UI 的默认：只在停滞时唤醒，且有上限 */
+export const WAKE_MAX_ATTEMPTS = 2;
+export const WAKE_MIN_INTERVAL_MS = 60 * 1000;
+/** 完成等待阶段：这么久没有任何 DOM 变化算停滞 */
+export const WAKE_STALLED_AFTER_MS = 60 * 1000;
+/** 等"开始回复"阶段：更早唤醒，因为后台标签可能连 Stop 按钮都没渲染 */
+export const WAKE_NO_SIGN_AFTER_MS = 45 * 1000;
+/** 激活模式下停留多久再切回原标签（页面追平需要几秒） */
+export const WAKE_ACTIVATE_DWELL_MS = 4 * 1000;
+const APPEARANCE_TIMEOUT_MS = 150 * 1000;
+
+/** 纯逻辑：本次是否允许再唤醒（上限 + 最小间隔），可单测 */
+export function createWakePlanner(opts: { maxAttempts?: number; minIntervalMs?: number; now?: () => number } = {}) {
+  const maxAttempts = opts.maxAttempts ?? WAKE_MAX_ATTEMPTS;
+  const minIntervalMs = opts.minIntervalMs ?? WAKE_MIN_INTERVAL_MS;
+  const now = opts.now ?? Date.now;
+  let attempts = 0;
+  let lastAt = -Infinity;
+  return {
+    get attempts() { return attempts; },
+    /** 允许就登记一次并返回序号（从 1 起），不允许返回 0 */
+    claim(): number {
+      const t = now();
+      if (attempts >= maxAttempts || t - lastAt < minIntervalMs) return 0;
+      attempts += 1;
+      lastAt = t;
+      return attempts;
+    },
+  };
 }
 
 let busy = false;
@@ -71,6 +149,9 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
     });
     if (tab.id == null) throw new Error('无法创建 ChatGPT 标签页');
     tabId = tab.id;
+    // Memory Saver 会丢弃后台标签；丢弃后页面重载、流式响应中断
+    await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
+    await opts.onProgress?.({ phase: 'tab_created', tabId });
 
     await waitForTabComplete(tabId);
     await checkAuth(tabId);
@@ -94,32 +175,174 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
         'Prompt 没有发出去（ChatGPT 页面吞掉了输入，两次尝试都失败）——请重新生成',
       );
     }
+    await opts.onProgress?.({ phase: 'sent', tabId, baseline });
+
+    const wake = new WakeContext(tabId, opts.active ? 'none' : (opts.wake ?? 'window'), opts.onProgress, opts._timing);
     const responseText = await waitForResponse(
       tabId,
       opts.responseTimeoutMs ?? GPT_RESPONSE_TIMEOUT_MS,
       baseline,
+      wake,
+      opts._timing,
     );
-
-    const finalTab = await chrome.tabs.get(tabId);
-    const messageId = (await readTurnAnchors(tabId)).lastAssistantId ?? undefined;
-    const chatUrl = skill ? bindSkillConversation(finalTab.url ?? '', skill) : finalTab.url ?? opts.url;
-
-    await chrome.tabs.remove(tabId).catch(() => {});
-    return { responseText, chatUrl, messageId };
+    return await finishRun(tabId, responseText, skill, opts.url, opts);
   } catch (err) {
-    // Keep a timed-out research conversation available; closing its tab may
-    // interrupt generation and makes the error's "open original chat" unhelpful.
-    if (tabId !== null && !(err instanceof GptResponseTimeoutError)) {
-      await chrome.tabs.remove(tabId).catch(() => {});
-    }
+    await cleanupAfterError(tabId, err);
     throw err;
   } finally {
     busy = false;
   }
 }
 
+export interface GptResumeOptions {
+  /** runGpt onProgress 'sent' 事件里的 tabId / baseline */
+  tabId: number;
+  baseline: TurnAnchors;
+  /** 原始 url（拿不到最终 chat URL 时的兜底） */
+  url: string;
+  skill?: GptSkill;
+  responseTimeoutMs?: number;
+  onProgress?: GptRunOptions['onProgress'];
+  beforeClose?: GptRunOptions['beforeClose'];
+  wake?: WakeMethod;
+  _timing?: GptRunOptions['_timing'];
+}
+
+/**
+ * SW 重启 / 消息通道断掉之后，回到还开着的 ChatGPT 标签继续等结果。
+ * 不重发 prompt；完成判定和 runGpt 完全一样（只认 baseline 之后的新 turn）。
+ */
+export async function resumeGptRun(opts: GptResumeOptions): Promise<GptRunResult> {
+  if (busy) throw new Error('GPT 正在处理上一个客户，请稍后再试');
+  busy = true;
+  const tabId = opts.tabId;
+  try {
+    const skill = opts.skill ? validateGptSkill(opts.skill) : undefined;
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) throw new Error('要恢复的 ChatGPT 标签页已不存在，请重新生成');
+    if (!/^https:\/\/chatgpt\.com\//i.test(tab.url ?? '')) throw new Error('要恢复的标签页不是 ChatGPT 会话');
+    await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
+    const wake = new WakeContext(tabId, opts.wake ?? 'window', opts.onProgress, opts._timing);
+    const responseText = await waitForResponse(
+      tabId,
+      opts.responseTimeoutMs ?? GPT_RESPONSE_TIMEOUT_MS,
+      opts.baseline,
+      wake,
+      opts._timing,
+    );
+    return await finishRun(tabId, responseText, skill, opts.url, opts);
+  } catch (err) {
+    await cleanupAfterError(tabId, err);
+    throw err;
+  } finally {
+    busy = false;
+  }
+}
+
+/**
+ * 结果先交付（beforeClose）再关标签。交付失败 → 标签保留、结果随错误带回，
+ * 这是"输出完成但 CRM 拿不到"的最小保留方案：页面还在，结果也在错误对象里。
+ */
+async function finishRun(
+  tabId: number,
+  responseText: string,
+  skill: GptSkill | undefined,
+  fallbackUrl: string,
+  opts: Pick<GptRunOptions, 'beforeClose' | 'onProgress'>,
+): Promise<GptRunResult> {
+  const finalTab = await chrome.tabs.get(tabId);
+  const messageId = (await readTurnAnchors(tabId)).lastAssistantId ?? undefined;
+  const chatUrl = skill ? bindSkillConversation(finalTab.url ?? '', skill) : finalTab.url ?? fallbackUrl;
+  const result: GptRunResult = { responseText, chatUrl, messageId, tabId };
+  opts.onProgress?.({ phase: 'completed', tabId, chatUrl });
+  if (opts.beforeClose) {
+    try {
+      await opts.beforeClose(result);
+    } catch (cause) {
+      throw new GptResultUnsavedError(result, cause);
+    }
+  }
+  await chrome.tabs.remove(tabId).catch(() => {});
+  return result;
+}
+
+async function cleanupAfterError(tabId: number | null, err: unknown): Promise<void> {
+  if (tabId === null) return;
+  // 超时：保留查资料的会话页；交付失败：结果就在那个标签里，更不能关
+  if (err instanceof GptResponseTimeoutError || err instanceof GptResultUnsavedError) return;
+  // 未交付成功的页面保留，便于用户从原会话取回。
+}
+
 export function isBusy(): boolean {
   return busy;
+}
+
+// ── 唤醒（后台标签冻结/节流时用）──
+
+class WakeContext {
+  private readonly planner;
+  private ownWindowId: number | null = null;
+  constructor(
+    private readonly tabId: number,
+    private readonly method: WakeMethod,
+    private readonly onProgress: GptRunOptions['onProgress'],
+    private readonly timing?: GptRunOptions['_timing'],
+  ) {
+    this.planner = createWakePlanner({ now: timing?.now });
+  }
+
+  /** 停滞时调用；有上限，超限静默不动 */
+  async wake(reason: string): Promise<boolean> {
+    if (this.method === 'none') return false;
+    const attempt = this.planner.claim();
+    if (attempt === 0) return false;
+    // 第一次：挪进不抢焦点的小窗口（页面变可见，用户焦点不动）；
+    // 已经在小窗口里还停滞、或挪窗失败：短暂激活再切回
+    if (this.method === 'window' && this.ownWindowId === null && await this.moveToOwnWindow()) {
+      this.onProgress?.({ phase: 'woken', tabId: this.tabId, method: 'window', attempt, reason });
+      return true;
+    }
+    await this.activateBriefly();
+    this.onProgress?.({ phase: 'woken', tabId: this.tabId, method: 'activate', attempt, reason });
+    return true;
+  }
+
+  private async moveToOwnWindow(): Promise<boolean> {
+    try {
+      const win = await chrome.windows.create({ tabId: this.tabId, focused: false, type: 'normal', width: 520, height: 420 });
+      if (win?.id == null) return false;
+      this.ownWindowId = win.id;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async activateBriefly(): Promise<void> {
+    const sleep = this.timing?.sleep ?? sleepMs;
+    let previous: { tabId?: number; windowId?: number } = {};
+    try {
+      const [focusedTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      previous = { tabId: focusedTab?.id, windowId: focusedTab?.windowId };
+      const tab = await chrome.tabs.get(this.tabId);
+      await chrome.tabs.update(this.tabId, { active: true });
+      if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    } catch {
+      return;
+    }
+    await sleep(WAKE_ACTIVATE_DWELL_MS);
+    // 尽量把焦点还给原来的标签（通常是 WhatsApp）；还不回去也不算失败
+    try {
+      const focusedWindow = await chrome.windows.getLastFocused();
+      if (!focusedWindow.focused) return; // 用户已转去其他应用。
+      const [current] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (current?.id !== this.tabId) return; // 用户已转到别处，不抢回焦点。
+      if (previous.tabId != null && previous.tabId !== this.tabId) await chrome.tabs.update(previous.tabId, { active: true });
+      if (previous.windowId != null) await chrome.windows.update(previous.windowId, { focused: true });
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 // ── tab 阶段 ──
@@ -717,7 +940,7 @@ async function typeAndSend(tabId: number, text: string, skill?: GptSkill): Promi
 
 // ── turn 锚点（防"拿回上一轮旧响应"）──
 
-interface TurnAnchors {
+export interface TurnAnchors {
   /** 最后一条 assistant 消息的 data-message-id（没有该属性时退化为 count 字符串） */
   lastAssistantId: string | null;
   /** 最后一条 user 消息的 data-message-id */
@@ -798,15 +1021,21 @@ async function waitForResponse(
   tabId: number,
   timeoutMs: number,
   baseline: TurnAnchors,
+  wake: WakeContext,
+  timing?: GptRunOptions['_timing'],
 ): Promise<string> {
-  const start = Date.now();
+  const now = timing?.now ?? Date.now;
+  const sleep = timing?.sleep ?? sleepMs;
+  const start = now();
   const baselineId = baseline.lastAssistantId;
 
   // 1. 等响应迹象出现：stop 按钮 / **新的** assistant turn（锚点 id 变了）。
   //    ⚠️ 续聊 URL 页面上历史 assistant 消息本来就在——绝不能拿"存在任意
   //    assistant 容器"当迹象，否则输入被吞时会把上一轮旧响应当成本轮结果
+  //    后台标签可能连 Stop 按钮都没渲染：45 秒没迹象先唤醒一次，再等
   let appeared = false;
-  while (Date.now() - start < 90000) {
+  let wokeForAppearance = false;
+  while (now() - start < APPEARANCE_TIMEOUT_MS) {
     const has = await execute<boolean>(
       tabId,
       (prevId: string | null) => {
@@ -831,15 +1060,25 @@ async function waitForResponse(
       appeared = true;
       break;
     }
+    if (!wokeForAppearance && now() - start >= WAKE_NO_SIGN_AFTER_MS) {
+      wokeForAppearance = true;
+      await wake.wake('no response sign');
+    }
     await sleep(1500);
   }
   if (!appeared) {
-    throw new Error('ChatGPT 未开始回复（90 秒内无响应迹象）');
+    throw new Error(`ChatGPT 未开始回复（${Math.round(APPEARANCE_TIMEOUT_MS / 1000)} 秒内无响应迹象）`);
   }
 
   return waitForCompletedGptResponse(
     () => execute(tabId, readGptResponseSnapshot, [baselineId]),
-    { timeoutMs: Math.max(0, timeoutMs - (Date.now() - start)) },
+    {
+      timeoutMs: Math.max(0, timeoutMs - (now() - start)),
+      now,
+      sleep,
+      stalledAfterMs: WAKE_STALLED_AFTER_MS,
+      onStalled: async ({ stalledMs }) => { await wake.wake(`stalled ${Math.round(stalledMs / 1000)}s`); },
+    },
   );
 }
 
@@ -866,3 +1105,4 @@ async function execute<T>(
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+const sleepMs = sleep;

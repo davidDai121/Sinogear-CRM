@@ -1,4 +1,5 @@
 import type { FollowupPlan } from '@/lib/gpt-followup';
+import { FOLLOWUP_REVIEW_SETTING } from '@/lib/gpt-followup-schedule';
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Database, TaskStatus } from '@/lib/database.types';
@@ -55,6 +56,29 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
     useScope();
   const [plans, setPlans] = useState<Record<string, FollowupPlan>>({});
   const [reviewError, setReviewError] = useState('');
+  const [autoReview, setAutoReview] = useState(false);
+  const [reviewSettingBusy, setReviewSettingBusy] = useState(true);
+  const [reviewSettingError, setReviewSettingError] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    const changed = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+      if (area === 'local' && FOLLOWUP_REVIEW_SETTING in changes) setAutoReview(changes[FOLLOWUP_REVIEW_SETTING].newValue === true);
+    };
+    chrome.storage.onChanged.addListener(changed);
+    void chrome.storage.local.get(FOLLOWUP_REVIEW_SETTING).then(saved => {
+      if (!cancelled) setAutoReview(saved[FOLLOWUP_REVIEW_SETTING] === true);
+    }).catch(() => { if (!cancelled) setReviewSettingError('读取后台复核设置失败'); })
+      .finally(() => { if (!cancelled) setReviewSettingBusy(false); });
+    return () => { cancelled = true; chrome.storage.onChanged.removeListener(changed); };
+  }, []);
+  const toggleAutoReview = async () => {
+    setReviewSettingBusy(true);
+    try {
+      await chrome.storage.local.set({ [FOLLOWUP_REVIEW_SETTING]: !autoReview });
+      setAutoReview(!autoReview); setReviewSettingError('');
+    } catch { setReviewSettingError('保存后台复核设置失败，请重试'); }
+    finally { setReviewSettingBusy(false); }
+  };
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [contactMap, setContactMap] = useState<Record<string, ContactRow>>({});
   const [statusFilter, setStatusFilter] = useState<TaskStatus>('open');
@@ -324,7 +348,12 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
       </div>
 
       {error && <div className="sgc-error">{error}</div>}
-      {reviewError && <div className="sgc-error">GPT自动复核暂未完成：{reviewError}。任务已保留；可在客户GPT对话重新生成。</div>}
+      <div className="sgc-muted">
+        <label><input type="checkbox" checked={autoReview} disabled={reviewSettingBusy} onChange={() => void toggleAutoReview()} /> 本机后台 GPT 跟进复核</label>
+        <p>{autoReview ? '开启后会自动调用 GPT 检查到期跟进，可能占用生成通道。关闭后不再启动新复核。' : '已关闭：不会自动调用 GPT；已有任务保留，需要回复时在客户页手动生成。'}</p>
+      </div>
+      {reviewSettingError && <div className="sgc-error">{reviewSettingError}</div>}
+      {autoReview && reviewError && <div className="sgc-error">GPT自动复核暂未完成：{reviewError}。任务已保留；可在客户GPT对话重新生成。</div>}
 
       <div className="sgc-calendar">
         <div className="sgc-calendar-header">

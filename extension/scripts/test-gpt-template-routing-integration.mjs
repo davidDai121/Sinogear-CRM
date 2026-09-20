@@ -24,16 +24,22 @@ const { Simulate } = require('react-dom/test-utils');
 
 const common = 'const h = () => globalThis.__gptRoutingIntegration;\n';
 const mocks = {
+  '@/lib/sales-facts': `${common}export const loadApplicableSalesFacts = async () => ({usable:[],unavailable:[]});`,
+  './SalesFactsPanel': 'export const SalesFactsPanel = () => null;',
   '@/lib/gpt-followup': `${common}
     export const loadFollowupContext = async (_db,orgId,contactId) => ({orgId,contactId});
-    export const followupPrompt = () => '';
+    export const followupPrompt = (ctx,opts) => { h().followupPrompts.push({ctx,opts}); return ''; };
     export const extractFollowup = text => { if(h().followupError) throw Error(h().followupError); return {text,decision:{title:'等待条件',reason:'离线边界替身'}}; };
     export const saveFollowup = async (_db,ctx,decision) => ({decision,after:null,protected:false});`,
+  '@/lib/sales-preferences': `${common}
+    export const rememberSalesPreferences = async () => {};
+    export const saveSalesPreference = async () => {};`,
   '@/lib/sales-work-memory': `${common}
     export const loadSalesWorkMemory = async (_db, org, contactId) => {
       if (h().memoryError) throw Error(h().memoryError);
       return structuredClone(h().memories[contactId] ?? {contactId,scopeId:contactId,label:'当前需求',entries:[],tasks:[]});
     };
+    export const loadPersonalSalesWorkMemory = loadSalesWorkMemory;
     export const saveSalesWorkEntry = async (_db, org, contactId, entry) => {
       if (h().memorySaveError) throw Error(h().memorySaveError);
       const m = h().memories[contactId] ??= {contactId,scopeId:contactId,label:'当前需求',entries:[],tasks:[]};
@@ -53,6 +59,7 @@ const mocks = {
     export const syncMessages = async (id, messages) => h().syncs.push({id, messages});`,
   '@/lib/gpt-prompt': `${common}
     function record(kind, args) { h().prompts.push({kind,args}); return JSON.stringify({kind,...args}); }
+    export const chatHistoryEvidence = messages => messages.map(m => ({text:m.text,fromMe:m.fromMe}));
     export const buildFirstMessage = args => record('first', args);
     export const buildFollowUpMessage = args => record('followup', args);
     export const buildDiscussionMessage = args => record(args.ctx ? 'discussion-first' : 'discussion-followup', args);`,
@@ -114,7 +121,7 @@ function makeHarness(options = {}) {
     knowledgeSnapshots: structuredClone(options.knowledgeSnapshots ?? {}),
     memories: structuredClone(options.memories ?? {}), memoryWrites: [], memoryError: options.memoryError, memorySaveError: options.memorySaveError,
     quoteRows: [], responseTexts: options.responseTexts, quoteSaveError: options.quoteSaveError,
-    store: {}, calls: [], queries: [], writes: [], knowledge: [], prompts: [], logs: [], progress: [], syncs: [],
+    store: {}, calls: [], queries: [], writes: [], knowledge: [], prompts: [], followupPrompts: [], logs: [], progress: [], syncs: [],
     headerMatches: false, domMessages: [], returnedUrl: options.returnedUrl,
     holdRuntime: options.holdRuntime ?? false, responseText: options.responseText,
   };
@@ -197,7 +204,7 @@ async function mount(t, options = {}, id = 'customer-a') {
   const container = document.createElement('div'); document.body.append(container);
   const root = createRoot(container);
   const render = async contactId => {
-    await act(async () => root.render(React.createElement(GPTReplySection, { orgId: ORG, contact: contact(contactId) })));
+    await act(async () => root.render(React.createElement(GPTReplySection, { orgId: ORG, contact: {...contact(contactId),...options.contactOverride} })));
     await settle();
   };
   await render(id);
@@ -472,7 +479,7 @@ for(const action of ['generate','discussion']) {
    const prior={contactId:'customer-a',scopeId:'customer-a',label:'本单',entries:[],tasks:[],quoteVersions:[{id:'previous-version',at:'2026-09-17T00:00:00Z',payload:{summary:'旧版'}}]};
    const {h,container}=await mount(t,{responseTexts:[first,final],memories:{'customer-a':prior}});
    if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
-   assert.equal(h.calls.length,2);assert.equal(h.calls[1].url,`${r08.gpt_url}/c/offline-result`);assert.match(h.calls[1].prompt,/62000.00/);
+   assert.equal(h.calls.length,2);assert.equal(h.logs[0].metrics.requests,2);assert.equal(h.logs[0].metrics.inputChars,h.calls.reduce((n,c)=>n+c.prompt.length,0));assert.equal(h.calls[1].url,`${r08.gpt_url}/c/offline-result`);assert.match(h.calls[1].prompt,/62000.00/);
    assert.equal(h.quoteRows.length,1);assert.equal(h.quoteRows[0].contact_id,'customer-a');assert.equal(h.quoteRows[0].payload.status,'draft');assert.equal(h.quoteRows[0].payload.parentId,'previous-version');assert.equal(h.quoteRows[0].payload.result[0].dgUsd,'1000.00');
    assert.equal(h.memoryWrites.filter(x=>x.entry.kind==='assistant_draft').length,1);assert.doesNotMatch(h.logs[0].response,/quote_input/);assert.match(container.textContent,/报价核算历史/);
  });
@@ -485,6 +492,9 @@ for(const action of ['generate','discussion']) {
    const {h,container}=await mount(t,{responseTexts:[first]});
    if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
    assert.equal(h.calls.length,1);
+   assert.equal(h.logs[0].metrics.requests,1);
+   assert.equal(h.logs[0].metrics.inputChars,h.calls[0].prompt.length);
+   assert.equal(h.logs[0].metrics.outputChars,first.length);
    assert.equal(h.quoteRows.length,1);assert.equal(h.quoteRows[0].payload.result[0].totalUsd,'118400.00');
    assert.equal(h.quoteRows[0].payload.input.plans[0].propulsion,'phev');
    assert.match(h.logs[0].response,/USD 118,400.00/);assert.doesNotMatch(h.logs[0].response,/\{\{|quote_input/);
@@ -498,6 +508,17 @@ test('failed quote version write does not display a falsely saved/sendable quote
 });
 
 for (const action of ['generate','discussion']) {
+ test(`${action} delivers missing-followup draft in one web call`,async t=>{
+  const raw='[Client Record]\nNo change\n[WhatsApp Reply]\nMy friend, send your company details for the PI.\n[Full Translation & Strategy]\n请提供开票资料。';
+  const {h,container}=await mount(t,{responseText:raw});
+  h.followupError='GPT未返回唯一的跟进判断，未创建任务';
+  if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
+  assert.equal(h.calls.length,1);
+  assert.equal(h.logs[0].metrics.requests,1);
+  const draft=h.memoryWrites.find(w=>w.entry.kind==='assistant_draft');
+  assert.match(draft.entry.text,/send your company details for the PI/);
+  assert.match(container.querySelector('[role="status"]').textContent,/未追加GPT调用/);
+ });
  test(`${action} preserves draft and displays warning if follow-up metadata fails`,async t=>{
   const raw='[Client Record]\n\n[WhatsApp Reply]\n\nMy friend, both cars use the same container option.\n\n[Full Translation & Strategy]\n继续核查其他运输方式。\n<crm_followup>{incomplete';
   const {h,container}=await mount(t,{responseText:raw});
@@ -509,5 +530,21 @@ for (const action of ['generate','discussion']) {
   assert.doesNotMatch(draft.entry.text,/<crm_followup/);
   assert.match(container.querySelector('[role="status"]').textContent,/正文已保留/);
   assert.equal(h.writes.length,1,'the conversation remains resumable');
+ });
+}
+
+for (const action of ['generate','discussion']) {
+ test(`${action} group continuation keeps long notes in the follow-up context`,async t=>{
+  const notes='群聊人工安排：下周再联系，尚未授权新折扣。'.repeat(30);
+  const {h,container}=await mount(t,{contactOverride:{group_jid:'synthetic@g.us',notes},conversations:[conversation(r08)]});
+  if(action==='generate')await click(button(container,x=>x==='续聊生成'));else await discuss(container);
+  assert.equal(h.calls.length,1);
+  assert.equal(h.followupPrompts[0].opts.includedCustomerNotes,null);
+ });
+ test(`${action} individual continuation can reference notes already in customer context`,async t=>{
+  const notes='保留本单原话。'.repeat(100);
+  const {h,container}=await mount(t,{contactOverride:{notes},conversations:[conversation(r08)]});
+  if(action==='generate')await click(button(container,x=>x==='续聊生成'));else await discuss(container);
+  assert.equal(h.followupPrompts[0].opts.includedCustomerNotes,notes);
  });
 }

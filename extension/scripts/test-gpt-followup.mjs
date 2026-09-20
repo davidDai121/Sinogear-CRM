@@ -18,6 +18,31 @@ function store(){
  rows.sort((a,b)=>{for(const[k,asc]of sorts)if(a[k]!==b[k])return(a[k]<b[k]?-1:1)*(asc?1:-1);return 0;});rows=rows.slice(range[0],range[1]+1);return{data:structuredClone(one?rows[0]??null:rows),error:null};}).then(resolve,reject);}};return q;}};return db;
 }
 const context=db=>f.loadFollowupContext(db,'org','c');
+test('shared owner instructions are referenced only for exact identity, scope and text; validation keeps originals',async()=>{
+ const c=await context(store());
+ const text='本单已批准一年三大件保修，轮胎包两千美元。'.repeat(80);
+ c.evidence.push({id:'owner:approval',role:'owner',text,at:null});
+ const memory={contactId:'c',scopeId:c.scopeId,label:'当前需求',tasks:[],entries:[{id:'approval',kind:'sales_instruction',text,scopeId:c.scopeId,at:'2026-09-17T17:00:00Z'}]};
+ const full=f.followupPrompt(c),slim=f.followupPrompt(c,{includedWorkMemory:memory});
+ assert.ok(slim.length<full.length-800);assert.match(slim,/fullTextRef/);
+ assert.equal(c.evidence.at(-1).text,text);
+ assert.doesNotThrow(()=>f.extractFollowup(encode(decision({evidence:[{id:'owner:approval',quote:text.slice(-100)}],timeBasis:'owner'})),c,NOW));
+ for(const wrong of [{...memory,contactId:'foreign'},{...memory,scopeId:'old'}, {...memory,entries:[{...memory.entries[0],id:'other'}]}, {...memory,entries:[{...memory.entries[0],text:text+' changed'}]}]) {
+   assert.ok(f.followupPrompt(c,{includedWorkMemory:wrong}).includes(JSON.stringify(text)));
+ }
+ assert.ok(full.includes(JSON.stringify(text)), 'standalone follow-up retains complete evidence');
+});
+test('customer notes dedupe requires the complete same notes; current tasks and previous protection survive',async()=>{
+ const c=await context(store());const notes='客户要求下个月再联系，不改人工日期。'.repeat(100);
+ c.customer.notes=notes;c.tasks=[{id:'manual',title:'人工安排',due_at:'2026-10-01T12:00:00Z',status:'open'}];
+ c.previous={decision:decision(),protected:true,unchangedReviews:2,evaluatedAt:'2026-09-17T17:00:00Z',phase:'applied',before:{internal:'old-row'},after:{internal:'new-row'},inputKey:'private-state-hash'};
+ const slim=f.followupPrompt(c,{includedCustomerNotes:notes});
+ assert.ok(!slim.includes(JSON.stringify(notes)));assert.match(slim,/Full sales notes/);
+ assert.ok(f.followupPrompt(c,{includedCustomerNotes:notes.slice(0,200)}).includes(JSON.stringify(notes)));
+ assert.ok(f.followupPrompt(c,{includedCustomerNotes:null}).includes(JSON.stringify(notes)), 'group continuation keeps notes when main prompt did not render them');
+ assert.match(slim,/人工安排/);assert.match(slim,/"protected":true/);assert.match(slim,/"unchangedReviews":2/);
+ assert.ok(!slim.includes('private-state-hash'));assert.equal(c.customer.notes,notes);
+});
 const save=(db,ctx,d=decision(),bg=false)=>f.saveFollowup(db,ctx,d,'template','https://chatgpt.com/c/test',bg);
 async function initial(db,d=decision()){await save(db,await context(db),d);return context(db);}
 test('stable task identity isolates organization/customer/demand',async()=>{const id=await f.followupTaskId('o','c','s');assert.equal(id,await f.followupTaskId('o','c','s'));for(const args of [['x','c','s'],['o','x','s'],['o','c','x']])assert.notEqual(id,await f.followupTaskId(...args));});
@@ -34,6 +59,14 @@ test('due/new message triggers review, unsent drafts do not; manual pause and co
 test('unchanged silent reviews end in condition waiting',async()=>{const db=store();await save(db,await initial(db),decision(),true);const p=await save(db,await context(db),decision(),true);assert.equal(p.decision.decision,'wait');assert.equal(db.tables.tasks[0].due_at,null);});
 test('cross-org access fails; pagination retains over 200 tasks for deduplication',async()=>{const db=store();await assert.rejects(f.loadFollowupContext(db,'org','other'),/组织/);for(let i=0;i<205;i++)db.tables.tasks.push({id:`t${i}`,org_id:'org',contact_id:'c',title:'人工',status:'open',due_at:null});assert.equal((await context(db)).tasks.length,205);});
 test('scheduler uses latest evidence, updates only the managed task and never sends',async()=>{const db=store();await initial(db,decision({dueAt:'2026-09-17T17:30:00Z'}));let calls=0;const next=await runDueFollowup(db,async opts=>{calls++;assert.match(opts.prompt,/Call me tomorrow/);assert.match(opts.prompt,/不自动发送/);assert.match(opts.prompt,/不查运费/);return{responseText:encode(decision({decision:'wait',dueAt:null,timeBasis:'none'})),chatUrl:'https://chatgpt.com/c/test'};},{},NOW);assert.equal(calls,1);assert.equal(db.tables.tasks[0].due_at,null);assert.equal(next.lastError,undefined);});
+test('disabling background reviews during preparation prevents GPT dispatch and preserves tasks',async()=>{
+ for(const stopAt of [1,2,3]){
+  const db=store();await initial(db,decision({dueAt:'2026-09-17T17:30:00Z'}));
+  const before=structuredClone(db.tables);let checks=0,calls=0;
+  const next=await runDueFollowup(db,async()=>{calls++;throw Error('must not dispatch');},{},NOW,async()=>++checks<stopAt);
+  assert.equal(checks,stopAt);assert.equal(calls,0);assert.deepEqual(db.tables,before);assert.equal(next.lastError,undefined);
+ }
+});
 test('scheduler failures back off and preserve task; new evidence permits retry',async()=>{const db=store();await initial(db,decision({dueAt:'2026-09-17T17:30:00Z'}));const before=structuredClone(db.tables.tasks);let calls=0;const run=async()=>{calls++;throw Error('GPT logged out');};let s=await runDueFollowup(db,run,{},NOW);s=await runDueFollowup(db,run,s,NOW+60000);assert.equal(calls,1);assert.deepEqual(db.tables.tasks,before);assert.match(s.lastError,/logged out/);db.tables.messages[0].text='New detail';await runDueFollowup(db,run,s,NOW+120000);assert.equal(calls,2);});
 test('internal block cannot be accepted inside customer reply',async()=>{const c=await context(store());assert.throws(()=>f.extractFollowup('[WhatsApp Reply]\nHello '+encode(decision())+'\n[Full Translation & Strategy]内部',c,NOW),/客户正文/);});
 test('manual future date is respected, then due review records advice without moving date',async()=>{const db=store();await initial(db);db.tables.tasks[0].due_at='2026-09-20T18:00:00Z';let c=await context(db);assert.equal(f.needsFollowupReview(c,NOW),false);assert.equal(f.needsFollowupReview(c,NOW+4*86400000),true);const p=await save(db,c,decision({decision:'wait',dueAt:null,timeBasis:'none'}),true);assert.equal(p.protected,true);assert.equal(db.tables.tasks[0].due_at,'2026-09-20T18:00:00Z');assert.equal(f.needsFollowupReview(await context(db),NOW+4*86400000),false);});

@@ -350,6 +350,8 @@ function readChatFromBridge(main: Element): {
   if (!phone && p.phoneJid) phone = jidToPhone(p.phoneJid);
 
   const headerName = readNameFromHeader(main) || readNameFromHeader(document);
+  // 切换过程中标题尚未挂载，无法核对身份；等待标题出现后再采信桥接。
+  if (!headerName) return null;
   if (headerName) {
     const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
     const h = norm(headerName);
@@ -644,10 +646,19 @@ export function observeCurrentChat(
     attributes: true,
     attributeFilter: ['title'],
   });
+  // 桥接写入 <html>，不属于 body 子树。号码晚于聊天标题到达时也必须通知 UI。
+  const bridgeObserver = new MutationObserver(schedule);
+  bridgeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-sgc-fiber-chat'],
+  });
+  window.addEventListener('sgc:refresh-chat', schedule);
 
   tick();
   return () => {
     observer.disconnect();
+    bridgeObserver.disconnect();
+    window.removeEventListener('sgc:refresh-chat', schedule);
     if (raf) cancelAnimationFrame(raf);
   };
 }
@@ -786,6 +797,10 @@ function buildInspectReport(): Record<string, unknown> {
     groupJid,
     bridgeAttr:
       document.documentElement.getAttribute('data-sgc-fiber-chat') ?? null,
+    bridgeInjection:
+      document.documentElement.getAttribute('data-sgc-bridge-injection') ?? null,
+    bridgeReader:
+      document.documentElement.getAttribute('data-sgc-bridge-reader') ?? null,
     jidInfoFromDataId: jidInfo,
     jidPhoneCacheKeys: cacheKeys,
     nameToPhoneCacheSize: ntpSize,

@@ -20,6 +20,7 @@ import { MessagesHistorySection } from './MessagesHistorySection';
 import { AIReplyTab } from './AIReplyTab';
 import { AutoReplyStatus } from './AutoReplyStatus';
 import { AutoReplyToggle } from './AutoReplyToggle';
+import { UnresolvedChat } from './UnresolvedChat';
 
 const HAS_QWEN_KEY = Boolean(import.meta.env.VITE_DASHSCOPE_API_KEY);
 
@@ -73,11 +74,7 @@ export function ContactCard({ chat, orgId }: Props) {
   });
 
   if (!chat.phone && !chat.groupJid) {
-    return (
-      <div className="sgc-empty">
-        <p>请在 WhatsApp 选择一个聊天</p>
-      </div>
-    );
+    return <UnresolvedChat name={chat.name} />;
   }
 
   if (loading) return <div className="sgc-empty">加载中…</div>;

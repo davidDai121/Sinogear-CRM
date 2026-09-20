@@ -50,3 +50,14 @@ test('archived guidance retains original dates and source; quote versions stay s
  let m=await load(db,'org','a');assert.equal(m.historicalGuidance.length,1);assert.equal(m.quoteVersions.length,1);assert.equal(m.historicalGuidance[0].payload.sourceAt,'2026-09-11T12:00:00Z');assert.doesNotMatch(render(m),/OTHER_CUSTOMER/);
  await save(db,'org','a',entry('scope','新单','scope','new'));m=await load(db,'org','a');assert.equal(m.quoteVersions.length,0);assert.match(render(m),/source conversation\/order/);assert.doesNotMatch(render(m),/OLD_QUOTE/);
 });
+
+test('quarantined original text is absent and prior snapshot authority is explicitly withdrawn',async()=>{
+ const db=store();db.tables.contacts[0].phone='+573246874685';
+ db.tables.contact_events.push({id:'foreign',contact_id:'a',event_type:'ai_extracted',created_at:'2026-09-18T00:00:00Z',payload:{schema:'sales-history.v1',sourceAt:'2026-09-16T00:00:00Z',sourceThread:'foreign-thread',text:'我有个委内瑞拉的客户，电话+58 412-2611301，运费FOREIGN_PRICE'}});
+ const m=await load(db,'org','a');assert.equal(m.quarantinedGuidance.length,1);assert.equal(m.historicalGuidance.length,0);
+ const prompt=render(m);assert.doesNotMatch(prompt,/FOREIGN_PRICE/);assert.match(prompt,/foreign-thread/);assert.match(prompt,/no longer applicable/);
+});
+test('prompt keeps all owner approvals but only latest unapproved research/draft/full quote',()=>{
+ const m={contactId:'a',scopeId:'a',label:'x',tasks:[],entries:[entry('a','EARLY_APPROVAL'),entry('b','OLD_DRAFT'.repeat(1000),'assistant_draft'),entry('c','OLD_RESEARCH'.repeat(1000),'freight_lookup'),entry('d','LATEST_DRAFT','assistant_draft'),entry('e','LATEST_RESEARCH','freight_lookup')],quoteVersions:[{id:'q1',at:'old',payload:{input:'OLD_INPUT'.repeat(1000),summary:'old summary'}},{id:'q2',at:'new',payload:{input:'CURRENT_INPUT'}}]};
+ const prompt=render(m);assert.match(prompt,/EARLY_APPROVAL/);assert.match(prompt,/LATEST_DRAFT/);assert.match(prompt,/LATEST_RESEARCH/);assert.match(prompt,/CURRENT_INPUT/);assert.match(prompt,/old summary/);assert.doesNotMatch(prompt,/OLD_DRAFT|OLD_RESEARCH|OLD_INPUT/);assert.equal(m.entries.length,5);
+});

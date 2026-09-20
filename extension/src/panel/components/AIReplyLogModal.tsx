@@ -389,6 +389,7 @@ function LogRow({
             {log.duration_ms != null && (
               <span>· ⏱ {(log.duration_ms / 1000).toFixed(1)}s</span>
             )}
+            {log.metrics && <span>· GPT {log.metrics.requests} 次 · 输入 {log.metrics.inputChars.toLocaleString()} 字符 · 输出 {log.metrics.outputChars.toLocaleString()} 字符</span>}
             {log.chat_url && (
               <a
                 href={log.chat_url}

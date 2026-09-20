@@ -26,9 +26,13 @@ export function readGptResponseSnapshot(prevId: string | null): GptResponseSnaps
     : proseEls.length > 0 ? `prose:${proseEls.length}` : null;
 
   // Only use completion controls belonging to this turn, not an old response.
+  // The whole action bar (copy / thumbs / regenerate) only renders once the turn
+  // is complete, so any of its buttons is a completion signal; the copy button
+  // alone was missed in canvas/writing-block layouts and background tabs.
   const turn = last?.closest('[data-testid^="conversation-turn-"], article') ?? last;
   const copyBtn = turn?.querySelector(
-    'button[data-testid="copy-turn-action-button"], button[aria-label*="Copy" i], button[aria-label*="复制" i]',
+    'button[data-testid="copy-turn-action-button"], button[data-testid*="copy" i], button[aria-label*="Copy" i], button[aria-label*="复制" i], '
+    + 'button[data-testid*="good-response" i], button[data-testid*="thumbs" i], button[aria-label*="Good response" i], button[aria-label*="Regenerate" i], button[aria-label*="重新生成" i]',
   );
   const state = { generating: !!stopBtn, hasCopyBtn: !!copyBtn, content: '' };
   if (!last || curId === null || curId === prevId) return state;

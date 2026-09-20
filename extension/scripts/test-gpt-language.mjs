@@ -132,5 +132,23 @@ check('Discussion mode remains internal Chinese without a customer-language outp
   }
 });
 
+check('Long inbound stays complete once; language excerpt points to its exact source including trailing preference', () => {
+  const text='Confirm each of these vehicle details. '.repeat(200)+'Please reply in Spanish, not English.';
+  const m=msg(text);
+  const prompt=buildFollowUpMessage({contact,newMessages:[m]});
+  assert.equal(prompt.split(text).length-1,1);
+  assert.equal(evidence(prompt)[0].text,text.slice(0,240));
+  assert.equal(evidence(prompt)[0].fullTextRef,`message:${m.id}`);
+  assert.ok(prompt.includes(`[source ${JSON.stringify(`message:${m.id}`)}]`));
+  assert.match(languageBlock(prompt),/including at its end/);
+});
+
+check('Long language evidence absent from the rendered last 50 is never reduced to a dangling reference', () => {
+  const text='Necesito información sobre estos vehículos. '.repeat(100);
+  const prompt=buildFirstMessage({contact,messages:[msg(text),...Array.from({length:55},()=>msg('Sales note',true))]});
+  assert.equal(evidence(prompt)[0].text,text);
+  assert.equal(evidence(prompt)[0].fullTextRef,undefined);
+});
+
 console.log(`PASS ${cases.length} GPT language prompt regression cases.`);
 console.log('These checks validate prompt evidence and routing, not live model language compliance.');
