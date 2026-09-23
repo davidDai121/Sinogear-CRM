@@ -71,6 +71,13 @@ export interface GptPromptContext {
 export function buildFirstMessage(ctx: GptPromptContext): string {
   const isGroup = !!ctx.contact.group_jid;
   const sections: string[] = [];
+  const workflows = selectGptWorkflows({
+    salesGuidance: ctx.salesGuidance,
+    messages: ctx.messages,
+    vehicleInterests: ctx.vehicleInterests,
+    workMemory: ctx.workMemory,
+    contact: ctx.contact,
+  });
 
   // 用户自建 Custom GPT 时跳过 ROLE_PROMPT（Custom GPT 的 instructions 里已有同样内容，重发反而稀释）
   if (!ctx.useCustomGpt) {
@@ -78,7 +85,7 @@ export function buildFirstMessage(ctx: GptPromptContext): string {
   }
 
   appendApprovedKnowledge(sections, ctx.approvedKnowledge);
-  sections.push(renderSalesWorkMemory(ctx.workMemory));
+  sections.push(renderSalesWorkMemory(ctx.workMemory, workflows));
 
   // 销售自定义指令 —— 最高优先级
   if (ctx.salesGuidance?.trim()) {
@@ -98,13 +105,6 @@ export function buildFirstMessage(ctx: GptPromptContext): string {
 
   // 不依赖默认角色或 Custom GPT 的旧 instructions；每次生成都重申语言依据。
   // 运费/报价规程按本轮状态条件加载（gpt-workflow-selection.ts）
-  const workflows = selectGptWorkflows({
-    salesGuidance: ctx.salesGuidance,
-    messages: ctx.messages,
-    vehicleInterests: ctx.vehicleInterests,
-    workMemory: ctx.workMemory,
-    contact: ctx.contact,
-  });
   sections.push('', renderSalesWorkflow(workflows), '', buildReplyLanguageContext(ctx.messages, ctx.contact.language, isGroup));
 
   // 最后再强调一次输出格式（GPT 容易忘记三段格式，结尾重申比开头有效）
@@ -131,12 +131,19 @@ export function buildFollowUpMessage(opts: {
   vehicleInterests?: GptPromptContext['vehicleInterests'];
 }): string {
   const sections: string[] = [];
+  const workflows = selectGptWorkflows({
+    salesGuidance: opts.salesGuidance,
+    messages: opts.newMessages,
+    vehicleInterests: opts.vehicleInterests,
+    workMemory: opts.workMemory,
+    contact: opts.contact,
+  });
 
   // 续聊每次都注入当前时间 — GPT 对话 thread 不知道唤起时刻
   sections.push(formatCurrentTimeBlock(), '');
 
   appendApprovedKnowledge(sections, opts.approvedKnowledge);
-  sections.push(renderSalesWorkMemory(opts.workMemory));
+  sections.push(renderSalesWorkMemory(opts.workMemory, workflows));
 
   if (opts.salesGuidance?.trim()) {
     sections.push(
@@ -163,13 +170,6 @@ export function buildFollowUpMessage(opts: {
     sections.push('');
   }
 
-  const workflows = selectGptWorkflows({
-    salesGuidance: opts.salesGuidance,
-    messages: opts.newMessages,
-    vehicleInterests: opts.vehicleInterests,
-    workMemory: opts.workMemory,
-    contact: opts.contact,
-  });
   sections.push(
     renderSalesWorkflow(workflows),
     '',
@@ -203,12 +203,19 @@ export function buildDiscussionMessage(opts: {
   workMemory?: SalesWorkMemory;
 }): string {
   const sections: string[] = [];
+  const workflows = selectGptWorkflows({
+    discussionQuestion: opts.question,
+    messages: opts.ctx?.messages ?? opts.newMessages,
+    vehicleInterests: opts.ctx?.vehicleInterests ?? opts.vehicleInterests,
+    workMemory: opts.workMemory ?? opts.ctx?.workMemory,
+    contact: opts.ctx?.contact ?? opts.contact,
+  });
 
   // 当前时间 — 首条 / 续聊都注入
   sections.push(formatCurrentTimeBlock(), '');
 
   appendApprovedKnowledge(sections, opts.approvedKnowledge ?? opts.ctx?.approvedKnowledge);
-  sections.push(renderSalesWorkMemory(opts.workMemory ?? opts.ctx?.workMemory));
+  sections.push(renderSalesWorkMemory(opts.workMemory ?? opts.ctx?.workMemory, workflows));
 
   if (opts.ctx) {
     // 第一条 discuss — 角色 + 客户档案 + 历史（同 buildFirstMessage 哲学：不喂车型/市场参考数据）
@@ -237,13 +244,6 @@ export function buildDiscussionMessage(opts: {
     }
   }
 
-  const workflows = selectGptWorkflows({
-    discussionQuestion: opts.question,
-    messages: opts.ctx?.messages ?? opts.newMessages,
-    vehicleInterests: opts.ctx?.vehicleInterests ?? opts.vehicleInterests,
-    workMemory: opts.workMemory ?? opts.ctx?.workMemory,
-    contact: opts.ctx?.contact ?? opts.contact,
-  });
   sections.push(
     renderSalesWorkflow(workflows),
     `[Discussion — NOT a customer reply request]`,

@@ -1,3 +1,5 @@
+import { taskBucket, TASK_BUCKET_LABEL, type TaskBucket } from '@/lib/task-presentation';
+import { TaskEvidenceReview } from '../components/TaskEvidenceReview';
 import type { FollowupPlan } from '@/lib/gpt-followup';
 import { FOLLOWUP_REVIEW_SETTING } from '@/lib/gpt-followup-schedule';
 import { useEffect, useMemo, useState, useCallback } from 'react';
@@ -82,6 +84,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [contactMap, setContactMap] = useState<Record<string, ContactRow>>({});
   const [statusFilter, setStatusFilter] = useState<TaskStatus>('open');
+  const [bucket, setBucket] = useState<TaskBucket>('action');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [modalTask, setModalTask] = useState<TaskRow | null | false>(false);
@@ -219,8 +222,10 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
   }, [refresh]);
 
   useEffect(() => {
-    const timer = setInterval(() => { void refresh(true); }, 30_000);
-    return () => clearInterval(timer);
+    const changed = () => { void refresh(true); };
+    const timer = setInterval(changed, 30_000);
+    window.addEventListener('sgc:tasks-changed', changed);
+    return () => { clearInterval(timer); window.removeEventListener('sgc:tasks-changed', changed); };
   }, [refresh]);
 
   const toggleStatus = async (task: TaskRow) => {
@@ -237,37 +242,39 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
     }
   };
 
+  const bucketTasks = useMemo(() => statusFilter === 'open' ? tasks.filter(t => taskBucket(t, plans[t.id]) === bucket) : tasks, [tasks, plans, bucket, statusFilter]);
+
   const tasksByDate = useMemo(() => {
     const map: Record<string, TaskRow[]> = {};
-    for (const t of tasks) {
+    for (const t of bucketTasks) {
       if (!t.due_at) continue;
       const key = toDateKey(new Date(t.due_at));
       (map[key] ??= []).push(t);
     }
     return map;
-  }, [tasks]);
+  }, [bucketTasks]);
 
   const visibleTasks = useMemo(() => {
     if (selectedDateKey === '__due') {
       const today = toDateKey(new Date());
-      return tasks.filter(t => t.due_at && toDateKey(new Date(t.due_at)) <= today && (!plans[t.id] || plans[t.id].protected || plans[t.id].decision.decision === 'act'));
+      return bucketTasks.filter(t => !t.due_at || toDateKey(new Date(t.due_at)) <= today);
     }
     if (selectedDateKey) {
       return tasksByDate[selectedDateKey] ?? [];
     }
-    return tasks;
-  }, [selectedDateKey, tasks, tasksByDate, plans]);
+    return bucketTasks;
+  }, [selectedDateKey, bucketTasks, tasksByDate, plans]);
 
   const todayKey = toDateKey(new Date());
   const weekStart = startOfWeek(new Date());
   const todayCount = (tasksByDate[todayKey] ?? []).length;
   const thisWeekCount = useMemo(
     () =>
-      tasks.filter((t) => {
+      bucketTasks.filter((t) => {
         if (!t.due_at) return false;
         return new Date(t.due_at) >= weekStart;
       }).length,
-    [tasks, weekStart],
+    [bucketTasks, weekStart],
   );
 
   const calendarDays = useMemo(() => {
@@ -299,7 +306,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
     ? selectedDateKey === todayKey
       ? `今天的任务（${visibleTasks.length} 条）`
       : `${selectedDateKey} 的任务（${visibleTasks.length} 条）`
-    : `全部${STATUS_LABEL[statusFilter]}任务（${visibleTasks.length} 条）`;
+    : `全部${statusFilter === 'open' ? TASK_BUCKET_LABEL[bucket] : STATUS_LABEL[statusFilter]}任务（${visibleTasks.length} 条）`;
 
   return (
     <div className="sgc-page">
@@ -311,7 +318,7 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
               <button
                 key={s}
                 className={statusFilter === s ? 'sgc-segmented-active' : ''}
-                onClick={() => setStatusFilter(s)}
+                onClick={() => { setStatusFilter(s); setSelectedDateKey(s === 'open' && bucket === 'action' ? '__due' : null); }}
                 type="button"
               >
                 {STATUS_LABEL[s]}
@@ -328,6 +335,13 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
         </div>
       </div>
 
+      {statusFilter === 'open' && <div className="sgc-segmented" style={{ marginBottom: 12 }}>
+        {(['action', 'waiting', 'review'] as TaskBucket[]).map(value => <button type="button" key={value}
+          className={bucket === value ? 'sgc-segmented-active' : ''}
+          onClick={() => { setBucket(value); setSelectedDateKey(value === 'action' ? '__due' : null); }}>
+          {TASK_BUCKET_LABEL[value]}（{tasks.filter(t => taskBucket(t, plans[t.id]) === value).length}）
+        </button>)}
+      </div>}
       <div className="sgc-task-kpi">
         <div className="sgc-task-kpi-cell">
           <div className="sgc-kpi-value">{todayCount}</div>
@@ -342,8 +356,8 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
           <div className="sgc-kpi-label">累计待跟进客户</div>
         </div>
         <div className="sgc-task-kpi-cell">
-          <div className="sgc-kpi-value">{tasks.length}</div>
-          <div className="sgc-kpi-label">{STATUS_LABEL[statusFilter]}总数</div>
+          <div className="sgc-kpi-value">{bucketTasks.length}</div>
+          <div className="sgc-kpi-label">{statusFilter === 'open' ? TASK_BUCKET_LABEL[bucket] : STATUS_LABEL[statusFilter]}总数</div>
         </div>
       </div>
 
@@ -540,10 +554,10 @@ export function TasksPage({ orgId, onJumpToChat }: Props) {
                     {plans[t.id].decision.reason}<br />
                     {plans[t.id].protected ? '保留人工安排 · ' : plans[t.id].decision.timeBasis === 'gpt' ? 'GPT判断时间 · ' : ''}
                     判断于 {new Date(plans[t.id].evaluatedAt).toLocaleString()}
-                  </div>}</td>
+                  </div>}<TaskEvidenceReview task={t} onComplete={() => void refresh(true)} /></td>
                   <td>{time}</td>
                   <td>
-                    <span className="sgc-muted">{STATUS_LABEL[t.status]}</span>
+                    <span className="sgc-muted">{t.status === 'open' ? TASK_BUCKET_LABEL[taskBucket(t, plans[t.id])] : STATUS_LABEL[t.status]}</span>
                   </td>
                   <td>
                     {contact?.phone && (

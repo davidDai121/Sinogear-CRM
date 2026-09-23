@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>WhatsApp 号码接入</title>
+<!--
+  Sino Gear CRM —— WhatsApp coexistence 接入页（只给 boss 用）
+
+  流程：登录 CRM（owner 账号）→ 点「接入 WhatsApp 号码」→ Meta 弹窗里选
+  「连接现有的 WhatsApp Business App」→ 手机 Business App 扫码 → 页面把 code
+  交给 wa-onboard 函数，函数负责订阅推送 + 触发 180 天历史同步。
+
+  托管要求（Meta 规定）：必须 https，且域名要登记在 App 的
+  「Facebook 登录 for Business → 设置 → 允许的网域 / 有效 OAuth 跳转 URI」里。
+
+  部署前把下面 CONFIG 里的 CONFIG_ID 换成 Meta 后台建的配置 ID。
+  ANON_KEY 是公开 key（扩展包里本来就有），可以放在页面里。
+-->
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#111b21; --sub:#667781; --line:#e9edef; --accent:#00a884; --err:#b91c1c; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111b21; --card:#1f2c33; --text:#e9edef; --sub:#8696a0; --line:#2a3942; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+  main { max-width:560px; margin:40px auto; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  p.sub { color:var(--sub); margin:0 0 16px; font-size:13px; }
+  input { width:100%; padding:10px 12px; margin-bottom:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font-size:15px; }
+  button { width:100%; padding:11px; border:0; border-radius:8px; background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  ol { margin:0; padding-left:20px; color:var(--sub); font-size:13px; }
+  #log { white-space:pre-wrap; font:12px/1.5 ui-monospace,Menlo,monospace; color:var(--sub); margin:0; }
+  .err { color:var(--err); }
+  .ok { color:var(--accent); font-weight:600; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>WhatsApp 号码接入</h1>
+    <p class="sub">把业务号接进 CRM：之后收发的每条消息都会自动入库，不用打开聊天。</p>
+    <ol>
+      <li>手机上的 <b>WhatsApp Business App</b> 版本不低于 2.24.17</li>
+      <li>接入后这个号的所有电脑端会被退出，要重新扫码登录 WhatsApp Web</li>
+      <li>接入后 <b>24 小时内手机保持联网</b>（同步 180 天历史）</li>
+    </ol>
+  </div>
+
+  <div class="card" id="loginCard">
+    <h2>1. 登录 CRM（owner 账号）</h2>
+    <input id="email" type="email" placeholder="邮箱" autocomplete="username">
+    <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+    <button id="loginBtn">登录</button>
+  </div>
+
+  <div class="card" id="connectCard" hidden>
+    <h2>2. 接入号码</h2>
+    <p class="sub" id="who"></p>
+    <button id="connectBtn" disabled>接入 WhatsApp 号码</button>
+  </div>
+
+  <div class="card">
+    <h2>进度</h2>
+    <pre id="log">等待登录…</pre>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+const CONFIG = {
+  SUPABASE_URL: 'https://hgkjmmvotpakcetcwpoy.supabase.co',
+  ANON_KEY: 'sb_publishable_BaQFjMfCUC9zRB2jwi2rrA_N-c2pkdu',
+  FB_APP_ID: '1364804098472538',
+  CONFIG_ID: '1962877434386260',
+  GRAPH_VERSION: 'v25.0',
+};
+
+const $ = (id) => document.getElementById(id);
+const log = (msg, cls) => {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  if ($('log').dataset.started !== '1') { $('log').textContent = ''; $('log').dataset.started = '1'; }
+  $('log').appendChild(line);
+};
+
+const sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.ANON_KEY, { auth: { persistSession: false } });
+let session = null;
+
+$('loginBtn').onclick = async () => {
+  $('loginBtn').disabled = true;
+  const { data, error } = await sb.auth.signInWithPassword({ email: $('email').value.trim(), password: $('password').value });
+  $('loginBtn').disabled = false;
+  if (error) { log('登录失败：' + error.message, 'err'); return; }
+  session = data.session;
+  $('loginCard').hidden = true;
+  $('connectCard').hidden = false;
+  $('who').textContent = '已登录：' + data.user.email;
+  log('CRM 登录成功');
+};
+
+// ── Meta SDK ──
+window.fbAsyncInit = () => {
+  FB.init({ appId: CONFIG.FB_APP_ID, autoLogAppEvents: true, xfbml: false, version: CONFIG.GRAPH_VERSION });
+  $('connectBtn').disabled = false;
+};
+(() => {
+  const s = document.createElement('script');
+  s.async = true; s.defer = true; s.crossOrigin = 'anonymous';
+  s.src = 'https://connect.facebook.net/en_US/sdk.js';
+  document.head.appendChild(s);
+})();
+
+// code（登录回调）和 waba_id（message 事件）分两路到达，先后不定，两样都齐了才提交
+let pendingCode = null;
+let signupInfo = null;
+let submitted = false;
+
+window.addEventListener('message', (event) => {
+  if (!event.origin.endsWith('facebook.com')) return;
+  let data;
+  try { data = JSON.parse(event.data); } catch { return; }
+  if (data.type !== 'WA_EMBEDDED_SIGNUP') return;
+  if (data.event === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING' || data.event === 'FINISH') {
+    signupInfo = data.data || {};
+    log('Meta 授权完成，WABA ' + (signupInfo.waba_id || '?'));
+    maybeSubmit();
+  } else if (data.event === 'CANCEL') {
+    log('流程在「' + (data.data?.current_step || '未知步骤') + '」被取消' + (data.data?.error_message ? '：' + data.data.error_message : ''), 'err');
+  } else if (data.event === 'ERROR') {
+    log('Meta 报错：' + (data.data?.error_message || JSON.stringify(data.data)), 'err');
+  }
+});
+
+$('connectBtn').onclick = () => {
+  pendingCode = null; signupInfo = null; submitted = false;
+  log('打开 Meta 授权窗口…');
+  // FB.login 的回调不能是 async 函数，SDK 会报错
+  FB.login((response) => {
+    if (response.authResponse?.code) {
+      pendingCode = response.authResponse.code;
+      maybeSubmit();
+    } else {
+      log('没有拿到授权（窗口被关闭或拒绝了）', 'err');
+    }
+  }, {
+    config_id: CONFIG.CONFIG_ID,
+    response_type: 'code',
+    override_default_response_type: true,
+    extras: {
+      setup: {},
+      featureType: 'whatsapp_business_app_onboarding',
+      sessionInfoVersion: '3',
+    },
+  });
+};
+
+async function maybeSubmit() {
+  if (submitted || !pendingCode || !signupInfo?.waba_id) return;
+  submitted = true;
+  log('提交给 CRM 服务器（订阅推送 + 触发历史同步）…');
+  try {
+    const res = await fetch(CONFIG.SUPABASE_URL + '/functions/v1/wa-onboard', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: CONFIG.ANON_KEY,
+        Authorization: 'Bearer ' + session.access_token,
+      },
+      body: JSON.stringify({ code: pendingCode, waba_id: signupInfo.waba_id, phone_number_id: signupInfo.phone_number_id }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 207) {
+      log(`失败（${out.step || res.status}）：${out.error || '未知错误'}`, 'err');
+      return;
+    }
+    for (const n of Object.values(out.numbers || {})) {
+      const bad = [n.smb_app_state_sync, n.history].filter((x) => x && x.error).map((x) => x.error);
+      log(`${n.phone}${n.verified_name ? '（' + n.verified_name + '）' : ''}：` + (bad.length ? '同步触发失败 ' + bad.join('；') : '已接入，历史同步开始'), bad.length ? 'err' : 'ok');
+    }
+    if (out.ok) log('完成。接下来 24 小时内手机保持联网；电脑端重新扫码登录 WhatsApp Web。', 'ok');
+  } catch (e) {
+    log('网络错误：' + e.message, 'err');
+  }
+}
+</script>
+</body>
+</html>

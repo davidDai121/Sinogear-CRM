@@ -1156,6 +1156,26 @@ Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% 
 
 **教训**：① Claude/GPT/Gem 三套 ReplySection 在 CLAUDE.md 里的行数记录早已过时（ClaudeReplySection 整个文件已删），backlog 条目要在动手前先核对现状；② **content script 里不要为了可测性引入新的动态 import 边界**——chunk 带 CSS 就会踩 preload 路径解析炸弹；正确姿势是「纯逻辑拆 core 文件（type-only import）+ 壳文件静态 import 注入」。已有的 whatsapp-idb 动态 import 没事是因为那个 chunk 恰好无 CSS，别当成安全先例；③ 重构后光过 typecheck/单测/build 不够，这次 CSS preload 炸弹三关全绿、一上真实页面就炸——**动了模块边界（import 方式、chunk 结构）的改动必须实机点一遍**。
 
+### 近期补完（2026-09-22 ~ 2026-09-23）— WhatsApp 共存模式接入（Dualhook）+ 同步健康度
+
+**起点**：boss 要「每次发送/删除时聊天记录入库」，做了又撤回，改推 coexistence——让 Meta 把业务号收发的每条消息主动推进 CRM，替掉只覆盖「打开过的聊天」的 DOM 抓取（实测漏 69%）。Grant 接入当天日志里满屏「解析 0 条」，boss 追问「同步我怕出错，你没同步成功怎么办」。
+
+**根因 / 过程（实测）**：
+- 自家 App（CRMDataSource 1364804098472538）不是获批 Tech Provider，Embedded Signup 直接报「can't onboard customers right now」→ 改走 BSP **Dualhook**（Team $25/月 5 号，Meta 直推我们的 URL，用 Dualhook 的 app secret 签名我们验不了 → webhook 加 `WA_PATH_SECRET` 密钥路径段 + 只收已登记号码）。
+- **能不能进共存由 Meta 按号码自动判断，没有「连接现有 App」按钮**：号码已关联进当前 BM 的会在下拉框标 **Registered**，选它才走共存；手填「新号码」且号在 App 上注册 → 报 #2494064「already registered… disconnect it」（**千万别断开/删号**）。155（Miles）/ Cheryl 挂在被封的旧 BM「合肥鑫齿动力科技有限公司」上，已开 Meta 工单；1355 Business 注册不满 7 天。
+- 手机扫码必须走 **设置 → 账号 → 商家平台**，用「已关联设备」（网页版登录那个）扫会一直转圈。
+- 接入后 Meta 推的 history 有两种形状我们没处理：① `history` 字段下也会带 `message_echoes`（我方发的媒体）→ 被当 0 条回了 200，永久丢；② 673 个会话的大批次里一条畸形消息让整批 503。
+
+**修法**：
+- migration **0043**（`wa_business_numbers` 号码→业务员 + `messages.business_phone` + `wa_business_accounts`）、**0044**（号码按登记的 org 路由，测试号 1355 进独立测试 org；phone 全局唯一）、**0045**（`wa_number_daily_stats` 每号每天 收到/入库/跳过/失败 + `wa_webhook_failures` 原始载荷留底（仅 service_role）+ `wa_business_numbers.last_error(_at)` + `wa_record_stats` RPC），均已应用。
+- `wa-cloud-webhook`：wamid→WA 原生 key_id 与老数据天然去重；history 里单条畸形只跳过并留原文；客户号优先 `thread.context.wa_id`；history 下的 `message_echoes`/`messages` 也收；按业务号分组入库拿到每号入库数；整批失败时载荷留底 + 计数 + 卡片报错，**仍回 503 让 Meta 重推**；无主理人的客户归号码登记的业务员。
+- `wa-onboard` 函数 + 官网 `wa-onboard.html` 授权页（自家 ES 路径，等 Tech Provider 获批才用得上）。
+- CRM「⋯ 更多 → 📡 号码同步状态」（`WaSyncHealthModal`）：每号一张卡，🔴 超 3 天无推送 / 24h 内有入库失败，🟠 超 24h 无推送，⚪ 未接入；今天 / 近 7 天计数。
+
+**验证**：Grant（phone_number_id 758370780692975）首批 933 条解析、502 新入库、431 去重、22 个广告归因；实测 Grant 发的「Hi there」2 秒入库。Sophia（1308093585725851）首批 1537 条。webhook 测试 39 例全过；`wa_record_stats` service_role 204、anon 401。
+
+**教训**：① **webhook 回 200 之前必须确认真的存了**——「解析 0 条 + 200」是最危险的静默丢数据，Meta 不会重推；新增字段/形状先打结构日志（只键名不含内容）看清再写解析。② 批量回填类载荷（history）单条畸形只能跳过留底，不能让整批 503 无限重试。③ 共存号 **14 天不打开 WhatsApp Business 会静默断开**，靠健康度面板和 Dualhook 第 13 天邮件发现。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1311,6 +1331,10 @@ WhatsApp 绿色主题：
 - **`fb-lead-webhook` 建客户的阶段是 `new`，不要改回 `qualifying`**（2026-08-26）：填表的筛选力约等于零（57% 从没进过 CRM、深聊率 33%、判定过的 16 个里 15 个不合格）。默认打 `qualifying` 会把「销售看过、认为值得跟」这个字段变成常量，看板漏斗虚高，而这正是整条 Meta 回传闭环要表达的东西。合格与否走 `contact_events('lead_qualified')`
 - **`customer_stage` 不能当广告漏斗指标用**（2026-08-25 分析踩到）：webhook 默认值 + `stage-sync` 的 chat-classifier（`active` → `negotiating`）都会写它，实测 46 个 `negotiating`/`quoted` 的新广告客户里 25 个库里零消息。**做广告/线索质量分析一律用消息数口径**（入站 ≥3 = 深聊），别用 stage。基于 stage 得出的「某条广告议价率 20% vs 另一条 2.5%」被证伪，消息口径下是 33% vs 32%
 - **`EngagedLead` 是过渡信号不是终点**（`engaged-lead-scan` + pg_cron `7 * * * *`）：聊三句 ≠ 会买。等 `QualifiedLead` 攒够 50 条/周，广告组优化目标要换成它，`EngagedLead` 降级成参考。**人工判定绝不能因为有了自动事件就不做** —— 自动事件对已判定过的客户会主动让路（SQL 里的第 3 条规则）
+
+- **共存模式 webhook 回 200 = 承诺已存**（2026-09-23，`wa-cloud-webhook`）：任何「解析不出 / 不认识」的载荷都不能静默回 200——Meta 收到 200 就不再重推，数据永久丢。新字段/新形状先看结构日志；单条畸形跳过要进 `wa_webhook_failures` 留原文；整批失败回 503。健康度看 CRM「📡 号码同步状态」
+- **共存号不能断开/删号/换号来「修」接入错误**：#2494064 的正确处理是把号关联进当前 BM（或找 Meta 支持移出旧 BM），断开会删掉 App 账号和全部聊天记录
+- **测试共存推送不要点 Meta webhook 页的 Test 按钮**：样例载荷会往正式库建假客户
 
 ## 用户偏好
 

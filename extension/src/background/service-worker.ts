@@ -1,5 +1,6 @@
 import { fiberBridgeMainWorld } from './whatsapp-fiber-bridge';
 import { startDeliveredGptRun, pollDeliveredGptRun } from '@/lib/gpt-run-delivery';
+import { runStorageHousekeeping } from '@/lib/storage-housekeeping';
 import { runDueFollowup, type FollowupRunnerState } from '@/lib/gpt-followup-runner';
 import { installFollowupSchedule, isFollowupReviewEnabled } from '@/lib/gpt-followup-schedule';
 import {
@@ -32,7 +33,6 @@ const AI_BASE_URL =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const AI_MODEL = import.meta.env.VITE_AI_MODEL ?? 'qwen-turbo-latest';
 const AI_URL = `${AI_BASE_URL.replace(/\/$/, '')}/chat/completions`;
-
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'PING') {
@@ -677,3 +677,5 @@ async function reviewFollowups() {
   } finally { followupRunning = false; }
 }
 installFollowupSchedule(reviewFollowups);
+// 每次 service worker 启动清一次 chrome.storage.local，防止 AI 日志撞 10 MB 配额。
+void runStorageHousekeeping();

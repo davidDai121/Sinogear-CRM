@@ -31,3 +31,4 @@ test('a captured result remains deliverable when persistent storage fills up',as
  h.run=async o=>{globalThis.chrome.storage.local.set=async()=>{throw Error('quota')};try{await o.beforeClose(result)}catch{throw new globalThis.Unsaved(result)}};
  await s.startDeliveredGptRun(id,{url:'https://chatgpt.com/',prompt:'hello'});await settle();assert.equal((await s.pollDeliveredGptRun(id)).responseText,'Hola');
 });
+

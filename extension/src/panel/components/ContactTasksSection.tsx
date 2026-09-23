@@ -1,3 +1,7 @@
+import { taskBucket, TASK_BUCKET_LABEL } from '@/lib/task-presentation';
+import type { FollowupPlan } from '@/lib/gpt-followup';
+import { fetchAllPaged } from '@/lib/supabase-paged';
+import { TaskEvidenceReview } from './TaskEvidenceReview';
 import { useEffect, useState, type FormEvent } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Database, TaskStatus } from '@/lib/database.types';
@@ -42,8 +46,14 @@ function dueDateFromDays(days: number | null): string | null {
   return d.toISOString();
 }
 
-export function ContactTasksSection({ contact, orgId }: Props) {
+export function ContactTasksSection(props: Props) {
+  return <ContactTasksForContact key={`${props.orgId}:${props.contact.id}`} {...props} />;
+}
+
+function ContactTasksForContact({ contact, orgId }: Props) {
   const contactId = contact.id;
+  const [plans, setPlans] = useState<Record<string, FollowupPlan>>({});
+  const [showWaiting, setShowWaiting] = useState(false);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -55,25 +65,24 @@ export function ContactTasksSection({ contact, orgId }: Props) {
   const [aiError, setAiError] = useState<string | null>(null);
 
   const refresh = async () => {
-    const { data, error } = await supabase
-      .from('tasks')
-      .select('*')
-      .eq('contact_id', contactId)
-      .order('created_at', { ascending: false });
-    if (error) setError(error.message);
-    else setTasks(data ?? []);
+    try {
+      const data = await fetchAllPaged<TaskRow>((from, to) => supabase.from('tasks').select('*')
+        .eq('org_id', orgId).eq('contact_id', contactId).order('id').range(from, to));
+      const journal = await fetchAllPaged<{ payload: Record<string, unknown> }>((from, to) => supabase.from('contact_events')
+        .select('payload').eq('contact_id', contactId).eq('event_type', 'ai_extracted')
+        .contains('payload', { schema: 'gpt-followup.v1' }).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to));
+      const latest: Record<string, FollowupPlan> = {};
+      for (const row of journal) { const p = row.payload as unknown as FollowupPlan; if (p.orgId === orgId && !latest[p.taskId]) latest[p.taskId] = p; }
+      setTasks(data.sort((a,b) => b.created_at.localeCompare(a.created_at))); setPlans(latest); setError(null);
+    } catch(e) { setError(stringifyError(e)); }
   };
-
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      await refresh();
-      if (cancelled) return;
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [contactId]);
+    void refresh();
+    const changed = () => { void refresh(); };
+    window.addEventListener('sgc:tasks-changed', changed);
+    const timer = setInterval(changed, 30000);
+    return () => { clearInterval(timer); window.removeEventListener('sgc:tasks-changed', changed); };
+  }, [contactId, orgId]);
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
@@ -110,7 +119,7 @@ export function ContactTasksSection({ contact, orgId }: Props) {
     const { error } = await supabase
       .from('tasks')
       .update({ status: next })
-      .eq('id', task.id);
+      .eq('id', task.id).eq('org_id', orgId).eq('contact_id', contactId);
     if (error) {
       setError(error.message);
       setTasks(prev);
@@ -212,7 +221,7 @@ export function ContactTasksSection({ contact, orgId }: Props) {
       )}
 
       <div className="sgc-stack">
-        {tasks.map((t) => (
+        {tasks.filter(t => showWaiting || taskBucket(t, plans[t.id]) !== 'waiting').map((t) => (
           <div key={t.id} className="sgc-stack-card">
             <div className="sgc-stack-header">
               <label className="sgc-task-row">
@@ -225,8 +234,9 @@ export function ContactTasksSection({ contact, orgId }: Props) {
                   {t.title}
                 </strong>
               </label>
-              <span className="sgc-muted">{STATUS_LABEL[t.status]}</span>
+              <span className="sgc-muted">{t.status === 'open' ? TASK_BUCKET_LABEL[taskBucket(t, plans[t.id])] : STATUS_LABEL[t.status]}</span>
             </div>
+            <TaskEvidenceReview task={t} onComplete={() => void refresh()} />
             {t.due_at && (
               <div className="sgc-stack-meta">
                 <span>截止 {new Date(t.due_at).toLocaleString()}</span>
@@ -236,6 +246,9 @@ export function ContactTasksSection({ contact, orgId }: Props) {
         ))}
       </div>
 
+      {tasks.some(t => taskBucket(t, plans[t.id]) === 'waiting') && <button type="button" className="sgc-btn-link" onClick={() => setShowWaiting(!showWaiting)}>
+        {showWaiting ? '收起' : '查看'}等待客户 / 条件（{tasks.filter(t => taskBucket(t, plans[t.id]) === 'waiting').length}）
+      </button>}
       {suggestions.length > 0 && (
         <div className="sgc-task-suggestions">
           <div className="sgc-muted sgc-tag-suggestions-label">

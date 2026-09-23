@@ -3,6 +3,7 @@ import { isMediaOnly } from './chat-media-utils';
 import { isSalesPitch } from './sales-pitch';
 import { decodeGptTemplateDescription } from './gpt-template-knowledge';
 import { R08_SKILL_ID } from './gpt-skill';
+import { browserAllowsTemplate, type GptBrowserBinding } from './gpt-browser-binding';
 
 // Verified R08 GPT identities in the owners' separate ChatGPT accounts.
 // Routing may recognize both; conversation reuse still requires the exact ID.
@@ -25,6 +26,7 @@ export interface GptRoutingContext {
   discussionQuestion?: string;
   /** Explicit choice for this customer; takes priority over inferred topics. */
   manualTemplateId?: string;
+  browserBinding?: GptBrowserBinding | null;
 }
 
 type Topic = 'r08' | 'other' | null;
@@ -104,7 +106,7 @@ function templateSkill(template: { description?: string | null }) {
   catch { return undefined; } // Generation still fails closed in the knowledge loader.
 }
 
-function isR08Template(template: Template): boolean {
+export function isR08Template(template: Template): boolean {
   const gptId = customGptId(template.gpt_url);
   return templateSkill(template)?.id === R08_SKILL_ID || (gptId !== null && R08_GPT_IDS.has(gptId));
 }
@@ -112,6 +114,19 @@ function isR08Template(template: Template): boolean {
 export function resolveGptTemplateRoute<T extends Template>(
   templates: T[], selectedTemplateId: string, context: GptRoutingContext,
 ): { template: T | null; isR08: boolean; reason: string; error: string | null } {
+  const binding = context.browserBinding;
+  if (binding) {
+    const general = templates.find(t => t.id === binding.defaultTemplateId);
+    const r08 = templates.find(t => t.id === binding.r08TemplateId);
+    if (!general || !r08 || isR08Template(general) || !isR08Template(r08)) {
+      return { template: null, isR08: false, reason: '', error: '本浏览器保存的 GPT 入口已不可用，请在管理模板中重新配置。' };
+    }
+    if (context.manualTemplateId && !browserAllowsTemplate(binding, context.manualTemplateId)) {
+      return { template: null, isR08: false, reason: '', error: '手动模板不属于本浏览器配置，请恢复自动匹配。' };
+    }
+    templates = templates.filter(t => browserAllowsTemplate(binding, t.id));
+    selectedTemplateId = binding.defaultTemplateId;
+  }
   if (context.manualTemplateId) {
     const template = templates.find((t) => t.id === context.manualTemplateId) ?? null;
     return {

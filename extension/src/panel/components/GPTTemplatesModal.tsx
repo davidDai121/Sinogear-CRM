@@ -4,6 +4,7 @@ import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
 import { decodeGptTemplateDescription, encodeGptTemplateDescription } from '@/lib/gpt-template-knowledge';
 import { validateGptSkill } from '@/lib/gpt-skill';
+import { GPTBrowserSettings } from './GPTBrowserSettings';
 
 type GptTemplateRow = Database['public']['Tables']['gpt_templates']['Row'];
 
@@ -132,6 +133,7 @@ export function GPTTemplatesModal({ orgId, onClose }: Props) {
                 </div>
               )}
               <div className="sgc-stack">
+                {!loading && templates.length > 0 && <GPTBrowserSettings orgId={orgId} templates={templates} />}
                 {templates.map((t) => (
                   <div key={t.id} className="sgc-stack-card">
                     <div className="sgc-stack-header">
@@ -139,7 +141,7 @@ export function GPTTemplatesModal({ orgId, onClose }: Props) {
                         <strong>{t.name}</strong>
                         {t.is_default && (
                           <span className="sgc-badge sgc-badge-primary">
-                            默认
+                            CRM 默认
                           </span>
                         )}
                       </div>
@@ -150,7 +152,7 @@ export function GPTTemplatesModal({ orgId, onClose }: Props) {
                             className="sgc-btn-link"
                             onClick={() => setDefault(t.id)}
                           >
-                            设为默认
+                            设为 CRM 默认
                           </button>
                         )}
                         <button

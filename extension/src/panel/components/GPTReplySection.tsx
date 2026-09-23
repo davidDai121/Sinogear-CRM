@@ -1,7 +1,11 @@
+import { loadGptBrowserBinding, templateOwner, browserAllowsTemplate, gptManualTemplateKey, type GptBrowserBinding } from '@/lib/gpt-browser-binding';
+import { bindTaskToDraft } from '@/lib/task-send-completion';
+import { parseGptResponse, normalizeGptReply } from '@/lib/gpt-reply-state';
+import type { ReplyMetrics } from '@/lib/ai-reply-log';
 import { quoteConversationId, saveQuotePreview } from '@/lib/quote-preview';
 import { snapshotDraftEvidence, type DraftEvidence } from '@/lib/draft-freshness';
 import { DraftFreshnessNotice } from './DraftFreshnessNotice';
-import { completeFollowupResult } from '@/lib/gpt-followup-result';
+import { completeFollowupResult, followupProse } from '@/lib/gpt-followup-result';
 import {
   loadChatContext,
   loadGroupMemberNames,
@@ -13,7 +17,7 @@ import { usePersistedReplyStatus } from '@/panel/hooks/usePersistedReplyStatus';
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
-import { jumpToChat } from '@/lib/jump-to-chat';
+import { jumpToChat, verifyHeaderMatches } from '@/lib/jump-to-chat';
 import { type ChatMessage } from '@/content/whatsapp-messages';
 import { loadMessages } from '@/lib/message-sync';
 import {
@@ -102,6 +106,9 @@ interface PendingGptAction {
   startedAt: number;
   wasFollowUp?: boolean;
   inputEvidence?: DraftEvidence;
+  metrics?: ReplyMetrics;
+  prepared?: { chatUrl: string; calculated: Awaited<ReturnType<typeof completeQuoteCalculation>>; research: ReturnType<typeof extractFreightResearch>; messageId?: string; at: string; freightId: string; quoteId: string; draftId: string };
+  savedWork?: Awaited<ReturnType<typeof completeFollowupResult>>;
 }
 
 /**
@@ -124,13 +131,21 @@ export function GPTReplySection(props: Props) {
 
 function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
   const [templates, setTemplates] = useState<GptTemplateRow[]>([]);
+  const [browserBinding, setBrowserBinding] = useState<GptBrowserBinding | null>(null);
   const [conversations, setConversations] = useState<GptConvRow[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   // The keyed customer component prevents a manual choice leaking to another contact.
   const [manualTemplateId, setManualTemplateId] = useState<string>();
   const [showTemplates, setShowTemplates] = useState(false);
   const [foreground, setForeground] = useState(false);
-  const [status, setStatus] = usePersistedReplyStatus<Status>('gpt', contact.id, { kind: 'idle' });
+  const [modelPreparation, setModelPreparation] = useState<string>();
+  const [status, setStoredStatus] = usePersistedReplyStatus<Status>('gpt', contact.id, { kind: 'idle' });
+  const latestStatus = useRef(status);
+  latestStatus.current = status;
+  const setStatus = (next: Status | ((current: Status) => Status)) => {
+    const value = typeof next === 'function' ? next(latestStatus.current) : next;
+    latestStatus.current = value; setStoredStatus(value);
+  };
   const [guidance, setGuidance] = useState('');
   const [guidanceLoaded, setGuidanceLoaded] = useState(false);
   const [discuss, setDiscuss] = useState('');
@@ -146,7 +161,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
   } | null>(null);
   const [routeContextError, setRouteContextError] = useState('');
   const actionLock = useRef(false);
-  const requestMetrics = useRef({ requests: 0, inputChars: 0, outputChars: 0 });
+  const requestMetrics = useRef<ReplyMetrics>({ requests: 0, inputChars: 0, outputChars: 0 });
   const activeRequestId = useRef<string>();
   const recoveryKey = `gpt.pendingAction:${orgId}:${contact.id}`;
   const [pendingAction, setPendingAction] = useState<PendingGptAction | null>(null);
@@ -169,6 +184,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       await new Promise(resolve => setTimeout(resolve, 1500));
       try { result = await chrome.runtime.sendMessage({type:'GPT_RESULT', requestId}); }
       catch { /* Poll the same request after a temporary channel interruption. */ }
+      setModelPreparation(result?.preparation);
     }
     if (result?.pending) throw new Error('GPT 仍未交付，原会话和已完成结果会保留，请稍后取回结果');
     return result;
@@ -178,7 +194,8 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     requestMetrics.current.inputChars += typeof options.prompt === 'string' ? options.prompt.length : 0;
     const requestId = crypto.randomUUID();
     if (action) {
-      const saved = { ...action, requestId, orgId, contactId: contact.id };
+      requestMetrics.current.prepareMs ??= Date.now() - action.startedAt;
+      const saved = { ...action, requestId, orgId, contactId: contact.id, metrics: { ...requestMetrics.current } };
       // Save the customer binding and delivery context BEFORE sending. Refresh must
       // not lose the only pointer to a durable background result.
       activeRequestId.current = requestId;
@@ -192,6 +209,14 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     if (action && result?.ok === false) {
       await chrome.storage.local.remove(recoveryKey);
       setPendingAction(null);
+    }
+    if (result?.timing) {
+      const t = result.timing;
+      if (t.sentAt) {
+        requestMetrics.current.pageMs = (requestMetrics.current.pageMs ?? 0) + t.sentAt - t.startedAt;
+        requestMetrics.current.responseMs = (requestMetrics.current.responseMs ?? 0) + t.completedAt - t.sentAt;
+      }
+      requestMetrics.current.transferMs = (requestMetrics.current.transferMs ?? 0) + Math.max(0, Date.now() - t.completedAt);
     }
     requestMetrics.current.outputChars += typeof result?.responseText === 'string' ? result.responseText.length : 0;
     return result;
@@ -262,6 +287,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
   // ── 模板 + 对话拉取 ──
   const refreshTemplates = async () => {
     const request = ++templateRequest.current;
+    setTemplatesLoaded(false);
     const { data, error } = await supabase
       .from('gpt_templates')
       .select('*')
@@ -269,13 +295,24 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       .order('is_default', { ascending: false })
       .order('created_at', { ascending: true });
     if (!mounted.current || request !== templateRequest.current) return;
-    setTemplatesLoaded(true);
     if (error) {
       setSetupError(`读取 GPT 模板失败：${stringifyError(error)}`);
+      setTemplatesLoaded(false);
       return;
     }
-    setSetupError('');
-    setTemplates(data ?? []);
+    try {
+      const rows = data ?? [];
+      const binding = rows.length ? await loadGptBrowserBinding(orgId, templateOwner(rows)) : null;
+      if (!mounted.current || request !== templateRequest.current) return;
+      setBrowserBinding(binding);
+      setSetupError('');
+      setTemplates(rows);
+      setTemplatesLoaded(true);
+    } catch (e) {
+      if (!mounted.current || request !== templateRequest.current) return;
+      setSetupError(stringifyError(e));
+      setTemplatesLoaded(false);
+    }
   };
 
   const refreshConversations = async () => {
@@ -381,9 +418,9 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       messages: routeContext?.messages ?? [],
       vehicleInterests: routeContext?.vehicleInterests ?? [],
       salesGuidance: guidance,
-      manualTemplateId,
+      manualTemplateId, browserBinding,
     }),
-    [templates, selectedTemplateId, routeContext, guidance, manualTemplateId],
+    [templates, selectedTemplateId, routeContext, guidance, manualTemplateId, browserBinding],
   );
   const selectedTemplate = previewRoute.template;
 
@@ -395,7 +432,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         messages: [],
         vehicleInterests: [],
         salesGuidance: next,
-        manualTemplateId,
+        manualTemplateId, browserBinding,
       });
       if (nextRoute.error || nextRoute.template?.id !== freshResult.current.templateId) {
         freshResult.current = null;
@@ -414,10 +451,13 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
 
   // ── 销售指令（per-contact 持久化） ──
   const guidanceKey = `gptGuidance:${contact.id}`;
-  const manualTemplateKey = `gptManualTemplate:${orgId}:${contact.id}`;
+  const manualTemplateKey = gptManualTemplateKey(orgId, contact.id, browserBinding);
   useEffect(() => {
     let cancelled = false;
     setGuidanceLoaded(false);
+    if (!templatesLoaded) return;
+    setManualTemplateId(undefined);
+    freshResult.current = null;
     void chrome.storage.local.get([guidanceKey, manualTemplateKey]).then((s) => {
       if (cancelled) return;
       const saved =
@@ -428,7 +468,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       setGuidanceLoaded(true);
     });
     return () => { cancelled = true; };
-  }, [guidanceKey]);
+  }, [guidanceKey, manualTemplateKey, templatesLoaded]);
 
   useEffect(() => {
     if (!guidanceLoaded) return;
@@ -458,6 +498,11 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     });
 
   const loadActionContext = async (discussionQuestion?: string) => {
+    const currentBinding = await loadGptBrowserBinding(orgId, templateOwner(templates));
+    if (JSON.stringify(currentBinding) !== JSON.stringify(browserBinding)) {
+      await refreshTemplates();
+      throw new Error('本浏览器 GPT 入口已改变，已重新加载，请再次生成。');
+    }
     const request = ++routeContextRequest.current;
     const [loaded, vehicleInterests] = await Promise.all([
       loadChatMessages(),
@@ -472,7 +517,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       vehicleInterests,
       salesGuidance: guidance.trim() || undefined,
       discussionQuestion,
-      manualTemplateId,
+      manualTemplateId, browserBinding,
     });
     if (route.error) throw new Error(route.error);
     const template = route.template;
@@ -544,37 +589,58 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     }
   };
 
-  const saveGeneratedWork = async (text: string, chatUrl: string, template: GptTemplateRow, memory: SalesWorkMemory, mode: Mode, followupContext: FollowupContext, skill?: GptSkill, messageId?: string) => {
+  const saveGeneratedWork = async (text: string, chatUrl: string, template: GptTemplateRow, memory: SalesWorkMemory, mode: Mode, followupContext: FollowupContext, skill: GptSkill | undefined, messageId: string | undefined, onReady: (text: string) => Promise<void>, pending: PendingGptAction) => {
     const templateId = template.id, scopeId = memory.scopeId;
-    const research = extractFreightResearch(text);
-    if (research.record) {
-      await saveSalesWorkEntry(supabase, orgId, contact.id, {
-        id: crypto.randomUUID(), scopeId, kind: 'freight_lookup', templateId, chatUrl,
-        text: JSON.stringify({ schema: 'freight-research.v1', recordedAt: new Date().toISOString(),
-          status: 'model_research_unverified', bindingQuote: false, raw: research.record }),
-      });
-    }
-    const calculated = await completeQuoteCalculation(research.responseText, mode, async prompt => {
+    const research = pending.prepared?.research ?? extractFreightResearch(text);
+    followupProse(research.responseText);
+    const calculated = pending.prepared?.calculated ?? await completeQuoteCalculation(normalizeGptReply(research.responseText), mode, async prompt => {
       const next = await runGpt({ type:'GPT_RUN', url:chatUrl, prompt: prompt + followupPrompt(followupContext), skill, active:foreground, ensureThinking:false });
       if (!next?.ok) throw new Error(next?.error ?? '报价核算后的整理失败');
       if (typeof next.chatUrl !== 'string' || next.chatUrl.split('#')[0] !== chatUrl.split('#')[0]) throw new Error('核算后的会话身份变化，未保存或展示报价');
       messageId = next.messageId;
       return next.responseText;
     });
+    if (!pending.prepared) {
+      pending.metrics = { ...requestMetrics.current };
+      pending.prepared = { chatUrl, calculated, research, messageId, at: new Date().toISOString(),
+        freightId: crypto.randomUUID(), quoteId: crypto.randomUUID(), draftId: crypto.randomUUID() };
+      await chrome.storage.local.set({ [recoveryKey]: pending });
+    }
+    const prepared = pending.prepared;
+    messageId = prepared.messageId;
+    // Present only validated prose; retry uses this durable calculation, never another GPT pass.
+    if (!calculated.result) await onReady(followupProse(calculated.text));
+    if (research.record) {
+      await saveSalesWorkEntry(supabase, orgId, contact.id, {
+        id: prepared.freightId, scopeId, kind: 'freight_lookup', templateId, chatUrl,
+        text: JSON.stringify({ schema: 'freight-research.v1', recordedAt: prepared.at,
+          status: 'model_research_unverified', bindingQuote: false, raw: research.record }),
+      });
+    }
     if (calculated.input && calculated.result) {
-      await saveQuoteVersion(supabase, orgId, contact.id, crypto.randomUUID(), {
+      await saveQuoteVersion(supabase, orgId, contact.id, prepared.quoteId, {
         schema:'quote-calculation.v1', scopeId, parentId:memory.quoteVersions?.at(-1)?.id ?? null,
         status:'draft', authority:'arithmetic_verified_inputs_require_sources', input:calculated.input, result:calculated.result,
         summary:calculated.result.map(p => `${p.label}: USD ${p.totalUsd}总额 / ${p.perVehicleUsd}每台`).join('；'),
-        chatUrl, computedAt:new Date().toISOString(),
+        chatUrl, computedAt:prepared.at,
       });
     }
+    if (calculated.result) await onReady(followupProse(calculated.text));
     // A ready customer draft must not wait for another web round solely to fill task metadata.
-    const outcome = await completeFollowupResult(calculated.text, followupContext, null,
-      decision => saveFollowup(supabase, followupContext, decision, templateId, chatUrl));
+    const outcome = pending.savedWork ?? await completeFollowupResult(calculated.text, followupContext, null,
+      async decision => {
+        const plan = await saveFollowup(supabase, followupContext, decision, templateId, chatUrl);
+        await bindTaskToDraft(plan, sanitizeReplyForCustomer(parseGptResponse(calculated.text).reply ?? ''), followupContext);
+        return plan;
+      }, onReady);
+    if (!outcome.retryable && !pending.savedWork) {
+      pending.savedWork = outcome;
+      await chrome.storage.local.set({ [recoveryKey]: pending });
+    }
+    if (outcome.retryable) return outcome;
     const finalText = outcome.text;
     await saveSalesWorkEntry(supabase, orgId, contact.id, {
-      id: crypto.randomUUID(), scopeId, kind: 'assistant_draft', text:finalText, templateId, chatUrl,
+      id: prepared.draftId, scopeId, kind: 'assistant_draft', text:finalText, templateId, chatUrl,
     });
     const conversationId = quoteConversationId(chatUrl);
     if (mode === 'reply' && conversationId && messageId && calculated.result) {
@@ -606,10 +672,21 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       if (!isConversationForGptTemplate({ contact_id:contact.id, template_id:template.id, chat_url:chatUrl }, contact.id, template)) {
         throw new Error('GPT返回的会话与本次模板不匹配，未保存工作记录。');
       }
-      const savedWork = await saveGeneratedWork(response.responseText, chatUrl, template, memory, mode, followupContext, skill, response.messageId);
+      const saveStarted = Date.now();
+      const modelTime = () => (requestMetrics.current.pageMs ?? 0) + (requestMetrics.current.responseMs ?? 0) + (requestMetrics.current.transferMs ?? 0);
+      const previousModelTime = modelTime();
+      const showReady = async (text: string) => {
+        const preview: Extract<Status, {kind:'done'}> = { kind:'done', mode, text, chatUrl, source:action.source,
+          count:action.count, logId:null, templateId:template.id, templateName:template.name,
+          inputEvidence:action.inputEvidence, followupWarning:'回复已就绪，正在保存跟进安排和工作记录…', generatedAt:Date.now(), requestId };
+        await chrome.storage.local.set({ [`replyStatus:gpt:${contact.id}`]: preview });
+        setStatus(preview);
+      };
+      const savedWork = await saveGeneratedWork(response.responseText, chatUrl, template, memory, mode, followupContext, skill, response.messageId, showReady, pending);
       await saveConversation(template, chatUrl);
       const savedMemory = await loadSalesWorkMemory(supabase, orgId, contact.id);
       if (mounted.current) { setWorkMemory(savedMemory); setMemoryError(''); }
+      requestMetrics.current.saveMs = Math.max(0, Date.now() - saveStarted - (modelTime() - previousModelTime));
       const logId = await logAiReply({ orgId, contactId:contact.id, source:'gpt',
         mode:mode === 'discuss' ? 'gpt_discuss' : action.wasFollowUp ? 'gpt_followup' : 'gpt_first',
         prompt:action.prompt, response:savedWork.text, guidance:action.guidance,
@@ -622,8 +699,10 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       await chrome.storage.local.set({ [`replyStatus:gpt:${contact.id}`]: done });
       setStatus(done);
       await setReplyProgress(contact.id, 'ready', 'gpt');
-      await chrome.storage.local.remove(recoveryKey);
-      if (mounted.current) setPendingAction(null);
+      if (!savedWork.retryable) {
+        await chrome.storage.local.remove(recoveryKey);
+        if (mounted.current) setPendingAction(null);
+      }
     };
     // Both original and refreshed receivers may exist (including multiple WA tabs).
     // Serialize final delivery and recheck the durable request under the lock.
@@ -634,7 +713,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
   const recoverGptResult = async () => {
     if (!pendingAction || actionLock.current || busy) return;
     actionLock.current = true;
-    setStatus({ kind:'reading' });
+    if (status.kind !== 'done') setStatus({ kind:'reading' });
     try {
       const saved = (await chrome.storage.local.get(recoveryKey))[recoveryKey] as PendingGptAction | undefined;
       if (!saved || saved.requestId !== pendingAction.requestId || saved.orgId !== orgId || saved.contactId !== contact.id) {
@@ -648,19 +727,23 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       if (!template || template.gpt_url !== saved.template.gpt_url || template.description !== saved.template.description) {
         throw new Error('原生成模板已变化，未自动恢复，请检查原ChatGPT会话');
       }
-      setStatus({ kind:'sending', foreground:false, mode:saved.mode, source:saved.source,
+      if (latestStatus.current.kind !== 'done') setStatus({ kind:'sending', foreground:false, mode:saved.mode, source:saved.source,
         count:saved.count, templateName:saved.template.name });
       // Recovery only polls the original request; it never invokes GPT_RUN.
-      const response = await awaitGptResult(saved.requestId);
+      const response = saved.prepared ? { ok:true, responseText:saved.prepared.calculated.text,
+        chatUrl:saved.prepared.chatUrl, messageId:saved.prepared.messageId, timing:undefined } : await awaitGptResult(saved.requestId);
       if (response?.ok === false) {
         await chrome.storage.local.remove(recoveryKey);
         await clearReplyProgress(contact.id);
         setPendingAction(null);
         throw new Error(response.error ?? 'GPT 任务已结束，未产生回复，可重新生成');
       }
+      requestMetrics.current = saved.metrics ?? { requests: 1, inputChars: saved.prompt.length, outputChars: 0 };
+      if (!saved.prepared) requestMetrics.current.outputChars = response?.responseText?.length ?? 0;
+      if (response?.timing?.sentAt) { const t = response.timing; requestMetrics.current.pageMs = t.sentAt - t.startedAt; requestMetrics.current.responseMs = t.completedAt - t.sentAt; }
       await deliverGptResponse(response, saved, saved.requestId);
     } catch (err) {
-      setStatus({kind:'error', message:stringifyError(err)});
+      setStatus(current => current.kind === 'done' ? { ...current, followupWarning: `保存未完成：${stringifyError(err)}` } : {kind:'error', message:stringifyError(err)});
     } finally { actionLock.current = false; }
   };
 
@@ -670,12 +753,13 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     try {
       // Keep the original binding for diagnosis/manual recovery. This releases
       // only this panel's wait; it does not cancel a remote ChatGPT generation.
-      await chrome.storage.local.set({ [`gpt.archivedAction:${pendingAction.requestId}`]: pendingAction });
+      const latest = (await chrome.storage.local.get(recoveryKey))[recoveryKey] ?? pendingAction;
+      await chrome.storage.local.set({ [`gpt.archivedAction:${pendingAction.requestId}`]: latest });
       await chrome.storage.local.remove(recoveryKey);
       await clearReplyProgress(contact.id);
       setPendingAction(null);
-      setStatus({kind:'error', message:'已解除等待并保留原生成记录。这不会取消ChatGPT中的任务；再次生成前请先核对原会话。'});
-    } catch (err) { setStatus({kind:'error', message:stringifyError(err)}); }
+      setStatus(current => current.kind === 'done' ? { ...current, followupWarning:'已保留正文并解除等待，未完成的保存请核对任务页。' } : {kind:'error', message:'已解除等待并保留原生成记录。这不会取消ChatGPT中的任务；再次生成前请先核对原会话。'});
+    } catch (err) { setStatus(current => current.kind === 'done' ? { ...current, followupWarning: `保存未完成：${stringifyError(err)}` } : {kind:'error', message:stringifyError(err)}); }
     finally { actionLock.current = false; }
   };
 
@@ -782,7 +866,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
             '需要先登录 ChatGPT。请打开 https://chatgpt.com 登录后再试（同一个 Chrome profile 即可）。',
         });
       } else {
-        setStatus({ kind: 'error', message: msg });
+        setStatus(current => current.kind === 'done' ? { ...current, followupWarning: `回复已保留；保存未完成，可取回结果重试保存：${msg}` } : { kind: 'error', message: msg });
       }
       void clearReplyProgress(contact.id);
     } finally {
@@ -892,7 +976,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
           message: '需要先登录 ChatGPT。打开 https://chatgpt.com 登录后再试。',
         });
       } else {
-        setStatus({ kind: 'error', message: msg });
+        setStatus(current => current.kind === 'done' ? { ...current, followupWarning: `回复已保留；保存未完成，可取回结果重试保存：${msg}` } : { kind: 'error', message: msg });
       }
       void clearReplyProgress(contact.id);
     } finally {
@@ -926,12 +1010,13 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
   const parsed = useMemo(
     () =>
       status.kind === 'done' && status.mode === 'reply'
-        ? parseClaudeResponse(status.text)
+        ? parseGptResponse(status.text)
         : null,
     [status],
   );
 
   const isFreshResult = status.kind === 'done'
+    && browserAllowsTemplate(browserBinding, status.templateId ?? '')
     && freshResult.current?.templateId === status.templateId
     && freshResult.current?.chatUrl === status.chatUrl
     && templates.some((template) => template.id === status.templateId
@@ -987,13 +1072,17 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
           ? contact.phone.replace(/^\+/, '')
           : contact.name?.trim() || contact.wa_name?.trim() || '';
         if (query) {
-          const ok = await jumpToChat(query, { allowDeepLink: true });
+          const ok = await jumpToChat(query, { allowDeepLink: true, requireMatch: { phone:contact.phone, name:contact.name, waName:contact.wa_name, groupJid:contact.group_jid } });
           if (!ok) {
             alert('未能跳转到该聊天，请先手动打开后再点填入');
             return;
           }
           await new Promise((r) => setTimeout(r, 800));
         }
+      }
+      if (!verifyHeaderMatches({ phone:contact.phone, name:contact.name, waName:contact.wa_name, groupJid:contact.group_jid })) {
+        alert('当前聊天与这条回复的客户不一致，请打开正确聊天后再填入。');
+        return;
       }
       const ok = fillWhatsAppCompose(cleanText);
       if (!ok) {
@@ -1044,7 +1133,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     vehicleInterests: routeContext?.vehicleInterests ?? [],
     salesGuidance: guidance,
     discussionQuestion: discuss,
-    manualTemplateId,
+    manualTemplateId, browserBinding,
   });
 
 
@@ -1138,7 +1227,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
               aria-label="GPT 模板"
             >
               {!selectedTemplate && <option value="">请选择可用模板</option>}
-              {templates.map((t) => (
+              {templates.filter(t => browserAllowsTemplate(browserBinding, t.id)).map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
                   {t.is_default ? ' · 默认' : ''}
@@ -1282,7 +1371,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
           {pendingAction ? '已保留本次生成记录。刷新后可取回原结果，无需重新生成。' : '⏳ 这个客户的回复正在后台生成 —— 可以先去处理别的客户，好了左栏那一行会变成「📝 待填入」'}
           {pendingAction && <button type="button" className="sgc-btn-link" disabled={busy || !templatesLoaded}
             onClick={() => void recoverGptResult()}>取回生成结果</button>}
-          {pendingAction && status.kind === 'error' && <button type="button" className="sgc-btn-link"
+          {pendingAction && (status.kind === 'error' || status.kind === 'done') && <button type="button" className="sgc-btn-link"
             onClick={() => void releaseRecoveryWait()}>保留原记录并解除等待</button>}
         </div>
       )}
@@ -1297,6 +1386,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
               )}
               正在{status.foreground ? '前台' : '后台'}打开 ChatGPT 并
               {status.mode === 'discuss' ? '发送讨论' : '生成回复'}… · {status.templateName}
+              {modelPreparation && <div style={{fontSize:11}}>{({loading:'正在加载 GPT 页面',sending:'正在提交本轮内容'} as Record<string,string>)[modelPreparation]}</div>}
             </div>
           )}
 
@@ -1414,7 +1504,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
 // ── ResultView（reply 模式：三段解析） ──
 
 interface ResultViewProps {
-  parsed: ReturnType<typeof parseClaudeResponse>;
+  parsed: ReturnType<typeof parseGptResponse>;
   source: MessageSource;
   count: number;
   chatUrl: string;
@@ -1445,6 +1535,7 @@ function ResultView({
         </div>
       )}
 
+      {parsed.noReplyReason && <div role="status" className="sgc-gem-progress">{parsed.noReplyReason}</div>}
       {parsed.reply && (
         <ReplyCard
           label="💬 给客户的回复"

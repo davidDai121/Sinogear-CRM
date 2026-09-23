@@ -3,7 +3,7 @@ import test from 'node:test';
 import { build } from 'esbuild';
 const b=await build({entryPoints:['src/lib/message-sync.ts'],bundle:true,platform:'node',format:'esm',write:false,plugins:[{name:'boundaries',setup(build){
  const mocks={
- './supabase':'export const supabase={from:(...args)=>globalThis.repairDb.from(...args)};',
+ './supabase':'export const supabase={auth:{getSession:async()=>({data:{session:null}})},from:(...args)=>globalThis.repairDb.from(...args)};',
  './ai-reply-attribution':'export const attributeOutboundMessage=async()=>null;',
  './ai-reply-log':'export const markAiReplyFilled=async()=>{};',
  './ad-lead-status':"export const MESSAGES_SYNCED_EVENT='synced';",

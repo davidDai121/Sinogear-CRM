@@ -27,6 +27,7 @@ const mocks = {
   '@/lib/sales-facts': `${common}export const loadApplicableSalesFacts = async () => ({usable:[],unavailable:[]});`,
   './SalesFactsPanel': 'export const SalesFactsPanel = () => null;',
   '@/lib/gpt-followup': `${common}
+    export const sameTask = (a,b) => JSON.stringify(a)===JSON.stringify(b);
     export const loadFollowupContext = async (_db,orgId,contactId) => ({orgId,contactId});
     export const followupPrompt = (ctx,opts) => { h().followupPrompts.push({ctx,opts}); return ''; };
     export const extractFollowup = text => { if(h().followupError) throw Error(h().followupError); return {text,decision:{title:'等待条件',reason:'离线边界替身'}}; };
@@ -99,9 +100,9 @@ const { GPTReplySection } = loaded.exports;
 const ORG = 'offline-org';
 const R08_GPT = 'g-6aa7711ad9cc8191aa3d3693cfd7ad9f';
 const MILES_GPT = 'g-offlinemiles123';
-const miles = { id: 'template-miles', org_id: ORG, name: 'Miles V2', is_default: true,
+const miles = { id: 'template-miles', created_by: 'offline-user', org_id: ORG, name: 'Miles V2', is_default: true,
   gpt_url: `https://chatgpt.com/g/${MILES_GPT}-miles`, created_at: '2026-01-01' };
-const r08 = { id: 'template-r08', org_id: ORG, name: 'R08 专用 · Miles', is_default: false,
+const r08 = { id: 'template-r08', created_by: 'offline-user', org_id: ORG, name: 'R08 专用 · Miles', is_default: false,
   gpt_url: `https://chatgpt.com/g/${R08_GPT}-r08`, created_at: '2026-01-02' };
 const contact = id => ({ id, phone: null, name: `Synthetic ${id}`, wa_name: null,
   group_jid: null, country: null, language: 'Spanish', notes: null });
@@ -121,7 +122,7 @@ function makeHarness(options = {}) {
     knowledgeSnapshots: structuredClone(options.knowledgeSnapshots ?? {}),
     memories: structuredClone(options.memories ?? {}), memoryWrites: [], memoryError: options.memoryError, memorySaveError: options.memorySaveError,
     quoteRows: [], responseTexts: options.responseTexts, quoteSaveError: options.quoteSaveError,
-    store: {}, calls: [], queries: [], writes: [], knowledge: [], prompts: [], followupPrompts: [], logs: [], progress: [], syncs: [],
+    store: structuredClone(options.store ?? {}), calls: [], queries: [], writes: [], knowledge: [], prompts: [], followupPrompts: [], logs: [], progress: [], syncs: [],
     headerMatches: false, domMessages: [], returnedUrl: options.returnedUrl,
     holdRuntime: options.holdRuntime ?? false, responseText: options.responseText,
   };
@@ -244,7 +245,7 @@ function assertR08Call(h, kind, expectedUrl = r08.gpt_url, customerId = 'custome
 
 test('UI automatically displays R08; generate ignores existing Miles conversation and saves R08 identity', async t => {
   const { h, container } = await mount(t, { conversations: [conversation(miles)] });
-  assert.equal(container.querySelector('select').value, r08.id);
+  assert.equal(container.querySelector('select[aria-label="GPT 模板"]').value, r08.id);
   assert.match(container.querySelector('.sgc-section-title').textContent, /R08/);
   assert.equal(button(container, text => text === '生成')?.disabled, false);
   await click(button(container, text => text === '生成'));
@@ -287,7 +288,7 @@ test('missing R08 template displays the routing error and blocks both actions', 
 
 test('new customer messages at click time reroute stale Miles preview before loading knowledge', async t => {
   const { h, container } = await mount(t, { messages: { 'customer-a': [msg('Hilux please')] }, conversations: [conversation(miles)] });
-  assert.equal(container.querySelector('select').value, miles.id);
+  assert.equal(container.querySelector('select[aria-label="GPT 模板"]').value, miles.id);
   h.messages['customer-a'].push(msg('Ahora quiero el R08 diésel', 2));
   await click(button(container, text => text === '续聊生成'));
   assertR08Call(h, 'first');
@@ -314,13 +315,13 @@ test('switching customers while GPT runs cannot save or restore customer A resul
   await click(button(container, text => text === '生成'));
   assert.equal(h.calls.length, 1);
   await render('customer-b');
-  assert.equal(container.querySelector('select').value, miles.id);
+  assert.equal(container.querySelector('select[aria-label="GPT 模板"]').value, miles.id);
   await act(async () => h.releaseRuntime()); await settle();
   assert.equal(h.writes.length, 1); assert.equal(h.writes[0].payload.contact_id, 'customer-a');
   assert.equal(h.writes[0].payload.template_id, r08.id);
   assert.equal(h.store['replyStatus:gpt:customer-a']?.templateId, r08.id);
   assert.equal(h.store['replyStatus:gpt:customer-b'], undefined);
-  assert.equal(container.querySelector('select').value, miles.id);
+  assert.equal(container.querySelector('select[aria-label="GPT 模板"]').value, miles.id);
 });
 
 test('fresh R08 generation remains valid after its R08 guidance is cleared; explicit new guidance invalidates it', async t => {
@@ -346,7 +347,7 @@ test('fresh R08 discussion remains valid after question clears; manual template 
   assertR08Call(h, 'discussion-first');
   assert.equal([...container.querySelectorAll('textarea')].at(-1).value, '', 'successful discussion clears question');
   assert.doesNotMatch(container.textContent, /旧模板生成/);
-  const select = container.querySelector('select');
+  const select = container.querySelector('select[aria-label="GPT 模板"]');
   assert.equal(select.disabled, false);
   await act(async () => Simulate.change(select, { target: { value: another.id } })); await settle();
   assert.match(container.textContent, /旧模板生成/);
@@ -356,12 +357,12 @@ test('late initial DB preview cannot replace newer action routing context', asyn
   const { h, container } = await mount(t, { holdInitialRead: true,
     messages: { 'customer-a': [msg('Hilux please')] },
   });
-  assert.equal(container.querySelector('select').value, miles.id);
+  assert.equal(container.querySelector('select[aria-label="GPT 模板"]').value, miles.id);
   h.messages['customer-a'].push(msg('Ahora quiero R08', 2));
   await click(button(container, text => text === '生成'));
   assertR08Call(h, 'first');
   await act(async () => h.releaseInitialRead()); await settle();
-  assert.equal(container.querySelector('select').value, r08.id);
+  assert.equal(container.querySelector('select[aria-label="GPT 模板"]').value, r08.id);
   assert.doesNotMatch(container.textContent, /旧模板生成/);
 });
 
@@ -372,7 +373,7 @@ for (const action of ['generate', 'discussion']) {
       messages: { 'customer-a': [msg('Hilux please')] },
       conversations: [conversation(miles), conv],
     });
-    const select = container.querySelector('select');
+    const select = container.querySelector('select[aria-label="GPT 模板"]');
     assert.equal(select.disabled, false);
     await act(async () => Simulate.change(select, { target: { value: r08.id } })); await settle();
     assert.equal(select.value, r08.id, 'manual selection must not snap back');
@@ -387,7 +388,7 @@ test('auto R08 leaves selector enabled; manual Miles and restore automatic both 
   const { container, render } = await mount(t, {
     messages: { 'customer-a': [msg('R08 please')], 'customer-b': [msg('R08 please')] },
   });
-  let select = container.querySelector('select');
+  let select = container.querySelector('select[aria-label="GPT 模板"]');
   assert.equal(select.value, r08.id);
   assert.equal(select.disabled, false);
   await act(async () => Simulate.change(select, { target: { value: miles.id } })); await settle();
@@ -396,10 +397,10 @@ test('auto R08 leaves selector enabled; manual Miles and restore automatic both 
   assert.equal(select.value, r08.id);
   await act(async () => Simulate.change(select, { target: { value: miles.id } })); await settle();
   await render('customer-b');
-  select = container.querySelector('select');
+  select = container.querySelector('select[aria-label="GPT 模板"]');
   assert.equal(select.value, r08.id, 'manual choice must not leak across customers');
   await render('customer-a');
-  assert.equal(container.querySelector('select').value, miles.id, 'manual choice survives switching away and back');
+  assert.equal(container.querySelector('select[aria-label="GPT 模板"]').value, miles.id, 'manual choice survives switching away and back');
 });
 
 for (const action of ['generate', 'discussion']) {
@@ -613,4 +614,81 @@ test('failed original generation reports error after releasing its pending recor
   assert.equal(h.writes.length,0);
   assert.match(container.textContent,/GPT发送失败/);
   assert.equal(button(container,text=>text==='生成').disabled,false);
+});
+
+test('draft survives auxiliary save failure; retry reuses checkpoint without another GPT call',async t=>{
+ const raw='[Client Record]\nNo change\n[WhatsApp Reply]\nHello Carlos, please confirm the plan.\n[Full Translation & Strategy]\n等待确认';
+ const {h,container}=await mount(t,{responseText:raw});
+ h.memorySaveError='Draft save offline';
+ await click(button(container,x=>x==='生成'));
+ const key=`gpt.pendingAction:${ORG}:customer-a`;
+ assert.equal(h.calls.length,1);assert.ok(h.store[key].prepared);assert.ok(h.store[key].savedWork);
+ assert.equal(h.store['replyStatus:gpt:customer-a'].kind,'done');
+ assert.match(h.store['replyStatus:gpt:customer-a'].text,/Hello Carlos/);
+ assert.match(container.textContent,/保存未完成/);
+ h.memorySaveError=null;
+ await click(button(container,x=>x==='取回生成结果'));
+ assert.equal(h.calls.length,1);assert.equal(h.polls,undefined,'completed checkpoint needs no background polling');
+ assert.equal(h.store[key],undefined);assert.equal(h.memoryWrites.filter(x=>x.entry.kind==='assistant_draft').length,1);
+});
+
+const yangMiles = {...miles,id:'yang-miles',name:'Miles · Yang',is_default:false,gpt_url:'https://chatgpt.com/g/g-offlineyang'};
+const menglongR08 = {...r08,id:'menglong-r08',name:'R08 · Menglong',gpt_url:'https://chatgpt.com/g/g-6aaff2e20f848191a17b81f6786cdebe'};
+const browserKey = `gptBrowserBinding:${ORG}:offline-user`;
+for(const [label,binding,general,specialist] of [
+ ['Yang',{defaultTemplateId:yangMiles.id,r08TemplateId:r08.id},yangMiles,r08],
+ ['Menglong',{defaultTemplateId:miles.id,r08TemplateId:menglongR08.id},miles,menglongR08],
+]) for(const topic of ['R08','Hilux']) for(const mode of ['generate','discuss']) {
+ test(`${label} browser ${mode} ${topic} uses its own URL/knowledge despite old manual selection and shared DB defaults`,async t=>{
+   const expected=topic==='R08'?specialist:general;
+   const {h,container:c}=await mount(t,{templates:[miles,menglongR08,r08,yangMiles],
+     messages:{'customer-a':[msg('I want '+topic)]},
+     store:{[browserKey]:binding,[`gptManualTemplate:${ORG}:customer-a`]:menglongR08.id},
+     conversations:[conversation(miles),conversation(menglongR08)],
+   });
+   assert.equal(c.querySelector('select[aria-label="GPT 模板"]').value,expected.id);
+   assert.equal(c.querySelector('select[aria-label="GPT 模板"]').querySelectorAll('option').length,2);
+   if(mode==='generate')await click(button(c,s=>s==='生成'||s==='续聊生成'));else await discuss(c);
+   assert.equal(h.calls.length,1);assert.ok(h.calls[0].url.startsWith(expected.gpt_url));
+   assert.equal(h.knowledge[0].id,expected.id);assert.equal(h.writes[0].payload.template_id,expected.id);
+ });
+}
+test('missing browser template fails closed instead of taking another account default',async t=>{
+ const {h,container:c}=await mount(t,{store:{[browserKey]:{defaultTemplateId:'removed',r08TemplateId:r08.id}}});
+ assert.match(c.textContent,/本浏览器保存的 GPT 入口已不可用/);
+ assert.equal(button(c,s=>s==='生成'||s==='续聊生成').disabled,true);
+ assert.equal(h.calls.length,0);
+});
+test('browser configuration is isolated from a different CRM user',async t=>{
+ const {h,container:c}=await mount(t,{messages:{'customer-a':[msg('Hilux')]},store:{[`gptBrowserBinding:${ORG}:other-user`]:{defaultTemplateId:'removed',r08TemplateId:r08.id}}});
+ await click(button(c,s=>s==='生成'||s==='续聊生成'));assert.equal(h.calls[0].url,miles.gpt_url);
+});
+test('corrupt browser configuration blocks generation with actionable error',async t=>{
+ const {h,container:c}=await mount(t,{store:{[browserKey]:{defaultTemplateId:miles.id}}});
+ assert.match(c.textContent,/本浏览器 GPT 配置损坏/);assert.equal(h.calls.length,0);
+});
+test('manual selection is remembered inside its browser pair, then automatic routing resumes',async t=>{
+ const binding={defaultTemplateId:yangMiles.id,r08TemplateId:r08.id};
+ const manualKey=`gptManualTemplate:${ORG}:customer-a:${yangMiles.id}:${r08.id}`;
+ const {h,container:c}=await mount(t,{templates:[miles,menglongR08,r08,yangMiles],store:{[browserKey]:binding,[manualKey]:yangMiles.id}});
+ assert.equal(c.querySelector('select[aria-label="GPT 模板"]').value,yangMiles.id);
+ await click(button(c,s=>s==='恢复自动匹配'));
+ assert.equal(c.querySelector('select[aria-label="GPT 模板"]').value,r08.id);
+ assert.equal(h.store[manualKey],undefined);
+});
+test('changing the browser pair from another tab blocks stale generation and reloads the route',async t=>{
+ const {h,container:c}=await mount(t,{templates:[miles,menglongR08,r08,yangMiles]});
+ h.store[browserKey]={defaultTemplateId:yangMiles.id,r08TemplateId:r08.id};
+ await click(button(c,s=>s==='生成'));
+ assert.equal(h.calls.length,0);assert.match(c.textContent,/入口已改变/);
+ await click(button(c,s=>s==='生成'));
+ assert.equal(h.calls.length,1);assert.ok(h.calls[0].url.startsWith(r08.gpt_url));
+});
+
+test('CRM generation opens the selected template without any model routing', async t => {
+  const {h,container} = await mount(t);
+  await guidance(container,'只翻译这句，不报价');
+  await click(button(container,t=>t==='生成'));
+  assert.equal(h.calls[0].modelRouting,undefined);
+  assert.equal(h.calls[0].url,r08.gpt_url);
 });

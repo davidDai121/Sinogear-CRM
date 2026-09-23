@@ -10,7 +10,7 @@
  *   - 明确查价 / 查运费请求：销售指令、讨论问题、未回复的客户入站
  *   - 客户在回答销售为报价而问的问题（数量 / 颜色 / 港口）→ 继续报价
  *   - 老板对报价阻塞的简短澄清（"就是dg" / "一台" / "美元"）继续报价
- *   - 开放 CRM 任务标题指向报价 / 运费
+ *   - 历史开放任务保留在工作记忆，但其标题本身不触发报价 / 运费规程
  *
  * 保守原则：要报价就同时带运费规程（运费有效期 7 天、路线/柜型/动力一致等
  * 规则由 FREIGHT_RESEARCH_WORKFLOW 自己判断，这里不另造有效期），唯一例外
@@ -170,11 +170,10 @@ export function selectGptWorkflows(input: WorkflowSelectionInput): WorkflowSelec
     }
   }
 
-  for (const task of input.workMemory?.tasks ?? []) {
-    if (task.status !== 'open') continue;
-    if (/报价|quote|cif|fob/i.test(task.title)) { quote = true; reasons.push(`开放任务指向报价：${task.title}`); }
-    if (/运费|freight|flete|运输/i.test(task.title)) { freight = true; reasons.push(`开放任务指向运费：${task.title}`); }
-  }
+  // Task titles are historical commitments, not a request to reprice this turn.
+  // Keep them in work memory for review; current requests and unresolved quote
+  // inputs above decide which procedures to load. A completed-but-open legacy
+  // freight task must not make every greeting run the quotation workflow.
 
   // 运费研究的结果必须进 quote_input，所以要运费就一定要报价规程
   if (freight) quote = true;

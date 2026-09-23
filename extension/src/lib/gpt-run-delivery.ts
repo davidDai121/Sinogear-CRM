@@ -3,7 +3,8 @@ import { runGpt, resumeGptRun, GptResultUnsavedError, type GptRunOptions, type G
 const PREFIX = 'gpt.delivery.';
 const TTL = 24 * 60 * 60 * 1000;
 type SavedRun = {
-  requestId: string; createdAt: number; url: string; skill?: GptRunOptions['skill'];
+  requestId: string; createdAt: number; sentAt?: number; url: string; skill?: GptRunOptions['skill'];
+  preparation?: 'loading' | 'sending';
   state: 'starting' | 'running' | 'done' | 'error';
   tabId?: number; baseline?: GptResumeOptions['baseline']; result?: GptRunResult; error?: string;
 };
@@ -21,11 +22,12 @@ async function read(id: string): Promise<SavedRun | undefined> {
 async function execute(run: SavedRun, options?: GptRunOptions) {
   const hooks: Pick<GptRunOptions, 'onProgress' | 'beforeClose'> = {
     onProgress: async event => {
+      if (event.phase === 'preparing') { run.preparation = event.step; await save(run); }
       if (event.phase === 'tab_created') run.tabId = event.tabId;
-      if (event.phase === 'sent') { run.tabId = event.tabId; run.baseline = event.baseline; run.state = 'running'; }
+      if (event.phase === 'sent') { run.tabId = event.tabId; run.baseline = event.baseline; run.state = 'running'; run.sentAt ??= Date.now(); }
       if (event.phase === 'sent' || event.phase === 'tab_created') await save(run);
     },
-    beforeClose: async result => { run.state = 'done'; run.result = result; await save(run); },
+    beforeClose: async result => { result.timing = { startedAt: run.createdAt, sentAt: run.sentAt, completedAt: Date.now() }; run.state = 'done'; run.result = result; await save(run); },
   };
   try {
     if (options) await runGpt({ ...options, ...hooks });
@@ -53,7 +55,7 @@ export async function startDeliveredGptRun(requestId: string, options: GptRunOpt
   const run: SavedRun = { requestId, createdAt: Date.now(), url: options.url, skill: options.skill, state: 'starting' };
   await save(run);
   launch(run, options);
-  return { ok: true, pending: true, requestId };
+  return { ok: true, pending: true, requestId, preparation:run.state === 'starting' ? run.preparation : undefined };
 }
 
 export async function pollDeliveredGptRun(requestId: string) {
@@ -69,5 +71,5 @@ export async function pollDeliveredGptRun(requestId: string) {
     if (run.tabId != null && run.baseline) launch(run);
     else return { ok: false, error: '发送阶段被中断，已保留原页面。请检查是否发送成功后再重新生成' };
   }
-  return { ok: true, pending: true, requestId };
+  return { ok: true, pending: true, requestId, preparation:run.state === 'starting' ? run.preparation : undefined };
 }

@@ -69,6 +69,7 @@ export interface GptRunOptions {
 }
 
 export interface GptRunResult {
+  timing?: { startedAt: number; sentAt?: number; completedAt: number };
   responseText: string;
   messageId?: string;
   /** 发送后 chatgpt.com 跳转到的 chat URL（chatgpt.com/c/<uuid>） */
@@ -80,6 +81,7 @@ export interface GptRunResult {
 export type WakeMethod = 'window' | 'activate' | 'none';
 
 export type GptRunProgress =
+  | { phase: 'preparing'; step: 'loading' | 'sending' }
   | { phase: 'tab_created'; tabId: number }
   | { phase: 'sent'; tabId: number; baseline: TurnAnchors }
   | { phase: 'woken'; tabId: number; method: Exclude<WakeMethod, 'none'>; attempt: number; reason: string }
@@ -153,6 +155,8 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
     await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
     await opts.onProgress?.({ phase: 'tab_created', tabId });
 
+    const wake = new WakeContext(tabId, opts.active ? 'none' : (opts.wake ?? 'window'), opts.onProgress, opts._timing);
+    await opts.onProgress?.({phase:'preparing',step:'loading'});
     await waitForTabComplete(tabId);
     await checkAuth(tabId);
     await waitForInput(tabId);
@@ -162,6 +166,7 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
     // 发送前记 baseline 锚点（最后一条 assistant 消息的 data-message-id）。
     // 响应判定只认「id 变了 = 新增 turn」，绝不把续聊历史里最后一条旧响应
     // 当成本轮结果；比数 turn 个数鲁棒（不受隐藏节点/重复渲染影响）
+    await opts.onProgress?.({phase:'preparing',step:'sending'});
     const baseline = await readTurnAnchors(tabId);
     await typeAndSend(tabId, opts.prompt, skill);
     let accepted = await waitForSendAccepted(tabId, baseline, 10000);
@@ -177,7 +182,6 @@ export async function runGpt(opts: GptRunOptions): Promise<GptRunResult> {
     }
     await opts.onProgress?.({ phase: 'sent', tabId, baseline });
 
-    const wake = new WakeContext(tabId, opts.active ? 'none' : (opts.wake ?? 'window'), opts.onProgress, opts._timing);
     const responseText = await waitForResponse(
       tabId,
       opts.responseTimeoutMs ?? GPT_RESPONSE_TIMEOUT_MS,

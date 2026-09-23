@@ -390,6 +390,7 @@ function LogRow({
               <span>· ⏱ {(log.duration_ms / 1000).toFixed(1)}s</span>
             )}
             {log.metrics && <span>· GPT {log.metrics.requests} 次 · 输入 {log.metrics.inputChars.toLocaleString()} 字符 · 输出 {log.metrics.outputChars.toLocaleString()} 字符</span>}
+            {log.metrics && <span> · {[['准备', log.metrics.prepareMs], ['打开及提交', log.metrics.pageMs], ['GPT生成及完成确认', log.metrics.responseMs], ['取回', log.metrics.transferMs], ['核算与保存', log.metrics.saveMs]].filter(([, ms]) => typeof ms === 'number').map(([label, ms]) => `${label} ${(Number(ms) / 1000).toFixed(1)}秒`).join(' · ')}</span>}
             {log.chat_url && (
               <a
                 href={log.chat_url}

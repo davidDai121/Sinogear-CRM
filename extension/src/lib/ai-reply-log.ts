@@ -6,9 +6,12 @@
  *
  * 存储设计：
  *   - chrome.storage.local，key = 'aiReplyLog:<uuid>'，value = AiReplyLog
- *   - chrome.storage.local 总配额 10 MB（无 unlimitedStorage 权限）
- *   - 单条 ~10 KB（含完整 prompt） → 上限 ~1000 条
- *   - 写入后超 MAX_ENTRIES 自动 FIFO 淘汰最老的（按 generated_at）
+ *   - chrome.storage.local 总配额 10 MB（无 unlimitedStorage 权限），超了任何 set 都报
+ *     "Resource::kQuotaBytes quota exceeded"，连待处理动作、回复状态都写不进去
+ *   - GPT 一条含完整 prompt 的日志常见 60–120 KB（Gem 才 ~10 KB），所以只按条数
+ *     淘汰压不住配额：2026-09-22 实测 141 条就占了 9.4 MB
+ *   - 写入前按字节预算淘汰最老的（LOG_BUDGET_BYTES），并给其它 key 留 headroom；
+ *     service worker 启动时也跑一次 enforceAiReplyLogBudget() 兜底
  *
  * 不用 Supabase 的理由：
  *   - 单人主用，团队不真的需要看别人的 AI prompt
@@ -21,7 +24,7 @@
 
 export type AiReplySource = 'claude' | 'gem' | 'gem_auto' | 'gpt';
 
-export interface ReplyMetrics { requests: number; inputChars: number; outputChars: number }
+export interface ReplyMetrics { requests: number; inputChars: number; outputChars: number; prepareMs?: number; pageMs?: number; responseMs?: number; transferMs?: number; saveMs?: number }
 
 export interface AiReplyLog {
   metrics?: ReplyMetrics;
@@ -51,11 +54,19 @@ export interface AiReplyLog {
 }
 
 const KEY_PREFIX = 'aiReplyLog:';
-/**
- * 最多保留多少条。chrome.storage.local 配额 10 MB，单条 ~10 KB → 1000 条理论极限。
- * 留一些 headroom 给其他 chrome.storage 用户（自动回复 state 等）。
- */
+/** 条数上限只是兜底，真正起作用的是下面的字节预算。 */
 const MAX_ENTRIES = 800;
+/** chrome.storage.local 配额（manifest 没有 unlimitedStorage）。 */
+const LOCAL_QUOTA_BYTES = 10 * 1024 * 1024;
+/** AI 日志总共最多占多少。约 30–50 条 GPT 完整 prompt，够回看最近几天。 */
+export const LOG_BUDGET_BYTES = 3 * 1024 * 1024;
+/** 给待处理动作（单条可到 170 KB）、交付记录、回复状态等其它 key 留的空间。 */
+const HEADROOM_BYTES = 1.5 * 1024 * 1024;
+
+/** Chrome 计配额的口径：key 长度 + JSON.stringify(value) 长度。 */
+export function storageEntryBytes(key: string, value: unknown): number {
+  return key.length + JSON.stringify(value).length;
+}
 
 export interface LogAiReplyParams {
   metrics?: ReplyMetrics;
@@ -117,9 +128,11 @@ export async function logAiReply(
       duration_ms: params.durationMs ?? null,
       error: params.error ?? null,
     };
-    await chrome.storage.local.set({ [keyFor(id)]: log });
-    // 写完顺手 evict（不 await — 失败也不影响本次写入）
-    void evictOldestIfNeeded();
+    const key = keyFor(id);
+    // 先腾地方再写：配额满了 set 会直接抛错，写完再 evict 已经来不及。
+    try { await enforceAiReplyLogBudget(storageEntryBytes(key, log)); }
+    catch (err) { console.warn('[ai-reply-log] budget check failed', err); }
+    await chrome.storage.local.set({ [key]: log });
     return id;
   } catch (err) {
     console.warn('[ai-reply-log] write failed', err);
@@ -216,30 +229,40 @@ export async function clearAllAiReplyLogs(): Promise<{ cleared: number }> {
 }
 
 /**
- * 超过 MAX_ENTRIES 时按 generated_at 升序删最老的，直到剩 MAX_ENTRIES。
- * 不阻塞 logAiReply — 失败安静忽略。
+ * 让 AI 日志退回预算之内：按 generated_at 升序删最老的，直到
+ *   - 条数 ≤ MAX_ENTRIES，且
+ *   - 日志字节 + reserve ≤ min(LOG_BUDGET_BYTES, 配额 − headroom − 其它 key 已占用)
+ * reserve 是即将写入的那条的大小，保证写入不会撞配额。
+ * 失败安静忽略，返回删了多少。
  */
-async function evictOldestIfNeeded(): Promise<void> {
+export async function enforceAiReplyLogBudget(reserve = 0): Promise<{ removed: number; logBytes: number }> {
   try {
     const all = await chrome.storage.local.get(null);
-    const entries: { key: string; ts: number }[] = [];
+    const logs: { key: string; ts: number; bytes: number }[] = [];
+    let otherBytes = 0;
     for (const [k, v] of Object.entries(all)) {
-      if (!isLogKey(k) || !v) continue;
-      entries.push({
-        key: k,
-        ts: (v as AiReplyLog).generated_at ?? 0,
-      });
+      const bytes = storageEntryBytes(k, v);
+      if (isLogKey(k) && v) logs.push({ key: k, ts: (v as AiReplyLog).generated_at ?? 0, bytes });
+      else otherBytes += bytes;
     }
-    if (entries.length <= MAX_ENTRIES) return;
-    entries.sort((a, b) => a.ts - b.ts);
-    const toRemove = entries
-      .slice(0, entries.length - MAX_ENTRIES)
-      .map((e) => e.key);
-    if (toRemove.length === 0) return;
-    await chrome.storage.local.remove(toRemove);
-    console.log('[ai-reply-log] evicted', toRemove.length, 'old logs');
+    let logBytes = logs.reduce((sum, e) => sum + e.bytes, 0);
+    const limit = Math.min(LOG_BUDGET_BYTES, LOCAL_QUOTA_BYTES - HEADROOM_BYTES - otherBytes);
+    logs.sort((a, b) => a.ts - b.ts);
+    const toRemove: string[] = [];
+    while (logs.length > toRemove.length
+      && (logs.length - toRemove.length > MAX_ENTRIES || logBytes + reserve > limit)) {
+      const oldest = logs[toRemove.length];
+      toRemove.push(oldest.key);
+      logBytes -= oldest.bytes;
+    }
+    if (toRemove.length) {
+      await chrome.storage.local.remove(toRemove);
+      console.log('[ai-reply-log] evicted', toRemove.length, 'old logs, now', logBytes, 'bytes');
+    }
+    return { removed: toRemove.length, logBytes };
   } catch (err) {
     console.warn('[ai-reply-log] evict failed', err);
+    return { removed: 0, logBytes: 0 };
   }
 }
 

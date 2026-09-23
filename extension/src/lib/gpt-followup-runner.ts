@@ -5,6 +5,7 @@ import { loadGptApprovedKnowledge } from './gpt-template-knowledge';
 import { renderSalesWorkMemory, loadPersonalSalesWorkMemory } from './sales-work-memory';
 import { isConversationForGptTemplate } from './gpt-template-routing';
 import type { GptRunOptions, GptRunResult } from './gpt-automation';
+import { loadGptBrowserBinding, browserAllowsTemplate } from './gpt-browser-binding';
 
 export interface FollowupRunnerState { cursor?: string; failures?: Record<string, { at: number; count: number; key: string; message: string }>; lastError?: string; lastRunAt?: string; }
 export async function runDueFollowup(db: SupabaseClient<Database>, run: (opts: GptRunOptions) => Promise<GptRunResult>, state: FollowupRunnerState, now = Date.now(), mayStart: () => Promise<boolean> = async () => true) {
@@ -29,6 +30,9 @@ export async function runDueFollowup(db: SupabaseClient<Database>, run: (opts: G
     try {
       const old = await loadFollowupPlan(db, task.contact_id, task.id);
       if (!old || old.userId !== auth.user.id || old.orgId !== task.org_id) continue;
+      const binding = await loadGptBrowserBinding(task.org_id, auth.user.id);
+      // Another browser/account owns this plan. Never open its private GPT here.
+      if (!browserAllowsTemplate(binding, old.templateId)) continue;
       const ctx = await loadFollowupContext(db, task.org_id, task.contact_id);
       if (ctx.taskId !== task.id || !needsFollowupReview(ctx, now)) continue;
       const failure = next.failures?.[task.id];

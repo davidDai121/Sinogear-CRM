@@ -88,3 +88,10 @@ test('metadata in customer section remains blocking',async()=>{
  assert.equal(sanitizeReplyForCustomer('CIF USD {{quote.1.totalUsd}}.'),'');
  assert.equal(sanitizeReplyForCustomer('CIF USD 118,400.00.'),'CIF USD 118,400.00.');
 });
+
+test('ready prose is delivered before an auxiliary task save settles; failure remains retryable',async()=>{
+ let ready=false;
+ const result=await complete(prose+'\n'+block,ctx,null,async()=>{assert.equal(ready,true);throw Error('offline');},async text=>{assert.equal(sanitizeReplyForCustomer(parseClaudeResponse(text).reply),reply);ready=true;});
+ assert.equal(result.retryable,true);assert.match(result.warning,/offline/);
+ const absent=await complete(prose,ctx,null,save);assert.equal(absent.retryable,false);
+});

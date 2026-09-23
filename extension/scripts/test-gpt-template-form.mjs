@@ -9,6 +9,7 @@ import React, { act } from 'react';
 const { window } = parseHTML('<html><body></body></html>');
 Object.assign(globalThis,{window,document:window.document,HTMLElement:window.HTMLElement,Node:window.Node,IS_REACT_ACT_ENVIRONMENT:true});
 Object.defineProperty(globalThis,'navigator',{configurable:true,value:{userAgent:'offline-form-test'}});
+globalThis.chrome={storage:{local:{get:async()=>({}),set:async()=>{},remove:async()=>{}}}};
 globalThis.fetch=()=>{throw Error('Network forbidden');};
 const require=createRequire(import.meta.url);
 const { createRoot }=require('react-dom/client');
@@ -18,7 +19,7 @@ const loaded={exports:{}};new Function('require','module','exports',compiled.out
 const { GPTTemplatesModal }=loaded.exports;
 async function settle(){for(let i=0;i<3;i++)await act(async()=>{await new Promise(r=>setImmediate(r));});}
 async function mount(t){
- const h={writes:[],query(table){assert.equal(table,'gpt_templates');let payload;const q={select(){return q;},eq(){return q;},order(){return q;},insert(x){payload=x;return q;},single(){return q;},then(resolve,reject){return Promise.resolve().then(()=>{if(payload){h.writes.push(payload);return {data:{id:'saved'},error:null};}return {data:[{id:'existing',name:'Existing GPT',gpt_url:'https://chatgpt.com/g/g-existing',description:null,is_default:true}],error:null};}).then(resolve,reject);}};return q;}};
+ const h={writes:[],query(table){assert.equal(table,'gpt_templates');let payload;const q={select(){return q;},eq(){return q;},order(){return q;},insert(x){payload=x;return q;},single(){return q;},then(resolve,reject){return Promise.resolve().then(()=>{if(payload){h.writes.push(payload);return {data:{id:'saved'},error:null};}return {data:[{id:'existing',created_by:'offline-user',name:'Existing GPT',gpt_url:'https://chatgpt.com/g/g-existing',description:null,is_default:true}],error:null};}).then(resolve,reject);}};return q;}};
  globalThis.__formHarness=h;
  const container=document.createElement('div');document.body.append(container);const root=createRoot(container);
  await act(async()=>root.render(React.createElement(GPTTemplatesModal,{orgId:'offline-org',onClose(){}})));await settle();

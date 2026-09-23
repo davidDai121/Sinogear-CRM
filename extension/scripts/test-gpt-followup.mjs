@@ -4,6 +4,8 @@ import { build } from 'esbuild';
 async function moduleOf(path){const b=await build({entryPoints:[path],bundle:true,platform:'node',format:'esm',write:false});return import(`data:text/javascript;base64,${Buffer.from(b.outputFiles[0].text).toString('base64')}`);}
 const f=await moduleOf('src/lib/gpt-followup.ts');
 const {runDueFollowup}=await moduleOf('src/lib/gpt-followup-runner.ts');
+let browserBindings={};
+globalThis.chrome={storage:{local:{get:async key=>({[key]:browserBindings[key]})}}};
 const NOW=Date.parse('2026-09-17T18:00:00Z');
 const decision=(over={})=>({decision:'review',title:'确认采购进度',reason:'客户约定明天讨论',dueAt:'2026-09-18T18:00:00Z',timeBasis:'customer',evidence:[{id:'message:m',quote:'tomorrow'}],existingTaskId:null,...over});
 const encode=d=>`<crm_followup>${JSON.stringify(d)}</crm_followup>`;
@@ -72,3 +74,11 @@ test('internal block cannot be accepted inside customer reply',async()=>{const c
 test('manual future date is respected, then due review records advice without moving date',async()=>{const db=store();await initial(db);db.tables.tasks[0].due_at='2026-09-20T18:00:00Z';let c=await context(db);assert.equal(f.needsFollowupReview(c,NOW),false);assert.equal(f.needsFollowupReview(c,NOW+4*86400000),true);const p=await save(db,c,decision({decision:'wait',dueAt:null,timeBasis:'none'}),true);assert.equal(p.protected,true);assert.equal(db.tables.tasks[0].due_at,'2026-09-20T18:00:00Z');assert.equal(f.needsFollowupReview(await context(db),NOW+4*86400000),false);});
 test('different current demand prevents old plan from being reviewed',async()=>{const db=store();await initial(db);db.tables.contact_events.push({id:'scope-new',contact_id:'c',event_type:'ai_extracted',payload:{schema:'sales-work.v1',kind:'scope',scopeId:'new',text:'新需求'},created_at:'2026-09-18T19:00:00Z'});assert.equal(f.needsFollowupReview(await context(db),NOW+3*86400000),false);let called=false;await runDueFollowup(db,async()=>{called=true;throw Error('must not run');},{},NOW+3*86400000);assert.equal(called,false);});
 test('switching CRM user while GPT is running rejects the old save',async()=>{const db=store();const c=await initial(db);db.auth.getUser=async()=>({data:{user:{id:'another-user'}}});await assert.rejects(save(db,c),/有更新/);assert.equal(db.tables.tasks[0].created_by,'user');});
+
+test('scheduler skips another browser private GPT without changing its task',async()=>{
+ const db=store();await initial(db,decision({dueAt:'2026-09-17T17:30:00Z'}));
+ const before=structuredClone(db.tables.tasks);let calls=0;
+ browserBindings={'gptBrowserBinding:org:user':{defaultTemplateId:'yang',r08TemplateId:'yang-r08'}};
+ try{const next=await runDueFollowup(db,async()=>{calls++;throw Error('wrong account');},{},NOW);assert.equal(calls,0);assert.equal(next.lastError,undefined);assert.deepEqual(db.tables.tasks,before);}
+ finally{browserBindings={};}
+});

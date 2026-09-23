@@ -13,6 +13,7 @@ import type { ChatMessage } from '@/content/whatsapp-messages';
 import type { Database } from './database.types';
 import { attributeOutboundMessage } from './ai-reply-attribution';
 import { markAiReplyFilled } from './ai-reply-log';
+import { completeTaskFromSyncedMessages } from './task-send-completion';
 import { MESSAGES_SYNCED_EVENT } from './ad-lead-status';
 
 type MessageRow = Database['public']['Tables']['messages']['Row'];
@@ -78,6 +79,13 @@ export async function syncMessages(
   }
   for (const row of rows) {
     if (row._attributedLogId) void markAiReplyFilled(row._attributedLogId);
+  }
+
+  try {
+    await completeTaskFromSyncedMessages(supabase, contactId, upsertRows);
+  } catch (error) {
+    // Keep the binding and retry on the next sync, without resending any message.
+    return { inserted: count ?? 0, error: error instanceof Error ? error.message : String(error) };
   }
 
   // 广告线索重号自愈：客户在 FB 表单里填的号码，跟他实际发 WhatsApp 的号经常不是

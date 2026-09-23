@@ -1,3 +1,31 @@
+## 2026-09-22 拆除 Jev 自动选模型与页面切模型
+
+用户决定整体删除（ChatGPT 菜单切换反复失败）。删掉 src/lib/jev-client.ts、jev-model-routing.ts、crm-model-routing.ts、gpt-model-selection.ts、jev-preview-bridge.ts、popup/JevSettings.tsx、scripts/test-jev-crm.mjs；gpt-automation 不再有 modelRouting/modelSelection/route 切换，只保留 preparing(loading/sending) 进度；gpt-run-delivery、service-worker（JEV_* 消息、GptRunRequest.modelRouting）、GPTReplySection（处理模型下拉、Jev 状态、实际模型展示）同步清理；manifest 去掉 api.typesafe.ai 权限；storage-housekeeping 启动时删 jev.credentials.v1 / gptModelMode。GPT 模板照旧用页面自带模型（Custom GPT 自身设置 / ?model= 参数）。相关 113 项测试通过，typecheck/build 通过，已打包发版（见 dist-zips 最新 zip），required_version 已推。docs/Jev模型自动选择_2026-09-21.md 仅作历史记录。
+
+## 2026-09-22 模型切换失败兜底：「不切换 · 用页面当前模型」+ 真实错误上报
+
+发版 0.1.0-20260922 后用户报「未确认模型切换，尚未发送本轮内容」，手动快速/深入也失败（手动只是跳过 Jev，页面切换核对照跑）。本机 Claude in Chrome 无响应，未能实地看 ChatGPT 菜单。两处改动：(1) selectGptModelInPage 不再抛异常（executeScript 会吞掉注入函数的异常，面板只剩泛化提示），改为返回 {verified:false,error}，错误里带页面实际可见的菜单项/「You are using …」文案，applyGptModel 原样抛出；模型名正则兼容 5.6 这种带点的版本号。(2) 客户卡「处理模型」新增 page 档（不切换，用页面当前模型），选它时 modelRouting 传 undefined、跳过切换与 deep 兜底；选择存 chrome.storage.local gptModelMode。test-jev-crm 新增 1 项、改 2 项，全部通过；已打包发版 dist-zips/sino-gear-crm-v0.1.0-20260922-1221.zip，required_version 已推。待用户装新版后回传新错误文案，再定是菜单文案还是模型名变了。
+
+## 2026-09-22 chrome.storage.local 撞 10 MB 配额（"Resource::kQuotaBytes quota exceeded"）
+
+报错来自扩展本地存储配额，与 Jev API 无关（jev.credentials.v1 只有 167 字节）。解析 Chrome Profile 2 的 LevelDB：401 个 key 共 10.48 MB，其中 aiReplyLog:* 141 条占 9.36 MB（GPT 一条含完整 prompt 60–125 KB），gpt.pendingAction/archivedAction 单条 100–170 KB。原淘汰只按条数（800）永远触发不了，且写完才 evict。改为写前按字节预算淘汰（LOG_BUDGET_BYTES 3 MB，另给其它 key 留 1.5 MB headroom），新增 src/lib/storage-housekeeping.ts 在 service worker 启动时清 7 天前的 gpt.archivedAction 并执行日志预算；不碰 pendingAction/delivery/设置。scripts/test-ai-reply-log.mjs 4 项 + 现有交付/Jev 测试通过，typecheck/build 通过，已打包发版 dist-zips/sino-gear-crm-v0.1.0-20260922.zip，required_version 已推 0.1.0-20260922，全员需换新版。Jev 自动选模型保留，下拉本来就有快速/深入手动档。
+
+## 2026-09-21 CRM 正式接入 Jev 模型选择
+
+客户卡 GPT 回复/讨论新增自动选择、快速（GPT-5.6 Sol / Instant）、深入（GPT-6 Pro / Pro）。后台直接调用 TypeSafe 官方接口，key 只由扩展设置验证并存本机，不再依赖 localhost 试用页。模型列表实际返回 jev-latest/jev-preview 别名，不能用固定推理版本号验证列表。手动优先、报价/运费/过长上下文保留深入档，Jev 异常回退；发送前核验实际模型，失败停止。保留模板/账号/客户会话路由、模型交付恢复、后台复核开关。普通 ChatGPT 与技能入口不纳入本轮自动切换。139项相关测试/build通过，获准测试号快速前台与深入后台续聊均已真实回传。用户已成功保存 key，正式自动模式已取得 Jev 判断并应用 GPT-6 Pro，09:32 成功回传。仅本轮测试产生的事件/任务/映射已清理，客户及相关表核对恢复原快照；见 docs/Jev模型自动选择_2026-09-21.md。不承诺自动模式一定提速，未团队打包发版。
+
+## 2026-09-21 Yang / Menglong 独立 GPT 与浏览器入口
+
+Yang 新私有 Miles V2（g-6ab1300e9b388191a66063f01e306d56）已保存，Menglong 原 Miles V2 保留；CRM 两套 Miles/R08 模板明确标姓名，默认仍为 Menglong。新增本浏览器常用/R08 配置，按组织+CRM用户存 chrome.storage.local，路由、讨论、手动选择及后台复核遵守账号组；缺失入口报错不跨账号兜底，旧会话不删除。本机已构建并原生 Reloaded，Yang 浏览器已通过模板 UI 保存两项 Yang 入口并刷新回读，客户 GPT 下拉实见仅两个 Yang 模板；验收见 docs/Miles双浏览器入口_2026-09-21.md。103项相关离线测试通过。Yang 独立模拟能自然唤回两个月未联系客户，非CRM全链路验收；原GPT两份历史库存附件未复制，新副本明示依赖当前CRM资料。未改团队版本/后台开关。
+
+## 2026-09-21 长期客户主动跟进纠正
+
+用户指出两个月未联系客户仍被劝阻推进。CRM共享销售提示与crm_followup提示现要求结合实际联系间隔重判，旧“到时联系你”不得永久冻结；有需求/关系基础且无当前拒绝、未到约定或人工暂停时，长期唤回通常应给出具体自然的联系稿，不以新优惠/新消息为前提。实际发送才算跟进次数；后台复核次数不等于催过客户。跟进skill同源文件已同步，后台开关不变；43项回归/build通过，本机Reloaded/WA刷新，未改线上GPT本体或对真实客户做生成/发送评测。细节附于docs/任务与GPT回复改进_2026-09-21.md。
+
+## 2026-09-21 任务分类与 GPT 回复交付
+
+任务页/客户卡新增等待与内部复核分组；人工改动的任务不由旧判断隐藏。新 GPT 可声明 send_reply，消息成功同步后按完整正文、时间、消息 ID 与账号/需求/任务状态核对，完成仅靠这条发送即可兑现的任务；旧任务提供发送证据人工核对入口，未批量关闭。历史开放任务标题不再触发完整报价/运费规程，普通跟进少误载 13,710 字符；报价/查运费当前触发与授权保留。NO_REPLY 不可填客户；正文先于辅助保存展示，保存失败保留已计算内容与固定记录 ID，取回不重跑已完成 GPT；填入前再验聊天身份。231 项离线测试及 build 通过，本机 Chrome Reloaded/WA 刷新实见 60 待处理、6 等待、1 待复核。自动完成未以真实客户发送做在线验收；真实速度待后续日志计时。Heavy、后台复核关闭、团队版本保持。详见 docs/任务与GPT回复改进_2026-09-21.md。
+
 ## 2026-09-20 Menglong R08 独立GPT与404修复
 
 旧R08链接在Menglong账号实见404。已新建私有Sino Gear R08 Miles（g-6aaff2e20f848191a17b81f6786cdebe），页面作者Menglong Dai，完整K01–K11内置知识及最新首回复/费用规则已保存并模拟验收。其R08专用模板仅替换URL；Miles V2默认、其他模板、Yang原GPT和技能不变。路由增加新GPT ID，旧会话按GPT身份隔离、不删除；79项测试/build通过，本机扩展Reloaded且WA已刷新。上传受限未增加知识附件，不声称真实CRM新生成全链路验收或团队发版。详见docs/Menglong_R08_GPT副本_2026-09-20.md。

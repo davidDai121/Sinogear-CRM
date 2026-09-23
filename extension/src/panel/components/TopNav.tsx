@@ -5,6 +5,7 @@ import { GPTTemplatesModal } from './GPTTemplatesModal';
 import { AIReplyLogModal } from './AIReplyLogModal';
 import { TeamMembersModal } from './TeamMembersModal';
 import { LeadRoutingModal } from './LeadRoutingModal';
+import { WaSyncHealthModal } from './WaSyncHealthModal';
 import { ScopePicker } from './ScopePicker';
 import { DomHealthBadge } from './DomHealthBadge';
 import { useScope } from '../contexts/ScopeContext';
@@ -81,6 +82,7 @@ export function TopNav({
   const [showAiLog, setShowAiLog] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
   const [showRouting, setShowRouting] = useState(false);
+  const [showWaHealth, setShowWaHealth] = useState(false);
   const [allCount, setAllCount] = useState<number | undefined>();
   const [showMore, setShowMore] = useState(false);
 
@@ -222,6 +224,16 @@ export function TopNav({
                 type="button"
                 onClick={() => {
                   setShowMore(false);
+                  setShowWaHealth(true);
+                }}
+                title="每个业务号的 WhatsApp 消息同步是否正常"
+              >
+                📡 号码同步状态
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMore(false);
                   setShowTeam(true);
                 }}
                 title="管理团队成员（邀请同事 / 改角色 / 移除）"
@@ -265,6 +277,10 @@ export function TopNav({
 
       {showRouting && (
         <LeadRoutingModal orgId={orgId} onClose={() => setShowRouting(false)} />
+      )}
+
+      {showWaHealth && (
+        <WaSyncHealthModal orgId={orgId} onClose={() => setShowWaHealth(false)} />
       )}
     </div>
   );

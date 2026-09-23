@@ -116,9 +116,9 @@ test('目的港与最新报价输入不一致：两块都加载', () => {
   assert.ok(sel.quote && sel.freight);
 });
 
-test('开放任务指向报价：加载报价规程（默认也带运费规程）', () => {
+test('历史开放任务不会让已经发过的报价重新加载重型规程', () => {
   const sel = selectGptWorkflows({ messages: [SENT], workMemory: memory({ tasks: [{ id: 't', title: '跟进：核对并发送José的CIF参考报价', due_at: null, status: 'open' }] }), contact });
-  assert.ok(sel.quote && sel.freight);
+  assert.ok(!sel.quote && !sel.freight);
 });
 
 test('主 prompt 三个入口按选择注入；SALES_WORKFLOW 常量仍是完整版', () => {
