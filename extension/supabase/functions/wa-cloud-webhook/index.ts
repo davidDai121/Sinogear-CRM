@@ -190,6 +190,15 @@ interface ParsedMsg {
   waName: string | null;
   /** 我们自己的业务号（metadata.display_phone_number），缺失时为 null */
   businessPhone: string | null;
+  /** 客户的 WhatsApp 用户 ID（BSUID，如 CO.1234…）。隐藏号码的客户只有它，phone 为空串 */
+  userId: string | null;
+  /** 客户的 WhatsApp 用户名（profile.username） */
+  username: string | null;
+}
+
+/** 手机号 / wa_id 形状（纯数字、可带 +）。用户 ID 形如 CO.1234…，绝不能被当成手机号 */
+function isPhoneLike(raw: unknown): boolean {
+  return (typeof raw === 'string' || typeof raw === 'number') && /^\+?\d[\d\s()-]{5,}$/.test(String(raw).trim());
 }
 
 interface ParseContext {
@@ -225,24 +234,41 @@ function parseChange(
   }
 
   const nameByWaId = new Map<string, string>();
+  const nameByUserId = new Map<string, string>();
+  const usernameByUserId = new Map<string, string>();
   for (const c of value.contacts ?? []) {
-    if (c?.wa_id && c?.profile?.name) nameByWaId.set(String(c.wa_id), String(c.profile.name));
+    const name = c?.profile?.name ? String(c.profile.name) : '';
+    if (c?.wa_id && name) nameByWaId.set(String(c.wa_id), name);
+    if (c?.user_id) {
+      if (name) nameByUserId.set(String(c.user_id), name);
+      if (c?.profile?.username) usernameByUserId.set(String(c.user_id), String(c.profile.username));
+    }
   }
 
   const push = (
     m: Record<string, any>,
     direction: 'inbound' | 'outbound',
     customer?: unknown,
+    customerUserId?: unknown,
   ) => {
     // inbound 用 from（客户号）；echo 用 to（客户号）——两边都要归到客户身上。
     // history 里我方发出的消息只有 from（=我们的号），没有 to，客户号在外层 thread.id，
     // 由调用方传进来；不传的话 180 天历史里所有出站消息都会被当成畸形拒收。
     const raw = customer ?? (direction === 'inbound' ? m.from : (m.to ?? m.recipient_id));
-    const phone = normalizePhone(String(raw ?? ''));
+    // 隐藏号码的客户（WhatsApp 用户名）载荷里只有 *_user_id，没有手机号
+    const phone = isPhoneLike(raw) ? normalizePhone(String(raw)) : '';
+    const userId =
+      String(
+        customerUserId ??
+          (direction === 'inbound' ? m.from_user_id : (m.to_user_id ?? m.recipient_user_id)) ??
+          '',
+      ).trim() || null;
     const sentAt = tsToIso(m.timestamp);
-    if (!phone || !m.id || !sentAt) throw new Error('Malformed message: missing phone, id or timestamp');
+    if ((!phone && !userId) || !m.id || !sentAt) {
+      throw new Error('Malformed message: missing customer, id or timestamp');
+    }
     // 群聊 Cloud API 本来就不推，这里再挡一道
-    if (String(raw ?? '').includes('-')) return;
+    if (phone && String(raw ?? '').includes('-')) return;
     out.push({
       phone,
       keyId: wamidToKeyId(String(m.id)),
@@ -251,8 +277,10 @@ function parseChange(
       sentAt,
       ctwaClid: m.referral?.ctwa_clid ? String(m.referral.ctwa_clid) : null,
       adId: m.referral?.source_id ? String(m.referral.source_id) : null,
-      waName: nameByWaId.get(String(raw ?? '')) ?? null,
+      waName: nameByWaId.get(String(raw ?? '')) ?? (userId ? nameByUserId.get(userId) : undefined) ?? null,
       businessPhone: business,
+      userId,
+      username: userId ? usernameByUserId.get(userId) ?? null : null,
     });
   };
 
@@ -289,10 +317,13 @@ function parseChange(
     for (const chunk of value.history ?? []) {
       for (const thread of chunk.threads ?? []) {
         // 客户号优先取 context.wa_id（thread.id 可能是 Meta 的用户 id 而不是手机号）
-        const customer = thread.context?.wa_id ?? thread.id;
+        const tPhone = thread.context?.wa_id ?? (isPhoneLike(thread.id) ? thread.id : undefined);
+        const tUser = thread.context?.user_id ?? (thread.id && !isPhoneLike(thread.id) ? thread.id : undefined);
         for (const m of thread.messages ?? []) {
           const from = normalizePhone(String(m.from ?? ''));
-          tryPush(m, self && from === self ? 'outbound' : 'inbound', customer ?? m.from);
+          const dir = self && from === self ? 'outbound' : 'inbound';
+          tryPush(m, dir, tPhone ?? (dir === 'inbound' && isPhoneLike(m.from) ? m.from : undefined),
+            tUser ?? (dir === 'inbound' ? m.from_user_id : undefined));
         }
       }
     }
@@ -356,8 +387,9 @@ async function ingestForOrg(
 
   if (msgs.length === 0) return { named, inserted: 0, assigned: 0, attributed: 0 };
 
-  // ── phone → contact_id，缺的批量建 ──
-  const phones = Array.from(new Set(msgs.map((m) => m.phone)));
+  // ── 客户 → contact_id，缺的批量建。有手机号按手机号；隐藏号码的按 WhatsApp 用户 ID ──
+  const keyOf = (m: ParsedMsg) => m.phone || `uid:${m.userId}`;
+  const phones = Array.from(new Set(msgs.map((m) => m.phone).filter(Boolean)));
   const byPhone = new Map<string, string>();
   for (let i = 0; i < phones.length; i += CONTACT_LOOKUP_CHUNK) {
     const chunk = phones.slice(i, i + CONTACT_LOOKUP_CHUNK);
@@ -393,10 +425,58 @@ async function ingestForOrg(
     for (const r of data ?? []) if (r.phone) byPhone.set(r.phone, r.id);
   }
 
+  const uids = Array.from(new Set(msgs.filter((m) => !m.phone && m.userId).map((m) => m.userId!)));
+  if (uids.length > 0) {
+    const findByUid = async (list: string[]) => {
+      for (let i = 0; i < list.length; i += CONTACT_LOOKUP_CHUNK) {
+        const { data, error } = await supabase
+          .from('contacts')
+          .select('id, wa_user_id')
+          .eq('org_id', org)
+          .in('wa_user_id', list.slice(i, i + CONTACT_LOOKUP_CHUNK));
+        if (error) throw new Error('Contact lookup failed');
+        for (const r of data ?? []) if (r.wa_user_id) byPhone.set(`uid:${r.wa_user_id}`, r.id);
+      }
+    };
+    await findByUid(uids);
+    const missingUids = uids.filter((u) => !byPhone.has(`uid:${u}`));
+    if (missingUids.length > 0) {
+      const rows = missingUids.map((u) => {
+        const m = msgs.find((x) => x.userId === u && (x.waName || x.username)) ?? msgs.find((x) => x.userId === u);
+        const name = m?.waName ?? m?.username ?? null;
+        return { org_id: org, wa_user_id: u, wa_username: m?.username ?? null, wa_name: name, name };
+      });
+      const { error: createError } = await supabase
+        .from('contacts')
+        .upsert(rows, { onConflict: 'org_id,wa_user_id', ignoreDuplicates: true });
+      if (createError) throw new Error('Contact creation failed');
+      await findByUid(missingUids);
+    }
+  }
+
+  // 同一条载荷里手机号和用户 ID 都有：把用户 ID 记到手机号客户上，以后隐藏号码来信也能认出是谁。
+  // 尽力而为——已有一个「只有用户 ID」的客户占着这个 ID 时会撞唯一约束，跳过即可。
+  {
+    const pairs = new Map<string, { uid: string; username: string | null }>();
+    for (const m of msgs) {
+      const cid = m.phone && m.userId ? byPhone.get(m.phone) : undefined;
+      if (cid && !pairs.has(cid)) pairs.set(cid, { uid: m.userId!, username: m.username });
+    }
+    for (const [cid, p] of pairs) {
+      const { error } = await supabase
+        .from('contacts')
+        .update({ wa_user_id: p.uid, wa_username: p.username })
+        .eq('org_id', org)
+        .eq('id', cid)
+        .is('wa_user_id', null);
+      if (error) console.warn('[wa-webhook] 用户 ID 补写跳过（可能已有同 ID 客户）');
+    }
+  }
+
   // ── 写消息 ──
   const rows = msgs
     .map((m) => {
-      const contactId = byPhone.get(m.phone);
+      const contactId = byPhone.get(keyOf(m));
       if (!contactId) throw new Error('Contact unresolved after creation');
       return {
         contact_id: contactId,
@@ -435,7 +515,7 @@ async function ingestForOrg(
     // 每个客户取最早一条消息所在的业务号（同一批里跟两个号都聊过时，先聊的算）
     const wanted = new Map<string, string>();
     for (const m of [...msgs].sort((a, b) => a.sentAt.localeCompare(b.sentAt))) {
-      const contactId = byPhone.get(m.phone);
+      const contactId = byPhone.get(keyOf(m));
       const owner = m.businessPhone ? ownerOf.get(m.businessPhone) : undefined;
       if (contactId && owner && !wanted.has(contactId)) wanted.set(contactId, owner);
     }
@@ -466,7 +546,7 @@ async function ingestForOrg(
   let attributed = 0;
   for (const m of msgs) {
     if (!m.ctwaClid) continue;
-    const contactId = byPhone.get(m.phone);
+    const contactId = byPhone.get(keyOf(m));
     if (!contactId) continue;
     // 事件按消息确定 ID；重试不重复写，且不能因 contact 已更新就漏掉事件。
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256',
@@ -636,7 +716,7 @@ serve(async (req) => {
           org_id: orgOf(x.business),
           phone: x.business,
           kind: 'message_skipped',
-          reason: 'missing phone, id or timestamp',
+          reason: 'missing customer, id or timestamp',
           payload: x.message,
         })),
       );

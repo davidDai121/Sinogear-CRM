@@ -8,7 +8,7 @@ const built = await build({
   entryPoints: [fileURLToPath(new URL('../src/lib/gpt-template-routing.ts', import.meta.url))],
   bundle: true, platform: 'node', format: 'esm', write: false, logLevel: 'silent',
 });
-const { resolveGptTemplateRoute, isConversationForGptTemplate, mentionsR08, R08_GPT_ID, MENGLONG_R08_GPT_ID } =
+const { resolveGptTemplateRoute, isR08Template, isConversationForGptTemplate, mentionsR08, R08_GPT_ID, MENGLONG_R08_GPT_ID } =
   await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
 const miles = { id: 'miles', name: 'Miles V2', is_default: true, gpt_url: 'https://chatgpt.com/g/g-6a2f7081d85c8191babfad41e1131be6-sino-gear-miles-v2' };
 const r08 = { id: 'r08', name: 'R08 专用 · Miles', is_default: false, gpt_url: `https://chatgpt.com/g/${R08_GPT_ID}-sino-gear-r08-miles` };
@@ -18,6 +18,44 @@ const msg = (text, fromMe = false, timestamp = ++time) => ({ text, fromMe, times
 const resolve = (ctx = {}, selected = miles.id, choices = templates) => resolveGptTemplateRoute(choices, selected, { messages: [], vehicleInterests: [], ...ctx });
 const conv = (template, overrides = {}) => ({
   contact_id: 'customer-a', template_id: template.id, chat_url: `${template.gpt_url}/c/test-conversation`, ...overrides,
+});
+const skillTemplate = (id, name, skillId, isDefault = false) => ({
+  id, name, is_default: isDefault, gpt_url: 'https://chatgpt.com/',
+  description: 'SGC_GPT_TEMPLATE_CONFIG\n' + JSON.stringify({
+    schema: 'sinogear.gpt-template', version: 2, description: '', approvedKnowledge: '',
+    updatedAt: '2026-09-23T00:00:00.000Z', skill: { id: skillId, name },
+  }),
+});
+
+test('current R08 plugin is recognized and routed within each browser skill pair', () => {
+  const milesId = 'plugin_bd1c07b572d08191882a68116ab63a17';
+  const r08Id = 'plugin_5e838f5f90dc81919776e122e642836e';
+  const menglongMiles = skillTemplate('menglong-miles', 'Sino Gear Miles V2', milesId, true);
+  const menglongR08 = skillTemplate('menglong-r08', 'Sino Gear R08 Miles', r08Id);
+  const yangMiles = skillTemplate('yang-miles', 'Sino Gear Miles V2', milesId);
+  const yangR08 = skillTemplate('yang-r08', 'Sino Gear R08 Miles', r08Id);
+  const choices = [menglongMiles, menglongR08, yangMiles, yangR08];
+  assert.equal(isR08Template(menglongR08), true);
+  assert.equal(isR08Template(menglongMiles), false);
+  for (const [general, specialist] of [[menglongMiles, menglongR08], [yangMiles, yangR08]]) {
+    const browserBinding = { defaultTemplateId: general.id, r08TemplateId: specialist.id };
+    const r08Route = resolve({ messages: [msg('Quiero R08 diésel')], browserBinding }, general.id, choices);
+    assert.equal(r08Route.template, specialist);
+    assert.equal(r08Route.isR08, true);
+    assert.equal(r08Route.error, null);
+    const otherRoute = resolve({ messages: [msg('Now show me Hilux')], browserBinding }, specialist.id, choices);
+    assert.equal(otherRoute.template, general);
+    assert.equal(otherRoute.isR08, false);
+    assert.equal(otherRoute.error, null);
+  }
+});
+
+test('legacy R08 skill remains recognized; a misleading template name cannot impersonate it', () => {
+  const legacy = skillTemplate('legacy-r08', 'sino gear r08 miles', '6aabac4c1240819193bc311372c9d2ab');
+  const general = skillTemplate('general', 'R08 专用 · Miles', 'plugin_bd1c07b572d08191882a68116ab63a17', true);
+  assert.equal(isR08Template(legacy), true);
+  assert.equal(isR08Template(general), false);
+  assert.equal(resolve({ messages: [msg('R08 please')] }, general.id, [general, legacy]).template, legacy);
 });
 
 test('R08 Spanish customer overrides the general default and selects its own knowledge identity', () => {

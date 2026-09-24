@@ -1176,6 +1176,22 @@ Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% 
 
 **教训**：① **webhook 回 200 之前必须确认真的存了**——「解析 0 条 + 200」是最危险的静默丢数据，Meta 不会重推；新增字段/形状先打结构日志（只键名不含内容）看清再写解析。② 批量回填类载荷（history）单条畸形只能跳过留底，不能让整批 503 无限重试。③ 共存号 **14 天不打开 WhatsApp Business 会静默断开**，靠健康度面板和 Dualhook 第 13 天邮件发现。
 
+### 近期补完（2026-09-24）— 隐藏号码客户（WhatsApp 用户名 / BSUID）入库 + 健康度面板口径
+
+**起点**：boss 截图「📡 号码同步状态」：Sophia 卡片 🔴「Invalid change: messages」，近 7 天失败 22 批、跳过 674 条；又问「为啥 Sophia 入库能这么多，她新号啊」。
+
+**根因（查 `wa_webhook_failures` 留底载荷，只看结构）**：失败/跳过的消息**没有 `from`，只有 `from_user_id`（形如 `CO.1234567890123456`）+ `contacts[].user_id/profile.username`**——Meta 新推的 WhatsApp 用户名，客户可隐藏号码。webhook 要求必须有手机号 → 整批 503 / 单条跳过，其中不少是带 `referral.ctwa_clid` 的广告新客户。查库确认没有把 user id 当手机号建出脏客户。「收到 65,389」是推送次数：失败批被 Meta 反复重推 + 历史回填分段重复，实际 Sophia 只有 2,155 条（9/14 起，182 个客户，1,802 条是她主动发出）。
+
+**修法**：
+- migration **0046**：`contacts.wa_user_id` / `wa_username` + `UNIQUE (org_id, wa_user_id)`；`contacts_identity_check` 放宽为 phone / group_jid / wa_user_id 任一。
+- `wa-cloud-webhook`：`isPhoneLike` 判手机号形状，**用户 ID 绝不当手机号**；客户身份 = 手机号，没有就用 `from_user_id` / `to_user_id` / `thread.context.user_id`；隐藏号码客户按 `wa_user_id` 找/建（名字取 profile.name，没有取 username）；同一载荷手机号和 user id 都有时把 user id 补写到手机号客户上（撞唯一约束就跳过）。
+- `scripts/replay-wa-webhook-failures.mjs`：把留底的失败批 / 跳过消息重新喂给 webhook（去重保证可重复跑，成功的删除），用号码真实 `phone_number_id` 包信封。
+- 健康度面板：「收到 / 入库」改成「推送 / 新入库」，说明推送含重推和重复。
+
+**验证**：webhook 测试 43 例全过（新增隐藏号码建客户 / 用户 ID 不被当手机号 / 补写 user id / history 只有 user id 的会话）；部署后重放开始即新建 20 个隐藏号码客户。
+
+**教训**：① Meta 的身份字段在变（phone → BSUID），**任何「必须有手机号」的假设都要有 user id 兜底**，而且用户 ID 里有数字，`normalizePhone` 这类「剥非数字」函数会把它变成假手机号——先判形状再归一化。② 计数面板要写清口径：推送次数 ≠ 消息条数。③ 失败载荷留底 + 可重放脚本，让「修完 bug 补数据」变成一条命令。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1335,6 +1351,8 @@ WhatsApp 绿色主题：
 - **共存模式 webhook 回 200 = 承诺已存**（2026-09-23，`wa-cloud-webhook`）：任何「解析不出 / 不认识」的载荷都不能静默回 200——Meta 收到 200 就不再重推，数据永久丢。新字段/新形状先看结构日志；单条畸形跳过要进 `wa_webhook_failures` 留原文；整批失败回 503。健康度看 CRM「📡 号码同步状态」
 - **共存号不能断开/删号/换号来「修」接入错误**：#2494064 的正确处理是把号关联进当前 BM（或找 Meta 支持移出旧 BM），断开会删掉 App 账号和全部聊天记录
 - **测试共存推送不要点 Meta webhook 页的 Test 按钮**：样例载荷会往正式库建假客户
+
+- **隐藏号码客户只有 `wa_user_id` 没有 phone**（2026-09-24，0046）：`contacts.phone` 可能为 NULL 且不是群（`group_jid` 也 NULL）。按 phone 做的功能（jumpToChat、Google 同步、CAPI 手机号哈希）对这类客户都拿不到号，走 `phone ?? 兜底`；判群一律看 `group_jid`，别用 `!phone`
 
 ## 用户偏好
 

@@ -165,7 +165,8 @@ export function WaSyncHealthModal({ orgId, onClose }: Props) {
         <div className="sgc-modal-body">
           <p style={{ fontSize: 13, color: '#54656f', margin: '0 0 12px', lineHeight: 1.6 }}>
             接入共存模式的号，WhatsApp 收发的每条消息由 Meta 直接推进 CRM。
-            「入库」少于「收到」是正常的——重复的消息会自动去重；
+            「推送」是 Meta 推过来的条数，<strong>含重推和历史回填的重复</strong>（入库失败的那批 Meta 会反复重推，每次都算一遍），
+            所以会比实际消息多很多；「新入库」才是真正新增的消息。
             <strong>跳过 / 失败</strong>的原始数据都已留底，可以补录。
           </p>
 
@@ -216,11 +217,11 @@ export function WaSyncHealthModal({ orgId, onClose }: Props) {
                     <div style={{ fontSize: 12, color: '#54656f', marginTop: 6, lineHeight: 1.7 }}>
                       最后推送：{n.last_webhook_at ? ago(n.last_webhook_at, now) : '—'}
                       <br />
-                      今天：收到 {d.received} · 入库 {d.inserted}
+                      今天：推送 {d.received} · 新入库 {d.inserted}
                       {d.skipped > 0 && <span style={{ color: '#9a6700' }}> · 跳过 {d.skipped}</span>}
                       {d.failed > 0 && <span style={{ color: '#b91c1c' }}> · 失败 {d.failed}</span>}
                       <br />
-                      近 7 天：收到 {w.received} · 入库 {w.inserted}
+                      近 7 天：推送 {w.received} · 新入库 {w.inserted}
                       {w.skipped > 0 && <span style={{ color: '#9a6700' }}> · 跳过 {w.skipped}</span>}
                       {w.failed > 0 && <span style={{ color: '#b91c1c' }}> · 失败 {w.failed}</span>}
                     </div>
