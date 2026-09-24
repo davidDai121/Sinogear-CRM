@@ -6,6 +6,8 @@ import { quoteConversationId, saveQuotePreview } from '@/lib/quote-preview';
 import { snapshotDraftEvidence, type DraftEvidence } from '@/lib/draft-freshness';
 import { DraftFreshnessNotice } from './DraftFreshnessNotice';
 import { completeFollowupResult, followupProse } from '@/lib/gpt-followup-result';
+import { preserveFollowupTasks, translationOnlyRequested, PRESERVE_TASKS_NOTE, TRANSLATION_ONLY_NOTE } from '@/lib/gpt-request-scope';
+import { resolveContextLayer, followupContractRequested, threadEndsWithDiscussion } from '@/lib/gpt-context-layer';
 import {
   loadChatContext,
   loadGroupMemberNames,
@@ -44,7 +46,7 @@ import { loadPersonalSalesWorkMemory as loadSalesWorkMemory, saveSalesWorkEntry,
 import { rememberSalesPreferences, saveSalesPreference, type SalesPreference, type PreferenceScope } from '@/lib/sales-preferences';
 import { loadGptApprovedKnowledge } from '@/lib/gpt-template-knowledge';
 import { resolveGptTemplateRoute, isConversationForGptTemplate } from '@/lib/gpt-template-routing';
-import { loadApplicableSalesFacts } from '@/lib/sales-facts';
+import { loadApplicableSalesFacts, omitTemplateSourcedFacts } from '@/lib/sales-facts';
 import { SalesFactsPanel } from './SalesFactsPanel';
 
 type ContactRow = Database['public']['Tables']['contacts']['Row'];
@@ -104,6 +106,8 @@ interface PendingGptAction {
   prompt: string;
   guidance: string | null;
   startedAt: number;
+  /** 本轮是否注入了跟进契约（gpt-context-layer.ts）。false = 保存时 preserveExisting，不动任务。旧记录缺此字段时按 guidance 兜底判定。 */
+  followupContract?: boolean;
   wasFollowUp?: boolean;
   inputEvidence?: DraftEvidence;
   metrics?: ReplyMetrics;
@@ -561,10 +565,11 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       memory = await loadSalesWorkMemory(supabase, orgId, contact.id);
       if (mounted.current) setWorkMemory(memory);
     }
-    memory = { ...memory, factLibrary: await loadApplicableSalesFacts(supabase, {
+    // 来源就是本模板、或原句已逐字在本轮 [Approved Business Knowledge] 里的事实，本轮不重发（表不动）。
+    memory = { ...memory, factLibrary: omitTemplateSourcedFacts(await loadApplicableSalesFacts(supabase, {
       orgId, contactId: contact.id, scopeId: memory.scopeId, contact, messages: loaded.messages,
       vehicleInterests, salesGuidance: guidance, discussionQuestion, workMemory: memory,
-    }) };
+    }), template.id, approvedKnowledge?.text) };
     if (mounted.current) setWorkMemory(memory);
     return { ...loaded, vehicleInterests, template, approvedKnowledge, workMemory: memory, conversation, followupContext };
   };
@@ -632,7 +637,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         const plan = await saveFollowup(supabase, followupContext, decision, templateId, chatUrl);
         await bindTaskToDraft(plan, sanitizeReplyForCustomer(parseGptResponse(calculated.text).reply ?? ''), followupContext);
         return plan;
-      }, onReady);
+      }, onReady, !(pending.followupContract ?? !preserveFollowupTasks(pending.guidance)));
     if (!outcome.retryable && !pending.savedWork) {
       pending.savedWork = outcome;
       await chrome.storage.local.set({ [recoveryKey]: pending });
@@ -784,20 +789,28 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     // 链接里的 instructions 已含 Miles 角色，不再重发 ROLE_PROMPT
     const useCustomGpt = true;
     try {
-      const { messages, source: messageSource, vehicleInterests, template, approvedKnowledge, workMemory, conversation, followupContext } = await loadActionContext();
+      const { messages, source: messageSource, vehicleInterests, template, approvedKnowledge, workMemory, conversation: savedConversation, followupContext } = await loadActionContext();
+      // 上一轮是讨论的会话不再续用：讨论里的“不要写客户回复 / 不安排跟进”会把生成轮带偏
+      // （2026-09-23 Jaycee 实测）。改为带完整上下文另起新会话，成功后 saveConversation 覆盖旧 URL。
+      const conversation = savedConversation && threadEndsWithDiscussion(workMemory.entries, savedConversation.chat_url) ? null : savedConversation;
       wasFollowUp = !!conversation;
       const isGroup = !!contact.group_jid;
       const groupMemberNames = isGroup && !conversation ? await loadGroupMemberNames(contact.group_jid) : undefined;
       const url = conversation?.chat_url ?? template.gpt_url;
+      // A 层（无老板要求）全量；B 层（有老板要求）紧凑。见 gpt-context-layer.ts / 精简上下文方案。
+      const layer = resolveContextLayer({ salesGuidance: guidance });
+      const followupContract = followupContractRequested(guidance, 'reply');
       let prompt = conversation
         ? buildFollowUpMessage({
-            newMessages: messages.slice(-50),
+            // 完整消息：full 层构造函数自己取最近 50；compact 层要从更早的历史取价格/承诺锚点，先切 50 会丢
+            newMessages: messages,
             isGroup,
             salesGuidance: guidance.trim() || undefined,
             approvedKnowledge,
             workMemory,
             contact,
             vehicleInterests,
+            layer,
           })
         : buildFirstMessage({
             contact,
@@ -808,8 +821,17 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
             approvedKnowledge,
             workMemory,
             useCustomGpt,
+            layer,
           });
-      prompt += followupPrompt(followupContext, { includedRenderedMessages: chatHistoryEvidence(conversation ? messages.slice(-50) : messages), includedWorkMemory: workMemory, includedCustomerNotes: contact.group_jid && conversation ? null : contact.notes });
+      // 跟进契约（2026-09-23 老板收窄）：生成客户回复一律带，由技能同轮判断要不要二次跟进；
+      // compact 层带精简账本。老板说“不动任务 / 不安排跟进”才不注入，保存走 preserveExisting。
+      if (!followupContract) {
+        prompt += PRESERVE_TASKS_NOTE;
+      } else {
+        prompt += followupPrompt(followupContext, { includedRenderedMessages: chatHistoryEvidence(messages, layer), includedWorkMemory: workMemory, includedCustomerNotes: contact.group_jid && conversation ? null : contact.notes, compact: layer === 'compact' });
+      }
+      if (translationOnlyRequested(guidance)) prompt += TRANSLATION_ONLY_NOTE;
+      if (guidance.trim()) prompt += `\n[Current request — answer this now]\n${guidance.trim()}\nCarry out this task in context. Preserve the owner’s intended customer message and approved selling figures. Put any specific disagreement in Chinese internally; CRM metadata does not require extra customer-facing questions or pleasantries.`;
       promptForLog = prompt;
       messageSourceForLog = messageSource;
       messageCountForLog = messages.length;
@@ -833,13 +855,13 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         ensureThinking: false,
       }, { mode:'reply', template, workMemory, followupContext, skill:approvedKnowledge?.skill,
         source:messageSource, count:messages.length, prompt, guidance:guidanceForLog || null,
-        startedAt, wasFollowUp, inputEvidence:snapshotDraftEvidence(messages) });
+        startedAt, followupContract, wasFollowUp, inputEvidence:snapshotDraftEvidence(messages) });
 
       rawResponseForLog = response?.responseText ?? null;
       chatUrlForLog = response?.chatUrl ?? null;
       await deliverGptResponse(response, { mode:'reply', template, workMemory, followupContext,
         skill:approvedKnowledge?.skill, source:messageSource, count:messages.length, prompt,
-        guidance:guidanceForLog || null, startedAt, wasFollowUp,
+        guidance:guidanceForLog || null, startedAt, followupContract, wasFollowUp,
         inputEvidence:snapshotDraftEvidence(messages) });
       setGuidance('');
     } catch (err) {
@@ -893,6 +915,9 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     try {
       const { messages, source, vehicleInterests, template, approvedKnowledge, workMemory, conversation, followupContext } = await loadActionContext(q);
       const url = conversation?.chat_url ?? template.gpt_url;
+      // 讨论框任何输入都是老板要求 → B 层；跟进契约只在问题明确要求创建/调整/安排跟进任务时注入。
+      const layer = 'compact' as const;
+      const followupContract = followupContractRequested(q, 'discuss');
       let prompt: string;
       const count = messages.length;
       if (!conversation) {
@@ -910,6 +935,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
           question: q,
           approvedKnowledge,
           workMemory,
+          layer,
         });
       } else {
         // 续聊讨论也要补发最近 50 条 — GPT 那边 chat thread 看到的只是
@@ -917,16 +943,23 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         // 改车型 / 发图）没人喂给它，必须在本次 prompt 里补上。
         // 同时带精简客户档案，防 thread 长后 GPT 忘客户 anchor。
         prompt = buildDiscussionMessage({
-          newMessages: messages.slice(-50),
+          newMessages: messages,
           isGroup: !!contact.group_jid,
           question: q,
           approvedKnowledge,
           workMemory,
           contact,
           vehicleInterests,
+          layer,
         });
       }
-      prompt += followupPrompt(followupContext, { includedRenderedMessages: chatHistoryEvidence(conversation ? messages.slice(-50) : messages), includedWorkMemory: workMemory, includedCustomerNotes: contact.group_jid && conversation ? null : contact.notes });
+      if (!followupContract) {
+        prompt += PRESERVE_TASKS_NOTE;
+      } else {
+        prompt += followupPrompt(followupContext, { includedRenderedMessages: chatHistoryEvidence(messages, layer), includedWorkMemory: workMemory, includedCustomerNotes: contact.group_jid && conversation ? null : contact.notes, compact: true });
+      }
+      if (translationOnlyRequested(q)) prompt += TRANSLATION_ONLY_NOTE;
+      prompt += `\n[Current request — answer this now]\n${q}\nIf this is a judgment or advice question, keep the 2–4 sentence default above: verdict first, then the key reason. For a draft, check the requested sentence count before returning it; greetings count as sentences. The current request takes priority over earlier draft wording and default workflow suggestions.`;
       promptForLog = prompt;
       sourceForLog = source;
       countForLog = count;
@@ -947,11 +980,11 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         active: foreground,
         ensureThinking: false,
       }, { mode:'discuss', template, workMemory, followupContext, skill:approvedKnowledge?.skill,
-        source, count, prompt, guidance:q, startedAt });
+        source, count, prompt, guidance:q, startedAt, followupContract });
       rawResponseForLog = response?.responseText ?? null;
       chatUrlForLog = response?.chatUrl ?? null;
       await deliverGptResponse(response, { mode:'discuss', template, workMemory, followupContext,
-        skill:approvedKnowledge?.skill, source, count, prompt, guidance:q, startedAt });
+        skill:approvedKnowledge?.skill, source, count, prompt, guidance:q, startedAt, followupContract });
       setDiscuss('');
     } catch (err) {
       const msg = stringifyError(err);
@@ -1009,7 +1042,8 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
 
   const parsed = useMemo(
     () =>
-      status.kind === 'done' && status.mode === 'reply'
+      status.kind === 'done' && (status.mode === 'reply'
+        || (status.text.includes('[WhatsApp Reply]') && status.text.includes('[Full Translation & Strategy]')))
         ? parseGptResponse(status.text)
         : null,
     [status],
@@ -1411,7 +1445,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
             </>
           )}
 
-          {status.kind === 'done' && status.mode === 'reply' && parsed && (
+          {status.kind === 'done' && parsed && (
             <ResultView
               parsed={parsed}
               source={status.source}
@@ -1423,7 +1457,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
             />
           )}
 
-          {status.kind === 'done' && status.mode === 'discuss' && (
+          {status.kind === 'done' && status.mode === 'discuss' && !parsed && (
             <DiscussionResultView
               text={status.text}
               chatUrl={status.chatUrl}

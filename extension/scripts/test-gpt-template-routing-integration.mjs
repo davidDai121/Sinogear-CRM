@@ -24,14 +24,14 @@ const { Simulate } = require('react-dom/test-utils');
 
 const common = 'const h = () => globalThis.__gptRoutingIntegration;\n';
 const mocks = {
-  '@/lib/sales-facts': `${common}export const loadApplicableSalesFacts = async () => ({usable:[],unavailable:[]});`,
+  '@/lib/sales-facts': `${common}export const loadApplicableSalesFacts = async () => ({usable:[],unavailable:[]}); export const omitTemplateSourcedFacts = s => s;`,
   './SalesFactsPanel': 'export const SalesFactsPanel = () => null;',
   '@/lib/gpt-followup': `${common}
     export const sameTask = (a,b) => JSON.stringify(a)===JSON.stringify(b);
     export const loadFollowupContext = async (_db,orgId,contactId) => ({orgId,contactId});
     export const followupPrompt = (ctx,opts) => { h().followupPrompts.push({ctx,opts}); return ''; };
     export const extractFollowup = text => { if(h().followupError) throw Error(h().followupError); return {text,decision:{title:'等待条件',reason:'离线边界替身'}}; };
-    export const saveFollowup = async (_db,ctx,decision) => ({decision,after:null,protected:false});`,
+    export const saveFollowup = async (_db,ctx,decision) => { h().followupSaves.push(decision); return {decision,after:null,protected:false}; };`,
   '@/lib/sales-preferences': `${common}
     export const rememberSalesPreferences = async () => {};
     export const saveSalesPreference = async () => {};`,
@@ -68,14 +68,13 @@ const mocks = {
     export const loadGptApprovedKnowledge = async (_client, id, orgId) => {
       h().knowledge.push({id,orgId}); return h().knowledgeSnapshots[id] ?? 'approved-knowledge:' + id;
     };`,
-  '@/lib/claude-parser': 'export const parseClaudeResponse = () => null;',
   '@/content/whatsapp-compose': 'export const fillWhatsAppCompose = () => { throw new Error("Compose must never run"); };',
   '@/lib/ai-reply-attribution': 'export const recordFill = async () => { throw new Error("Fill must never run"); };',
   '@/lib/reply-progress': `${common}export const setReplyProgress = async (...args) => h().progress.push(args); export const clearReplyProgress = async () => {};`,
   '../hooks/useReplyProgress': 'export const useReplyProgress = () => ({});',
   '@/lib/ai-reply-log': `${common}export const logAiReply = async args => { h().logs.push(args); return 'offline-log'; }; export const markAiReplyFilled = async () => {};`,
   '@/lib/reply-sanitize': 'export const sanitizeReplyForCustomer = x => x; export const wasReplyDirty = () => false;',
-  './ReplyCard': 'export const ReplyCard = () => null;',
+  './ReplyCard': `import React from 'react'; export const ReplyCard = ({label,reply}) => React.createElement('div', null, label, reply);`,
   './ClientRecordCard': 'export const ClientRecordCard = () => null;',
   './GPTTemplatesModal': 'export const GPTTemplatesModal = () => null;',
   './GeneratedAtBadge': 'export const GeneratedAtBadge = () => null;',
@@ -122,7 +121,7 @@ function makeHarness(options = {}) {
     knowledgeSnapshots: structuredClone(options.knowledgeSnapshots ?? {}),
     memories: structuredClone(options.memories ?? {}), memoryWrites: [], memoryError: options.memoryError, memorySaveError: options.memorySaveError,
     quoteRows: [], responseTexts: options.responseTexts, quoteSaveError: options.quoteSaveError,
-    store: structuredClone(options.store ?? {}), calls: [], queries: [], writes: [], knowledge: [], prompts: [], followupPrompts: [], logs: [], progress: [], syncs: [],
+    store: structuredClone(options.store ?? {}), calls: [], queries: [], writes: [], knowledge: [], prompts: [], followupPrompts: [], followupSaves: [], logs: [], progress: [], syncs: [],
     headerMatches: false, domMessages: [], returnedUrl: options.returnedUrl,
     holdRuntime: options.holdRuntime ?? false, responseText: options.responseText,
   };
@@ -517,7 +516,7 @@ for (const action of ['generate','discussion']) {
   const raw='[Client Record]\nNo change\n[WhatsApp Reply]\nMy friend, send your company details for the PI.\n[Full Translation & Strategy]\n请提供开票资料。';
   const {h,container}=await mount(t,{responseText:raw});
   h.followupError='GPT未返回唯一的跟进判断，未创建任务';
-  if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
+  if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container,'怎么回复这个客户？顺便安排一下跟进');
   assert.equal(h.calls.length,1);
   assert.equal(h.logs[0].metrics.requests,1);
   const draft=h.memoryWrites.find(w=>w.entry.kind==='assistant_draft');
@@ -528,7 +527,7 @@ for (const action of ['generate','discussion']) {
   const raw='[Client Record]\n\n[WhatsApp Reply]\n\nMy friend, both cars use the same container option.\n\n[Full Translation & Strategy]\n继续核查其他运输方式。\n<crm_followup>{incomplete';
   const {h,container}=await mount(t,{responseText:raw});
   h.followupError='GPT未返回唯一的跟进判断，未创建任务';
-  if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container);
+  if(action==='generate')await click(button(container,x=>x==='生成'));else await discuss(container,'怎么回复这个客户？顺便安排一下跟进');
   assert.equal(h.calls.length,1);
   const draft=h.memoryWrites.find(w=>w.entry.kind==='assistant_draft');
   assert.match(draft.entry.text,/My friend, both cars/);
@@ -542,14 +541,14 @@ for (const action of ['generate','discussion']) {
  test(`${action} group continuation keeps long notes in the follow-up context`,async t=>{
   const notes='群聊人工安排：下周再联系，尚未授权新折扣。'.repeat(30);
   const {h,container}=await mount(t,{contactOverride:{group_jid:'synthetic@g.us',notes},conversations:[conversation(r08)]});
-  if(action==='generate')await click(button(container,x=>x==='续聊生成'));else await discuss(container);
+  if(action==='generate')await click(button(container,x=>x==='续聊生成'));else await discuss(container,'怎么回复这个客户？顺便安排一下跟进');
   assert.equal(h.calls.length,1);
   assert.equal(h.followupPrompts[0].opts.includedCustomerNotes,null);
  });
  test(`${action} individual continuation can reference notes already in customer context`,async t=>{
   const notes='保留本单原话。'.repeat(100);
   const {h,container}=await mount(t,{contactOverride:{notes},conversations:[conversation(r08)]});
-  if(action==='generate')await click(button(container,x=>x==='续聊生成'));else await discuss(container);
+  if(action==='generate')await click(button(container,x=>x==='续聊生成'));else await discuss(container,'怎么回复这个客户？顺便安排一下跟进');
   assert.equal(h.followupPrompts[0].opts.includedCustomerNotes,notes);
  });
 }
@@ -691,4 +690,147 @@ test('CRM generation opens the selected template without any model routing', asy
   await click(button(container,t=>t==='生成'));
   assert.equal(h.calls[0].modelRouting,undefined);
   assert.equal(h.calls[0].url,r08.gpt_url);
+});
+
+test('a structured revision from discussion exposes the customer draft separately from internal analysis', async t => {
+ const {container}=await mount(t, {responseText:'[Client Record]\nNo change\n[WhatsApp Reply]\nHello David. Which Land Cruiser model do you need?\n[Full Translation & Strategy]\n你好 David。你需要哪款兰德酷路泽？'});
+ await discuss(container, '把上一稿改成两句');
+ assert.ok(container.textContent.includes('Hello David. Which Land Cruiser model do you need?'));
+ assert.ok(container.textContent.includes('给客户的回复'));
+ assert.ok(!container.textContent.includes('🧠 GPT 的分析'));
+});
+test('an unstructured discussion remains internal and has no customer fill action', async t => {
+ const {container}=await mount(t, {responseText:'客户已经说明预算，下一步先确认车型。'});
+ await discuss(container, '分析一下下一步');
+ assert.ok(container.textContent.includes('🧠 GPT 的分析'));
+ assert.ok(!button(container, text => text.includes('填入聊天框')));
+});
+
+// 2026-09-23 精简上下文：老板有要求的轮次（生成框指令 / 讨论框任何输入）默认不注入跟进契约，
+// 只有要求明确提到跟进/任务/安排才注入；不注入的轮次保存走 preserveExisting，任务表原样。
+test('discussion injects the follow-up contract only on an explicit request; reply turns always carry it unless declined',async t=>{
+ const raw='[Client Record]\nNo change\n[WhatsApp Reply]\nHello David. Which model?\n[Full Translation & Strategy]\n你好 David。需要哪款？\n<crm_followup>{"decision":"act"}</crm_followup>';
+ for(const q of ['怎么回复这个客户？','改成一句英文']){
+  const {h,container}=await mount(t,{responseText:raw});
+  await discuss(container,q);
+  assert.equal(h.followupPrompts.length,0,q);
+  assert.equal(h.followupSaves.length,0,q);
+  assert.ok(h.calls[0].prompt.includes('[Current owner scope] This turn must not create or modify follow-up tasks'),q);
+  assert.ok(container.textContent.includes('Hello David. Which model?'));
+  assert.ok(!container.textContent.includes('[GPT跟进安排]'));
+ }
+ {
+  const {h,container}=await mount(t,{responseText:raw.replace('<crm_followup>{"decision":"act"}</crm_followup>','')});
+  await guidance(container,'跟他说柴油四驱就剩五台了');
+  await click(button(container,x=>x==='生成'));
+  assert.equal(h.followupPrompts.length,1,'owner dictation in the generate box still lets the skill decide on a follow-up');
+  assert.equal(h.followupPrompts[0].opts.compact,true,'compact turn carries the slim ledger');
+  assert.ok(h.calls[0].prompt.includes('[GPT follow-up decision — internal only]')||h.followupPrompts.length===1);
+ }
+ {
+  const {h,container}=await mount(t,{responseText:raw.replace('<crm_followup>{"decision":"act"}</crm_followup>','')});
+  await click(button(container,x=>x==='生成'));
+  assert.equal(h.followupPrompts.length,1,'generate without owner request keeps the full layer and its contract');
+  assert.ok(!h.followupPrompts[0].opts.compact);
+ }
+ {
+  const {h,container}=await mount(t,{responseText:raw.replace('<crm_followup>{"decision":"act"}</crm_followup>','')});
+  await discuss(container,'安排下周跟进');
+  assert.equal(h.followupPrompts.length,1,'an explicit follow-up request injects the contract');
+ }
+});
+// 续聊 / 讨论续聊把完整消息交给构造函数：compact 层的价格/承诺锚点要从 50 条之前的历史取，先切 50 会丢
+for (const action of ['generate','discussion']) {
+ test(`${action} continuation hands the complete history to the prompt builder, not only the last 50`,async t=>{
+  const OLD_DEAL='R08 deal confirmed: USD 16,900 per unit, deposit 30%, gift floor mats included.';
+  const history=[msg(OLD_DEAL,1),...Array.from({length:70},(_,i)=>msg(i%2?'ok':'sure',i+2)),msg('Can you confirm the old R08 deal?',80)];
+  const conv=conversation(r08);
+  const {h,container}=await mount(t,{messages:{'customer-a':history},conversations:[conv]});
+  if(action==='generate'){await guidance(container,'改成一句英文');await click(button(container,x=>x==='续聊生成'));}
+  else await discuss(container,'他说的老价格是哪句？');
+  assertR08Call(h,action==='generate'?'followup':'discussion-followup',conv.chat_url);
+  const args=h.prompts.at(-1).args;
+  assert.equal(args.newMessages.length,history.length,'complete history reaches the builder');
+  assert.equal(args.newMessages[0].text,OLD_DEAL);
+  assert.equal(args.layer,'compact');
+  assert.equal(h.followupPrompts.length,action==='generate'?1:0,'reply turns carry the contract; discussion without a follow-up request does not');
+ });
+}
+// 2026-09-23 Jaycee "Right" 复测：判断类讨论 → 末尾提醒 2–4 句先判断；不写客户话术、不建任务
+test('a judgment question in the discussion box gets the short-answer default and no task contract',async t=>{
+ const q='Jaycee 刚回了 Right。我感觉现在不用再推了，你怎么看？先和我讨论判断，不要写给客户的新消息，也不要安排跟进任务。';
+ const {h,container}=await mount(t,{responseText:'不用再推了。他刚确认了对比，等他自己消化；现在追问只会显得急。'});
+ await discuss(container,q);
+ assert.equal(h.calls.length,1);
+ const prompt=h.calls[0].prompt;
+ assert.ok(prompt.includes('[Current request — answer this now]\n'+q));
+ assert.ok(prompt.includes('If this is a judgment or advice question, keep the 2–4 sentence default above: verdict first, then the key reason.'));
+ assert.ok(prompt.includes('[Current owner scope] This turn must not create or modify follow-up tasks'));
+ assert.equal(h.followupPrompts.length,0);
+ assert.equal(h.followupSaves.length,0);
+ assert.ok(container.textContent.includes('不用再推了'));
+});
+// 2026-09-23 第二轮复测 bug：“不安排跟进”没有“任务”二字 → 契约仍注入 → 模型照老板要求不返回块 → 保存报“未返回跟进判断”并追加 [GPT跟进状态]
+test('a discussion that declines follow-up saves quietly: no contract, no warning, no task write',async t=>{
+ const q='Right 是真认同我们，还是只是礼貌附和？你会怎么判断？不要写客户回复，也不安排跟进。';
+ const answer='更像礼貌确认。一个词看不出接受了哪一点，只能说他没反对；真认同一般会接着问价格或时间。';
+ const {h,container}=await mount(t,{responseText:answer});
+ h.followupError='GPT未返回唯一的跟进判断，未创建任务';
+ await discuss(container,q);
+ assert.equal(h.calls.length,1);
+ assert.ok(h.calls[0].prompt.includes('[Current owner scope] This turn must not create or modify follow-up tasks'));
+ assert.equal(h.followupPrompts.length,0);
+ assert.equal(h.followupSaves.length,0);
+ assert.ok(container.textContent.includes(answer));
+ assert.ok(!container.textContent.includes('跟进安排未确认保存'));
+ assert.ok(!container.textContent.includes('[GPT跟进状态]'));
+ assert.ok(!container.textContent.includes('未返回跟进判断'));
+ const draft=h.memoryWrites.find(w=>w.entry.kind==='assistant_draft');
+ assert.equal(draft.entry.text,answer);
+});
+// 2026-09-23 Jaycee 实测：讨论“不要写客户回复，也不安排跟进”后点续聊生成，模型继续讨论。上一轮是讨论的会话不续用，另起新会话并覆盖保存。
+test('generation after a discussion turn starts a fresh thread with full context and rebinds the conversation',async t=>{
+ const conv=conversation(r08);
+ const draft={id:'d1',at:'2026-09-23T19:00:00Z',scopeId:'customer-a',kind:'assistant_draft',text:'更像礼貌确认。',chatUrl:conv.chat_url};
+ const afterDiscussion={contactId:'customer-a',scopeId:'customer-a',label:'当前需求',tasks:[],entries:[{id:'q1',at:'2026-09-23T18:59:00Z',scopeId:'customer-a',kind:'sales_discussion',text:'Right 是真认同还是礼貌附和？不要写客户回复，也不安排跟进。'},draft]};
+ const {h,container}=await mount(t,{memories:{'customer-a':afterDiscussion},conversations:[conv],returnedUrl:`${r08.gpt_url}/c/fresh-thread`});
+ await click(button(container,x=>x==='续聊生成'));
+ assert.equal(h.calls.length,1);
+ assert.equal(h.calls[0].url,r08.gpt_url,'does not reuse the discussion thread');
+ assert.equal(h.prompts.at(-1).kind,'first','full first-message context');
+ assert.equal(h.followupPrompts.length,1,'normal generation carries the follow-up contract');
+ const saved=h.writes.find(w=>w.table==='gpt_conversations');
+ assert.ok(saved&&JSON.stringify(saved).includes('/c/fresh-thread'),'new thread replaces the saved conversation');
+ // 对照：上一轮是生成的会话照常续聊
+ // 对照组的上一轮是正常生成：草稿有三段
+ const properDraft={...draft,text:'[Client Record]\nNo change\n[WhatsApp Reply]\nOnly 5 diesel 4WD units left.\n[Full Translation & Strategy]\n柴油四驱只剩五台。'};
+ const afterGeneration={...afterDiscussion,entries:[{id:'i1',at:'2026-09-23T18:59:00Z',scopeId:'customer-a',kind:'sales_instruction',text:'跟他说柴油四驱就剩五台了'},properDraft]};
+ const again=await mount(t,{memories:{'customer-a':afterGeneration},conversations:[conv]});
+ await click(button(again.container,x=>x==='续聊生成'));
+ assert.equal(again.h.calls[0].url,conv.chat_url);assert.equal(again.h.prompts.at(-1).kind,'followup');
+});
+// 真实失败路径：讨论 → 普通生成失败（同一旧 URL 存了无三段的草稿，没有 sales_instruction）→ 再次普通生成
+test('generation retried after a failed post-discussion generation still leaves the polluted thread',async t=>{
+ const conv=conversation(r08);
+ const entries=[
+  {id:'q1',at:'2026-09-23T18:59:00Z',scopeId:'customer-a',kind:'sales_discussion',text:'Right 是真认同还是礼貌附和？不要写客户回复，也不安排跟进。'},
+  {id:'d1',at:'2026-09-23T19:00:00Z',scopeId:'customer-a',kind:'assistant_draft',text:'更像礼貌确认。',chatUrl:conv.chat_url},
+  {id:'d2',at:'2026-09-23T19:20:00Z',scopeId:'customer-a',kind:'assistant_draft',text:'我的判断是：Right 更像礼貌附和……（长篇中文，无三段、无 crm_followup）',chatUrl:conv.chat_url},
+ ];
+ const {h,container}=await mount(t,{memories:{'customer-a':{contactId:'customer-a',scopeId:'customer-a',label:'当前需求',tasks:[],entries}},conversations:[conv],returnedUrl:`${r08.gpt_url}/c/fresh-thread-2`});
+ await click(button(container,x=>x==='续聊生成'));
+ assert.equal(h.calls[0].url,r08.gpt_url,'retry does not reuse the polluted thread either');
+ assert.equal(h.prompts.at(-1).kind,'first');
+ assert.equal(h.followupPrompts.length,1);
+ assert.ok(JSON.stringify(h.writes.find(w=>w.table==='gpt_conversations')).includes('/c/fresh-thread-2'));
+});
+test('explicit discussion opt-out keeps the draft while suppressing task prompts and writes',async t=>{
+ const q='把上一稿改成两句，不创建或调整跟进任务。';
+ const {h,container}=await mount(t,{responseText:'[Client Record]\nNo change\n[WhatsApp Reply]\nHello David. Which model?\n[Full Translation & Strategy]\n你好 David。需要哪款？\n<crm_followup>{"decision":"act"}</crm_followup>'});
+ await discuss(container,q);
+ assert.equal(h.followupPrompts.length,0);
+ assert.equal(h.followupSaves.length,0);
+ assert.ok(h.calls[0].prompt.includes('[Current request — answer this now]\n'+q));
+ assert.ok(container.textContent.includes('Hello David. Which model?'));
+ assert.ok(!container.textContent.includes('[GPT跟进安排]'));
 });

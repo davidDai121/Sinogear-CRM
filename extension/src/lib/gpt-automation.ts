@@ -817,14 +817,16 @@ async function fillLegacyPrompt(tabId: number, text: string): Promise<void> {
 
 async function typeAndSend(tabId: number, text: string, skill?: GptSkill): Promise<void> {
   if (skill) {
-    const prepared = await execute<boolean>(tabId, fillGptSkillPrompt, [skill, text]);
-    if (prepared !== true) throw new Error('技能输入准备失败，未发送客户上下文');
+    const prepared = await execute<{ ok: boolean; error?: string }>(tabId, fillGptSkillPrompt, [skill, text]);
+    if (!prepared?.ok) throw new Error(prepared?.error || '技能输入准备失败，未发送客户上下文');
   } else await fillLegacyPrompt(tabId, text);
   // Recheck the immutable skill ID at the final send boundary.
   const clicked = await execute<boolean>(tabId, (skillId: string | null) => {
     if (skillId) {
-      const pills = document.querySelectorAll('#prompt-textarea [data-symbol="skillMention"]');
-      if (pills.length !== 1 || pills[0].getAttribute('data-id') !== skillId) return false;
+      const pills = document.querySelectorAll('#prompt-textarea [data-symbol="skillMention"], #prompt-textarea [data-symbol="ecosystemMention"]');
+      const plugin = skillId.startsWith('plugin_');
+      if (pills.length !== 1 || pills[0].getAttribute('data-id') !== (plugin ? `plugin:${skillId}` : skillId)
+        || pills[0].getAttribute('data-symbol') !== (plugin ? 'ecosystemMention' : 'skillMention')) return false;
     }
     const inputSels = [
       '#prompt-textarea',

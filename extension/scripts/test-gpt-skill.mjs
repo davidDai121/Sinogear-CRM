@@ -42,7 +42,7 @@ test('route uses immutable skill ID; conversation must match contact, template a
 
 // Real picker/pill DOM shape observed in the browser. Only native editing,
 // layout and time are simulated; no browser/account/network or customer writes.
-async function composerCase(mode, run) {
+async function composerCase(mode, run, identity = skill) {
   const { window } = parseHTML('<html><body><div id="prompt-textarea" contenteditable="true"></div></body></html>');
   const { document } = window;
   const old = { window: globalThis.window, document: globalThis.document, setTimeout: globalThis.setTimeout, now: Date.now };
@@ -59,11 +59,18 @@ async function composerCase(mode, run) {
     if (!collapsed) {
       input.textContent = text;
       if (mode === 'missing') return true;
+      // Current UI can show an old Skill and a plugin with the same name.
+      if (identity.id.startsWith('plugin_')) {
+        const legacy = document.createElement('div'); legacy.className = '__menu-item'; legacy.setAttribute('data-fill', '');
+        legacy.innerHTML = '<span>sino gear r08 miles</span>';
+        legacy.addEventListener('click', () => assert.fail('Selected the old same-name skill'));
+        document.body.append(legacy);
+      }
       for (let i = 0; i < (mode === 'duplicate' ? 2 : 1); i++) {
         const item = document.createElement('div'); item.className = '__menu-item'; item.setAttribute('data-fill', '');
-        item.innerHTML = '<span>sino gear r08 miles</span><span>R08 回复</span>';
+        item.innerHTML = (identity.id.startsWith('plugin_') ? '<div data-testid="plugin-icon-wrapper"></div>' : '') + '<span>sino gear r08 miles</span><span>R08 回复</span>';
         item.addEventListener('click', () => {
-          input.innerHTML = `<p><span data-inline-selection-pill data-symbol="skillMention" data-id="${mode === 'wrong' ? 'a'.repeat(32) : skill.id}">sino gear r08 miles</span> </p>`;
+          input.innerHTML = `<p><span data-inline-selection-pill data-symbol="${identity.id.startsWith('plugin_') ? 'ecosystemMention' : 'skillMention'}" data-id="${mode === 'wrong' ? 'a'.repeat(32) : identity.id.startsWith('plugin_') ? `plugin:${identity.id}` : identity.id}">sino gear r08 miles</span> </p>`;
           item.remove();
         });
         document.body.append(item);
@@ -82,7 +89,7 @@ test('selects a real pill, preserves full long prompt, serialized function needs
   await composerCase('ok', async ({ input, inserted }) => {
     const serialized = new Function(`return (${fillGptSkillPrompt.toString()})`)();
     const prompt = 'CRM 客户上下文\n\n'.repeat(500);
-    await serialized(skill, prompt);
+    assert.deepEqual(await serialized(skill, prompt), { ok: true });
     assert.equal(input.querySelector('[data-symbol="skillMention"]').getAttribute('data-id'), skill.id);
     assert.equal(inserted[1], '\n' + prompt);
   });
@@ -90,7 +97,8 @@ test('selects a real pill, preserves full long prompt, serialized function needs
 for (const mode of ['missing', 'wrong', 'duplicate', 'dropped', 'truncated']) {
   test(`composer ${mode} fails before send; missing or wrong skill never receives customer text`, async () => {
     await composerCase(mode, async ({ inserted }) => {
-      await assert.rejects(fillGptSkillPrompt(skill, 'CRM 私有客户上下文与报价，本轮不能丢失。'));
+      const result = await fillGptSkillPrompt(skill, 'CRM 私有客户上下文与报价，本轮不能丢失。');
+      assert.equal(result.ok, false); assert.ok(result.error);
       if (['missing', 'wrong', 'duplicate'].includes(mode)) assert.equal(inserted.length, 1);
     });
   });
@@ -128,12 +136,96 @@ test('visible full URL survives Work anchors that omit href; no URL is invented 
   } finally { globalThis.document = previous; }
 });
 
-test('Chat landing switches to Work before selecting the skill; failed switch sends no context', async () => {
-  for(const works of [true,false])await composerCase('ok',async({inserted})=>{
-    const toggle=document.createElement('button');toggle.setAttribute('role','radio');toggle.setAttribute('data-tpp-toggle-value','work');toggle.setAttribute('aria-checked','false');toggle.textContent='Work';
-    let switched=false;toggle.addEventListener('click',()=>{switched=true;if(works)toggle.setAttribute('aria-checked','true');});document.body.append(toggle);
-    const original=document.execCommand;document.execCommand=(...args)=>{assert.equal(toggle.getAttribute('aria-checked'),'true');return original(...args)};
-    if(works){await fillGptSkillPrompt(skill,'测试上下文');assert.equal(switched,true);assert.equal(inserted.length,2);}
-    else{await assert.rejects(fillGptSkillPrompt(skill,'测试上下文'),/Work/);assert.equal(inserted.length,0);}
+test('Chat plugin preserves mode, exact identity and full long context without module closure', async () => {
+  const plugin = { id: 'plugin_5e838f5f90dc81919776e122e642836e', name: 'Sino Gear R08 Miles' };
+  assert.deepEqual(validateGptSkill(plugin), plugin);
+  assert.deepEqual(decode(encode('plugin', 'knowledge', false, undefined, plugin)).skill, plugin);
+  for (const mode of ['ok', 'wrong', 'missing', 'duplicate', 'dropped', 'truncated']) {
+    await composerCase(mode, async ({ inserted, input }) => {
+      const toggle = document.createElement('button');
+      toggle.setAttribute('role', 'radio'); toggle.setAttribute('data-tpp-toggle-value', 'work');
+      toggle.setAttribute('aria-checked', 'false');
+      toggle.addEventListener('click', () => assert.fail('Must not switch to Work'));
+      document.body.append(toggle);
+      const serialized = new Function(`return (${fillGptSkillPrompt.toString()})`)();
+      const prompt = 'CRM 历史客户消息与销售指令\n'.repeat(500);
+      const result = await serialized(plugin, prompt);
+      assert.equal(result.ok, mode === 'ok');
+      if (mode === 'ok') {
+        assert.equal(inserted[1], '\n' + prompt);
+        assert.equal(input.querySelector('[data-symbol="ecosystemMention"]').getAttribute('data-id'), `plugin:${plugin.id}`);
+      } else assert.ok(result.error);
+      if (['wrong', 'missing', 'duplicate'].includes(mode)) assert.equal(inserted.length, 1);
+    }, plugin);
+  }
+});
+
+test('plugin switches an initial Work surface to Chat, and failed switch returns a useful error', async () => {
+  const plugin = { id: 'plugin_5e838f5f90dc81919776e122e642836e', name: 'Sino Gear R08 Miles' };
+  for (const toggleValue of ['chatgpt', 'chat']) for (const succeeds of [true, false]) await composerCase('ok', async ({ inserted }) => {
+    const chat = document.createElement('button'); chat.setAttribute('role', 'radio');
+    chat.setAttribute('data-tpp-toggle-value', toggleValue); chat.setAttribute('aria-checked', 'false');
+    chat.addEventListener('click', () => { if (succeeds) chat.setAttribute('aria-checked', 'true'); });
+    document.body.append(chat);
+    const result = await fillGptSkillPrompt(plugin, '测试上下文');
+    assert.equal(result.ok, succeeds);
+    if (succeeds) assert.equal(chat.getAttribute('aria-checked'), 'true');
+    else { assert.match(result.error, /Chat/); assert.equal(inserted.length, 0); }
+  }, plugin);
+});
+
+test('selected Work without a recognized Chat toggle blocks plugins even without fixed High', async () => {
+  const plugin = { id: 'plugin_5e838f5f90dc81919776e122e642836e', name: 'Sino Gear R08 Miles' };
+  await composerCase('ok', async ({ inserted }) => {
+    const work = document.createElement('button');
+    work.setAttribute('role', 'radio'); work.setAttribute('data-tpp-toggle-value', 'work'); work.setAttribute('aria-checked', 'true');
+    document.body.append(work);
+    const result = await fillGptSkillPrompt(plugin, '私有上下文');
+    assert.equal(result.ok, false); assert.match(result.error, /Work/); assert.equal(inserted.length, 0);
+  }, plugin);
+});
+
+test('waits for delayed surface controls before selecting a plugin', async () => {
+  const plugin = { id: 'plugin_5e838f5f90dc81919776e122e642836e', name: 'Sino Gear R08 Miles' };
+  await composerCase('ok', async () => {
+    const previousTimer = globalThis.setTimeout;
+    let mounted = false;
+    let switched = false;
+    globalThis.setTimeout = fn => {
+      if (!mounted) {
+        mounted = true;
+        const chat = document.createElement('button'); chat.setAttribute('role', 'radio');
+        chat.setAttribute('data-tpp-toggle-value', 'chatgpt'); chat.setAttribute('aria-checked', 'false');
+        chat.addEventListener('click', () => { switched = true; chat.setAttribute('aria-checked', 'true'); });
+        document.body.append(chat);
+      }
+      fn(); return 0;
+    };
+    try { assert.equal((await fillGptSkillPrompt(plugin, '上下文')).ok, true); assert.equal(switched, true); }
+    finally { globalThis.setTimeout = previousTimer; }
+  }, plugin);
+});
+
+ test('explicit High uses normal Chat slider and refuses missing or Pro controls', async () => {
+ const plugin={id:'plugin_5e838f5f90dc81919776e122e642836e',name:'Sino Gear R08 Miles',thinkingEffort:'high'};
+ assert.deepEqual(validateGptSkill(plugin),plugin);
+ for(const bad of [{...plugin,thinkingEffort:'pro'},{...skill,thinkingEffort:'high'}])assert.throws(()=>validateGptSkill(bad));
+ for(const mode of ['medium','instant','extra','already','missing','pro'])await composerCase('ok',async()=>{
+  const old=globalThis.KeyboardEvent, oldPointer=globalThis.PointerEvent;
+  globalThis.PointerEvent=window.Event;
+  globalThis.KeyboardEvent=class extends window.Event{constructor(type,init){super(type,init);this.key=init.key;}};
+  const effort=document.createElement('button');effort.setAttribute('aria-haspopup','menu');
+  effort.textContent=mode==='already'?'High':mode==='extra'?'Extra High':mode==='instant'?'Instant':'Medium';
+  document.body.append(effort);
+  effort.addEventListener('click',()=>{
+   if(mode==='missing')return;
+   const picker=document.createElement('div');picker.setAttribute('data-testid','composer-intelligence-picker-content');
+   picker.innerHTML='<div role="menuitem" aria-label="Power"><span role="slider" aria-valuemax="3" aria-valuenow="'+(mode==='extra'?3:mode==='instant'?0:1)+'"></span></div><div role="menuitemradio" aria-checked="true">'+(mode==='pro'?'Pro':'Latest')+'</div>';
+   const power=picker.querySelector('[aria-label="Power"]'),slider=picker.querySelector('[role="slider"]');power.focus=()=>{};
+   power.addEventListener('keydown',e=>{if(e.key.startsWith('Arrow')){const n=Number(slider.getAttribute('aria-valuenow'))+(e.key==='ArrowRight'?1:-1);slider.setAttribute('aria-valuenow',n);effort.textContent=['Instant','Medium','High','Extra High'][n];}});
+   document.body.append(picker);
   });
+  try{const serialized=new Function('return ('+fillGptSkillPrompt.toString()+')')();const result=await serialized(plugin,'测试');assert.equal(result.ok,!['missing','pro'].includes(mode));if(result.ok)assert.equal(effort.textContent,'High');}
+  finally{globalThis.KeyboardEvent=old;globalThis.PointerEvent=oldPointer;}
+ },plugin);
 });

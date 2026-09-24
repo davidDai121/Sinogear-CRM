@@ -109,6 +109,31 @@ export async function loadApplicableSalesFacts(db: Client, ctx: FactContext): Pr
   return selectSalesFacts(await loadSalesFacts(db, ctx.orgId, ctx.contactId, factCategories(ctx)), ctx);
 }
 
+/**
+ * A 层去重（2026-09-23）：来源就是当前模板的条目与 [Approved Business Knowledge] 逐字重复，
+ * 本轮不再重发。只改本轮发什么，sales_facts 表原样。
+ */
+export function omitTemplateSourcedFacts(s: SalesFactSelection, templateId: string, knowledgeText?: string): SalesFactSelection {
+  const ref = `crm:gpt_templates:${templateId}`;
+  // 2026-09-23 实测：R08 七档价与保修条目标的是另一个 R08 模板（b31c9b55），按模板 id 去不掉，
+  // 但它们的 source.quote 就是本轮批准知识里的原句。原句已逐字在 prompt 里的条目不重发。
+  const knowledge = knowledgeText ? knowledgeText.replace(/\s+/g, '') : '';
+  const quotedInKnowledge = (f: SalesFact) => {
+    const quote = typeof f.source.quote === 'string' ? f.source.quote.replace(/\s+/g, '') : '';
+    return quote.length >= 12 && knowledge.includes(quote);
+  };
+  return { ...s, usable: s.usable.filter(f => f.source.ref !== ref && !quotedInKnowledge(f)) };
+}
+
+/**
+ * B 层（老板本轮有要求）：只发本客户 / 本单条目（特批、本单价表、本单运费）；
+ * 报价规程加载的轮次照旧全发（费用口径要参与核算）。机构 / 车型级条目在批准知识里。
+ */
+export function compactSalesFacts(s: SalesFactSelection, options?: { quote: boolean }): SalesFactSelection {
+  if (options?.quote) return s;
+  return { ...s, usable: s.usable.filter(f => f.scope === 'customer' || f.scope === 'order') };
+}
+
 export function renderSalesFacts(s?: SalesFactSelection): string {
   if (!s || (!s.usable.length && !s.unavailable.length)) return '';
   // Share identical provenance only; no summarization, omission or changed fact selection.

@@ -82,3 +82,108 @@ test('scheduler skips another browser private GPT without changing its task',asy
  try{const next=await runDueFollowup(db,async()=>{calls++;throw Error('wrong account');},{},NOW);assert.equal(calls,0);assert.equal(next.lastError,undefined);assert.deepEqual(db.tables.tasks,before);}
  finally{browserBindings={};}
 });
+
+// 2026-09-23 老板收窄：技能同轮判断要不要二次跟进；去重与人工日期保护落在代码
+test('dedupe only absorbs the SAME next step: Jaycee manual second follow-up covers, unrelated PI/freight tasks do not',()=>{
+ const managedDone={id:'managed',org_id:'org',contact_id:'c',title:'跟进：发送比较皮卡与SUV回复',status:'done',due_at:'2026-09-23T15:57:20Z',created_by:'user',created_at:'2026-09-23T11:36:49Z'};
+ const manual={id:'manual',org_id:'org',contact_id:'c',title:'Jaycee 二次跟进：询问 SUV/皮卡比较进度',status:'open',due_at:'2026-09-30T15:00:00Z',created_by:null,created_at:'2026-09-23T18:54:22Z'};
+ const pi={id:'pi',org_id:'org',contact_id:'c',title:'周五准备 PI',status:'open',due_at:'2026-09-26T15:00:00Z',created_by:null,created_at:'2026-09-23T18:00:00Z'};
+ const freight={id:'freight',org_id:'org',contact_id:'c',title:'核对海运报价',status:'open',due_at:'2026-09-29T15:00:00Z',created_by:'user',created_at:'2026-09-23T18:00:00Z'};
+ const previous={phase:'applied',taskId:'managed',scopeId:'s',orgId:'org',userId:'user',templateId:'template',chatUrl:'u',evaluatedAt:'2026-09-23T15:57:20Z',inputKey:'k',decision:{decision:'done'},before:managedDone,after:managedDone,protected:false,unchangedReviews:0};
+ const base={orgId:'org',contactId:'c',scopeId:'s',taskId:'managed',userId:'user',previous,inputKey:'k2',stateKey:'x',customer:{},evidence:[]};
+ const now=Date.parse('2026-09-23T19:00:00Z');
+ const revisit=decision({title:'回访客户，询问皮卡与SUV比较进度',dueAt:'2026-09-30T14:00:00Z',timeBasis:'gpt'});
+ // 正例：Jaycee 手工“二次跟进：询问 SUV/皮卡比较进度”覆盖同一下一步 → 不建不改
+ const covered=f.projectFollowup({...base,tasks:[managedDone,manual,pi,freight]},revisit,'template','u',false,now);
+ assert.equal(covered.protected,true);assert.equal(covered.decision.existingTaskId,'manual');assert.match(covered.decision.reason,/已有同一下一步/);
+ assert.deepEqual(covered.after,managedDone,'the done managed task is not reopened');
+ // 反例：只有无关的未来任务（准备 PI / 核对海运报价）→ 仍建回访任务
+ const unrelated=f.projectFollowup({...base,tasks:[managedDone,pi,freight]},revisit,'template','u',false,now);
+ assert.equal(unrelated.protected,false);assert.equal(unrelated.decision.existingTaskId,null);
+ assert.equal(unrelated.after.status,'open');assert.equal(unrelated.after.due_at,'2026-09-30T14:00:00Z');assert.equal(unrelated.after.title,'二次跟进：回访客户，询问皮卡与SUV比较进度');
+ // 模型准确引用 existingTaskId 优先；同一天到期的两个跟进类标题也算同一步；不同日期且标题无关不算
+ // 标题核心足够重合（不同日期也算同一步）；只是笼统的“跟进比较进度”+ 不同日期拿不准 → 保留新任务
+ assert.equal(f.sameNextStep(manual,decision({title:'询问皮卡比较进度',dueAt:'2026-10-02T15:00:00Z'}),now),true);
+ assert.equal(f.sameNextStep(manual,decision({title:'跟进比较进度',dueAt:'2026-10-02T15:00:00Z'}),now),false);
+ // 不按日期兜底：同一天的“询问运费报价”和“询问车型比较进度”是两件事，都要保留
+ assert.equal(f.sameNextStep({...manual,title:'询问运费报价'},decision({title:'询问车型比较进度',dueAt:'2026-09-30T09:00:00Z'}),now),false);
+ assert.equal(f.sameNextStep({...manual,title:'回访'},decision({title:'跟进客户决定',dueAt:'2026-09-30T09:00:00Z'}),now),false);
+ assert.equal(f.sameNextStep(pi,decision({title:'跟进客户决定',dueAt:'2026-09-26T09:00:00Z'}),now),false,'same day but PI is not a follow-up');
+ const sameDayDifferent=f.projectFollowup({...base,tasks:[managedDone,{...manual,title:'询问运费报价'}]},decision({title:'询问车型比较进度',dueAt:'2026-09-30T09:00:00Z',timeBasis:'gpt'}),'template','u',false,now);
+ assert.equal(sameDayDifferent.protected,false);assert.equal(sameDayDifferent.after.title,'二次跟进：询问车型比较进度');
+ assert.equal(f.sameNextStep({...manual,status:'done'},revisit,now),false);
+ assert.equal(f.sameNextStep({...manual,due_at:'2026-09-20T15:00:00Z'},revisit,now),false);
+ // act（准备 PI 等销售动作）不受覆盖影响
+ const act=f.projectFollowup({...base,tasks:[managedDone,manual]},decision({decision:'act',title:'准备PI',dueAt:null,timeBasis:'gpt',completion:'manual'}),'template','u',false,now);
+ assert.equal(act.protected,false);assert.equal(act.after.status,'open');
+});
+test('contract asks for the second follow-up after a normal reply instead of an act to send the draft',async()=>{
+ const c=await context(store());const p=f.followupPrompt(c);
+ assert.match(p,/Sending the draft you just wrote is NOT that action/);
+ assert.match(p,/review with a concrete future dueAt/);
+ assert.match(p,/that is still review with a date, not wait/);
+ assert.match(p,/Use act only for a salesperson action other than sending this draft/);
+ assert.doesNotMatch(p,/An act task can be/,'the old send-the-draft sentence contradicts the second-follow-up rule');
+ assert.doesNotMatch(p,/核对并发送本轮草稿/);
+});
+test('compact contract keeps owner instructions, rendered messages and the last 20 messages; rules and all tasks stay',async()=>{
+ const c=await context(store());
+ c.evidence=[...Array.from({length:40},(_,i)=>({id:`message:m${i}`,role:i%2?'customer':'sales',text:`msg ${i} ${i===2?'USD 16,900 deposit 30%':''}`,at:null})),{id:'owner:o',role:'owner',text:'本单特批',at:null}];
+ c.tasks=[{id:'manual',org_id:'org',contact_id:'c',title:'人工二次跟进',status:'open',due_at:'2026-09-30T15:00:00Z',created_by:null}];
+ const slim=f.followupPrompt(c,{compact:true,includedRenderedMessages:[{text:'msg 2 USD 16,900 deposit 30%',fromMe:true}]});
+ const full=f.followupPrompt(c);
+ assert.ok(slim.length<full.length);
+ for(const kept of ['owner:o','message:m2','message:m39','message:m20','人工二次跟进','never duplicate or alter a manual task','never an unsent draft'])assert.ok(slim.includes(kept),kept);
+ for(const dropped of ['message:m3"','message:m10"','message:m19"'])assert.ok(!slim.includes(dropped),dropped);
+ assert.ok(full.includes('message:m10"'));
+});
+
+// 2026-09-23 Jaycee 第二轮实测：畸形 JSON（未转义引号 + markdown 转义 id）与“现在不回但要有日期二次跟进”
+test('malformed but recoverable crm_followup JSON is repaired locally; still-broken JSON and bad evidence still fail closed',async()=>{
+ const c=await context(store());
+ c.tasks.push({id:'manual',org_id:'org',contact_id:'c',title:'Jaycee 二次跟进：询问 SUV/皮卡比较进度',status:'open',due_at:'2026-09-30T15:00:00Z',created_by:null});
+ const raw='{"decision":"review","title":"后续确认SUV与皮卡比较进度","reason":"依据客户表示："Call me tomorrow"，暂无新问题，沿用已有任务","dueAt":"2026-09-30T15:00:00+00:00","timeBasis":"gpt","evidence":[{"id":"message\\:m","quote":"Call me tomorrow"}],"existingTaskId":"manual","replyRequired":false}';
+ assert.throws(()=>JSON.parse(raw));
+ const parsed=f.extractFollowup(`[Client Record]\nNo change\n[WhatsApp Reply]\n\n[Full Translation & Strategy]\n客户只回了 Right，内容已发，现在不回。\n<crm_followup>${raw}</crm_followup>`,c,NOW);
+ assert.equal(parsed.decision.decision,'review');assert.equal(parsed.decision.existingTaskId,'manual');assert.equal(parsed.decision.replyRequired,false);
+ assert.equal(parsed.decision.evidence[0].id,'message:m');assert.match(parsed.decision.reason,/"Call me tomorrow"/);
+ const plan=f.projectFollowup(c,parsed.decision,'template','u',false,NOW);
+ assert.equal(plan.protected,true,'existing manual task is reused, not duplicated');
+ assert.equal(f.repairFollowupJson('{"a":"x \\_y\\: \\"q\\""}'),'{"a":"x _y: \\"q\\""}');
+ for(const broken of ['{"decision":"review","title":"a","reason":"he said "ok", then left","dueAt":null}','{not json at all','{"decision":"review",']){
+  assert.throws(()=>f.extractFollowup(`[Full Translation & Strategy]\n<crm_followup>${broken}</crm_followup>`,c,NOW),/不是有效JSON|字段无效|跟进时间/);
+ }
+ assert.throws(()=>f.extractFollowup(`[Full Translation & Strategy]\n<crm_followup>${raw.replace('"quote":"Call me tomorrow"','"quote":"invented"')}</crm_followup>`,c,NOW),/不符/);
+});
+test('contract and output reminder allow an empty reply with a dated review when nothing new is needed',async()=>{
+ const c=await context(store());const p=f.followupPrompt(c);
+ assert.match(p,/bare acknowledgement \(Right \/ OK \/ 👍\) of content we already actually sent/);
+ assert.match(p,/never re-send or paraphrase a sent message as this turn's reply/);
+ assert.match(p,/whether or not a customer message goes out now/);
+ assert.match(p,/JSON hygiene/);
+});
+
+// 2026-09-23 Jaycee 第三轮：review 引用手工任务但时区写错、timeBasis=owner 无 owner 证据 → 以任务原 due_at 为准，不改任务
+test('review that references an existing open future manual task adopts its due_at; done/expired/unrelated/missing references are refused',async()=>{
+ const db=store();
+ db.tables.tasks.push({id:'388a021b',org_id:'org',contact_id:'c',title:'Jaycee 二次跟进：询问 SUV/皮卡比较进度',status:'open',due_at:'2026-09-30T15:00:00+00:00',created_by:null,created_at:'2026-09-23T18:54:22Z'});
+ const c=await context(db);
+ const block=over=>`[Client Record]\nNo change\n[WhatsApp Reply]\n\n[Full Translation & Strategy]\n客户只回了确认。\n${encode({decision:'review',title:'后续确认SUV与皮卡比较进度',reason:'客户仍在比较，沿用已有任务',dueAt:'2026-09-30T15:00:00-05:00',timeBasis:'owner',evidence:[{id:'message:m',quote:'tomorrow'}],existingTaskId:'388a021b',replyRequired:false,...over})}`;
+ const parsed=f.extractFollowup(block(),c,NOW);
+ assert.equal(parsed.decision.dueAt,'2026-09-30T15:00:00.000Z','task due_at wins over the model timezone slip');
+ assert.equal(parsed.decision.timeBasis,'owner');
+ const before=structuredClone(db.tables.tasks);
+ const plan=await save(db,c,parsed.decision);
+ assert.equal(plan.protected,true);assert.equal(plan.phase,'applied');
+ assert.deepEqual(db.tables.tasks,before,'no task modified or created');
+ assert.ok(db.tables.contact_events.some(e=>e.payload?.schema==='gpt-followup.v1'&&e.payload.decision.existingTaskId==='388a021b'),'decision journaled');
+ // 不能借：已完成 / 过期 / 不相关 / 不存在
+ for(const [edit,re] of [[t=>t.status='done',/已完成、已取消或已过期/],[t=>t.due_at='2026-09-10T15:00:00Z',/已完成、已取消或已过期/],[t=>t.title='周五准备 PI',/不是同一下一步/]]){
+  const db2=store();const t={id:'388a021b',org_id:'org',contact_id:'c',title:'Jaycee 二次跟进：询问 SUV/皮卡比较进度',status:'open',due_at:'2026-09-30T15:00:00+00:00',created_by:null,created_at:'2026-09-23T18:54:22Z'};edit(t);db2.tables.tasks.push(t);
+  const c2=await f.loadFollowupContext(db2,'org','c');
+  assert.throws(()=>f.extractFollowup(block(),c2,NOW),re);
+ }
+ assert.throws(()=>f.extractFollowup(block({existingTaskId:'missing'}),c,NOW),/不存在/);
+ // 引用受管任务本身仍走原校验：owner 时间没有 owner 证据照旧拒绝
+ assert.throws(()=>f.extractFollowup(block({existingTaskId:null}),c,NOW),/缺少对应客户或人工依据/);
+});

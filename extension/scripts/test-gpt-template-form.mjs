@@ -38,7 +38,7 @@ test('new skill can be created without entering a hidden legacy GPT URL',async t
  assert.equal(submitButton(c).disabled,true);
  await change(field(c,'技能名称（ChatGPT 中显示的名称）'),'sino gear r08 miles');
  assert.equal(submitButton(c).disabled,true);
- await change(field(c,'技能 ID（技能编辑页链接末尾）'),'6aabac4c1240819193bc311372c9d2ab');
+ await change(field(c,'技能 / 插件 ID（详情页链接末尾）'),'6aabac4c1240819193bc311372c9d2ab');
  await change(field(c,'已确认业务知识'),'Approved fixture only');
  assert.equal(c.querySelector('input[placeholder="https://chatgpt.com/g/g-xxxxx-name"]'),null);
  await submit(c);
@@ -50,8 +50,24 @@ test('legacy GPT still requires a URL when switching back from skill mode',async
  const {h,container:c}=await mount(t);await change(field(c,'模板名称'),'Legacy');
  assert.equal(submitButton(c).disabled,true);
  await change(field(c,'使用已安装的 ChatGPT 技能'),true);
- await change(field(c,'技能名称（ChatGPT 中显示的名称）'),'sino gear r08 miles');await change(field(c,'技能 ID（技能编辑页链接末尾）'),'6aabac4c1240819193bc311372c9d2ab');
+ await change(field(c,'技能名称（ChatGPT 中显示的名称）'),'sino gear r08 miles');await change(field(c,'技能 / 插件 ID（详情页链接末尾）'),'6aabac4c1240819193bc311372c9d2ab');
  await change(field(c,'使用已安装的 ChatGPT 技能'),false);assert.equal(submitButton(c).disabled,true);
  await change(field(c,'Custom GPT URL'),'https://chatgpt.com/g/g-existing');await submit(c);
  assert.equal(h.writes.length,1);assert.equal(h.writes[0].gpt_url,'https://chatgpt.com/g/g-existing');assert.equal(h.writes[0].description,null);
+});
+
+test('new Chat plugin accepts its current display name and plugin ID without losing knowledge', async t => {
+ const {h,container:c}=await mount(t);
+ await change(field(c,'模板名称'),'R08 Chat plugin');
+ await change(field(c,'使用已安装的 ChatGPT 技能'),true);
+ await change(field(c,'技能名称（ChatGPT 中显示的名称）'),'Sino Gear R08 Miles');
+ const id='plugin_5e838f5f90dc81919776e122e642836e';
+ const idField=field(c,'技能 / 插件 ID（详情页链接末尾）');
+ assert.equal(new RegExp('^'+idField.getAttribute('pattern')+'$').test(id),true);
+ await change(idField,id); await change(field(c,'已确认业务知识'),'Existing approved knowledge');
+ await change(field(c,'固定使用 Chat High（不使用 Pro 模型）'),true);
+ await submit(c);
+ const config=JSON.parse(h.writes[0].description.split('\n').slice(1).join('\n'));
+ assert.deepEqual(config.skill,{id,name:'Sino Gear R08 Miles',thinkingEffort:'high'});
+ assert.equal(config.approvedKnowledge,'Existing approved knowledge');
 });

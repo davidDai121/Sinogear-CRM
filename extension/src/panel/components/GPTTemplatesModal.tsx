@@ -260,6 +260,7 @@ function TemplateForm({
     useSkill: !!metadata.value?.skill,
     skillId: metadata.value?.skill?.id ?? '',
     skillName: metadata.value?.skill?.name ?? '',
+    highThinking: metadata.value?.skill?.thinkingEffort === 'high',
     is_default: template?.is_default ?? !hasDefault,
   });
   const [busy, setBusy] = useState(false);
@@ -286,7 +287,8 @@ function TemplateForm({
         draft.approvedKnowledge,
         metadata.value?.hasEnvelope,
         new Date().toISOString(),
-        draft.useSkill ? validateGptSkill({ id: draft.skillId.trim(), name: draft.skillName.trim() }) : undefined,
+        draft.useSkill ? validateGptSkill({ id: draft.skillId.trim(), name: draft.skillName.trim(),
+          ...(draft.highThinking && draft.skillId.trim().startsWith('plugin_') ? { thinkingEffort: 'high' } : {}) }) : undefined,
       );
       let savedTemplateId: string;
       if (template) {
@@ -359,16 +361,21 @@ function TemplateForm({
       </label>
 
       {draft.useSkill ? <>
+        {draft.skillId.trim().startsWith('plugin_') && <label className="sgc-field sgc-field-full sgc-checkbox-row">
+          <input type="checkbox" checked={draft.highThinking}
+            onChange={(e) => setDraft({ ...draft, highThinking: e.target.checked })} />
+          <span>固定使用 Chat High（不使用 Pro 模型）</span>
+        </label>}
         <label className="sgc-field sgc-field-full">
           <span>技能名称（ChatGPT 中显示的名称）</span>
           <input value={draft.skillName} required placeholder="sino gear r08 miles"
             onChange={(e) => setDraft({ ...draft, skillName: e.target.value })} />
         </label>
         <label className="sgc-field sgc-field-full">
-          <span>技能 ID（技能编辑页链接末尾）</span>
-          <input value={draft.skillId} required pattern="[a-f0-9]{32}"
+          <span>技能 / 插件 ID（详情页链接末尾）</span>
+          <input value={draft.skillId} required pattern="(plugin_)?[a-f0-9]{32}"
             onChange={(e) => setDraft({ ...draft, skillId: e.target.value })} />
-          <span className="sgc-muted">先在当前 ChatGPT 账号安装技能。生成时会核对技能身份；旧 GPT 对话保留，新技能从新会话开始。</span>
+          <span className="sgc-muted">先在当前 ChatGPT 账号安装技能或插件。新版插件 ID 以 plugin_ 开头，可在 Chat 中使用；生成时会核对身份并保留完整客户上下文。</span>
         </label>
       </> : <label className="sgc-field sgc-field-full">
         <span>Custom GPT URL</span>

@@ -111,7 +111,10 @@ function draftAppearsSent(draft: QuoteDraft, messages: ChatMessage[]): boolean {
     const fracPart = frac ? `(?:\\.${frac})?` : '';
     return new RegExp(`(?<![\\d.,])(?:${int}|${grouped.replace(/,/g, ',')})${fracPart}(?![\\d])`);
   });
-  return messages.some((m) => m.fromMe && m.timestamp != null && m.timestamp > draft.computedAt! && patterns.some((re) => re.test(m.text)));
+  // WhatsApp 消息时间只到分钟：核算在 15:35:27 完成、消息 15:35:00 发出也算发出（2026-09-23 Raynier 实测，
+  // 否则同一分钟内发出的报价永远被判"未发送"，之后每一轮都加载报价/运费规程）。
+  const sentAfter = draft.computedAt! - 60000;
+  return messages.some((m) => m.fromMe && m.timestamp != null && m.timestamp > sentAfter && patterns.some((re) => re.test(m.text)));
 }
 
 export function selectGptWorkflows(input: WorkflowSelectionInput): WorkflowSelection {
@@ -138,12 +141,15 @@ export function selectGptWorkflows(input: WorkflowSelectionInput): WorkflowSelec
     // 客户在回答销售为了报价而问的问题（"1"、"Negra"、"Buenaventura"）→ 报价在继续。
     // 要求：销售那条是问句且涉及报价/运输；客户的回复是在提供信息，而不是
     // 单纯的 是/好/谢谢（那是对已报价的回应，不需要重算）
-    const isQuestion = !!lastOutbound && /[?？¿]/.test(lastOutbound.text);
+    // Inspect the actual question, not an earlier price list in the same message.
+    // A buyer answering 'daily use' after a quoted offer is not a new quote request.
+    const questionText = lastOutbound?.text.match(/[^\n.!?。！？]*[?？]/g)?.join(' ') ?? '';
+    const isQuestion = !!questionText;
     const onlyAcknowledges = pending.every((m) => ACKNOWLEDGEMENT.test(m.text.trim()));
     if (lastOutbound && isQuestion && !onlyAcknowledges && !isSalesPitch(lastOutbound.text)
-      && (QUOTE_REQUEST.test(lastOutbound.text) || FREIGHT_REQUEST.test(lastOutbound.text))) {
+      && (QUOTE_REQUEST.test(questionText) || FREIGHT_REQUEST.test(questionText))) {
       quote = true;
-      if (FREIGHT_REQUEST.test(lastOutbound.text)) freight = true;
+      if (FREIGHT_REQUEST.test(questionText)) freight = true;
       reasons.push('客户在回答销售为报价提出的问题');
     }
   }

@@ -84,8 +84,10 @@ check('Salesperson can explicitly choose a language without Chinese guidance for
   const prompt = buildFollowUpMessage({ contact, salesGuidance: guidance, newMessages: [msg('Hola')] });
   assert.match(prompt, /\[Sales Guidance — TOP PRIORITY\]/);
   assert.ok(prompt.includes(guidance));
-  assert.match(languageBlock(prompt), /1\. An explicit reply-language instruction from the salesperson/);
-  assert.match(languageBlock(prompt), /language the salesperson used to write that guidance is NOT itself a language instruction/);
+  // 有老板要求 → compact 层短版语言段（gpt-context-layer.ts）；同一优先级，措辞压缩
+  assert.match(languageBlock(prompt), /\(1\) an explicit reply-language instruction in \[Sales Guidance\]/);
+  assert.match(languageBlock(prompt), /language the guidance itself is written in is not an instruction/);
+  assert.match(languageBlock(prompt), /Never infer it from Sales\/outbound messages/);
 });
 
 check('Other customer languages remain original evidence rather than forcing Spanish globally', () => {
@@ -127,7 +129,7 @@ check('Discussion mode remains internal Chinese without a customer-language outp
     buildDiscussionMessage({ ctx: { contact, messages: [msg('Hola')] }, question: '怎么跟进？' }),
     buildDiscussionMessage({ contact, newMessages: [msg('Hola')], question: '怎么跟进？' }),
   ]) {
-    assert.match(prompt, /Reply in Chinese \(中文\)/);
+    assert.match(prompt, /natural Chinese sentences \(中文\), the verdict first/);
     assert.doesNotMatch(prompt, /\n\[Reply Language\]\n/);
   }
 });

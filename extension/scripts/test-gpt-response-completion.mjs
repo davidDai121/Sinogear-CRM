@@ -3,7 +3,7 @@ import test from 'node:test';
 import { build } from 'esbuild';
 async function load(file) { const r=await build({entryPoints:[file],bundle:true,platform:'node',format:'esm',write:false});return import('data:text/javascript;base64,'+Buffer.from(r.outputFiles[0].text).toString('base64')); }
 const {waitForCompletedGptResponse:wait,GptResponseTimeoutError}=await load('src/lib/gpt-response-wait.ts');
-const {completeFollowupResult:complete}=await load('src/lib/gpt-followup-result.ts');
+const {completeFollowupResult:complete,preserveFollowupTasks}=await load('src/lib/gpt-followup-result.ts');
 const {parseClaudeResponse}=await load('src/lib/claude-parser.ts');
 const {sanitizeReplyForCustomer}=await load('src/lib/reply-sanitize.ts');
 async function sequence(frames,timeoutMs=30000){let time=0,index=0;return wait(async()=>frames[Math.min(index++,frames.length-1)],{timeoutMs,now:()=>time,sleep:async ms=>{time+=ms;}});}
@@ -94,4 +94,25 @@ test('ready prose is delivered before an auxiliary task save settles; failure re
  const result=await complete(prose+'\n'+block,ctx,null,async()=>{assert.equal(ready,true);throw Error('offline');},async text=>{assert.equal(sanitizeReplyForCustomer(parseClaudeResponse(text).reply),reply);ready=true;});
  assert.equal(result.retryable,true);assert.match(result.warning,/offline/);
  const absent=await complete(prose,ctx,null,save);assert.equal(absent.retryable,false);
+});
+
+ test('explicit current owner opt-out preserves tasks even if model returns metadata',async()=>{
+ for(const request of ['本轮只是修改未发送草稿，不创建或调整跟进任务。','不要更新跟进任务',"Do not create or update follow-up tasks",
+  // 2026-09-23 David 实测两句原话：旧正则都不命中，任务被改
+  // 2026-09-23 Jaycee 复测：否定的跟进 / 提醒 / 回访没有“任务”二字也算不动任务
+  'Right 是真认同我们，还是只是礼貌附和？你会怎么判断？不要写客户回复，也不安排跟进。','不用跟进','别提醒我了','这轮不安排回访','no follow-up needed this turn',"don't schedule a reminder",
+  '这次帮我写客户回复：英文一句话。只改未发送草稿，不更新客户资料和跟进任务。','先跟我分析一下这个客户现在卡在哪，别写回复。这次只讨论，不新增或修改客户资料和跟进任务。','本轮只讨论','不要动跟进任务','别改任务',"Don't touch the follow-up tasks this turn"]){
+  assert.equal(preserveFollowupTasks(request),true);
+  for(const text of [prose,prose+'\n'+block]){
+   const result=await complete(text,ctx,noRepair,async()=>assert.fail('task write forbidden'),undefined,true);
+   assert.equal(result.text,prose);assert.equal(result.warning,undefined);
+  }
+ }
+ for(const request of ['', '不新增承诺，安排跟进任务', '请调整跟进任务','帮我改成一句英文','只讨论完再写回复并安排任务','安排下周跟进','三天后提醒我催他','跟他说不用担心运费'])assert.equal(preserveFollowupTasks(request),false,request);
+});
+
+test('translation-only requests are detected without swallowing normal drafting',async()=>{
+ const {translationOnlyRequested}=await load('src/lib/gpt-request-scope.ts');
+ for(const q of ['附一句中文翻译。不写策略分析','只附中文翻译','附对应中文翻译，别写策略分析。本轮不创建或调整跟进任务。','translation only please','No strategy, just the reply and translation']) assert.equal(translationOnlyRequested(q),true,q);
+ for(const q of ['','帮我改成一句英文','附中文翻译和策略','先跟我分析一下这个客户']) assert.equal(translationOnlyRequested(q),false,q);
 });

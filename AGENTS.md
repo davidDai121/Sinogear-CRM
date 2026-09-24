@@ -1062,6 +1062,18 @@ npm run package
 
 **教训**：跨ChatGPT账号复制GPT后，必须同时核对所有者、可访问链接、CRM个人模板及自动匹配；更新模板URL不能继续复用旧GPT会话。本机build/reload不等于团队安装包发布。发布当前构建时，提交须涵盖进入包内的已完成源码修复，不能仅提交版本说明。
 
+### 近期补完（2026-09-23）— CRM 技能对话与二次跟进团队发版
+
+**起点**：老板要求从 CRM 点击就能把客户上下文带进 Skill，自然讨论、不额外调用付费 API，并在普通生成时判断哪些客户需要有日期的二次跟进；最后问是否要打包发布并 Git push。
+
+**根因**：原提示把大量客户历史、事实与跟进规则混在一起；讨论轮的“不要回复 / 不安排跟进”会污染同一 Chat 后续普通生成；模型有时重写已经实际发送的比较内容，或返回畸形跟进 JSON。人工已建任务被时间转换、证据校验与宽泛去重误判。独立 Chat 的 `@插件` 也并不稳定触发对应 Skill，不能把插件选中等同于技能执行。
+
+**修法**：`gpt-context-layer.ts` / `gpt-request-scope.ts` 把本轮指令、历史讨论、已发消息和相关业务事实分层；`gpt-automation.ts` 在讨论后普通生成时另起会话；`gpt-prompt.ts` / `gpt-sales-workflow.ts` 明确短确认可留空客户回复并仍判断二次跟进；`gpt-followup.ts` 修复可恢复的 JSON，按同一步任务去重并保留人工日期；`ContactTasksSection.tsx` 校准本地时间转换，GPT 面板保留讨论/改稿入口。R08 与 Miles V2 私有插件已分别更新，事实资料仍在各自 references。CRM 扩展源码与私有 Skill 是两条独立发布链。
+
+**验证**：183 项相关 Node 测试通过，TypeScript/Vite 构建通过；Menglong Chrome 的 Jaycee 客户卡两次真实“续聊生成”均留下空客户回复，保存 GPT 跟进判断并沿用 9 月 30 日 10:00 的人工待办，未建重复任务、未发 WhatsApp。独立 Chat 的自然短答仍不稳定，不能宣称已达到 100% 自动化；详细记录见 `docs/技能对话体验实施_2026-09-23.md`。
+
+**教训**：真实已发消息和未发送草稿要分开；本轮否定指令不能跨轮继承；人工任务日期优先；发布时分别核对 Skill 当前版本、CRM 构建版本、安装包和服务器 required_version。`@插件` 入口要用 Sources 实测是否真的调用 Skill，不能只看输入框的插件标签。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板
@@ -1090,6 +1102,8 @@ WhatsApp 绿色主题：
 - 错误：`#b91c1c`
 
 ## 已知问题 / 风险
+
+- **Skill、CRM 和发布各是独立链路**：私有插件更新不会替换团队 Chrome 扩展；本机 `dist` 重载不会自动交付给其他销售；Git push 也不会安装 ZIP。新跟进逻辑必须同时检查已发证据、人工任务保护、Chat 轮次隔离和最终 CRM 落库。独立 `@插件` 的自然短答与日期任务仍需继续验收，不以插件已安装或 SKILL 正文可读作为通过依据。
 
 - **GPT副本账号与路由**：私人GPT不能假定跨账号可访问。复制后核对页面作者和保存状态，再改对应用户模板及已验证ID列表；旧会话必须按精确GPT ID拒绝续用。团队使用代码修复需单独打包发布，不把本机重载称为全员生效。
 

@@ -1,6 +1,9 @@
 import { normalizeGptReply } from './gpt-reply-state';
 import { extractFollowup, type FollowupContext, type FollowupDecision, type FollowupPlan } from './gpt-followup';
 
+/** 判定逻辑移到 gpt-request-scope.ts（2026-09-23）；这里保留导出，调用方不变。 */
+export { preserveFollowupTasks } from './gpt-request-scope';
+
 /** Validate placement before normalization so NO_REPLY cannot hide an unsafe machine block. */
 export function followupProse(text: string) {
   const marker = text.search(/<\/?crm_followup\b/i);
@@ -21,8 +24,13 @@ export async function completeFollowupResult(
   repair: (() => Promise<string>) | null,
   save: (decision: FollowupDecision) => Promise<FollowupPlan>,
   onReady?: (text: string) => Promise<void>,
+  preserveExisting = false,
 ): Promise<{ text: string; warning?: string; retryable?: boolean }> {
   const prose = followupProse(text);
+  if (preserveExisting) {
+    await onReady?.(prose);
+    return { text: prose };
+  }
   text = normalizeGptReply(text);
   const marker = text.search(/<\/?crm_followup\b/i);
   let saving = false;

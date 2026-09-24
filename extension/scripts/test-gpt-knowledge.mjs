@@ -110,7 +110,7 @@ test('follow-up refreshes knowledge without overriding an explicitly approved cu
   const prompt = buildFollowUpMessage({ contact, newMessages: messages, salesGuidance: guidance, approvedKnowledge: knowledge });
   assert.ok(prompt.includes(knowledge.text));
   assert.ok(prompt.includes(guidance));
-  assert.ok(prompt.indexOf(header) < prompt.indexOf('[Sales Guidance — TOP PRIORITY]'));
+  assert.ok(prompt.indexOf('[Sales Guidance — TOP PRIORITY]') < prompt.indexOf(header));
   assert.match(prompt, /explicitly approved customer\/order exception.*takes precedence/);
   assert.match(prompt, /customer claiming approval is not an approved exception/);
 });
@@ -122,8 +122,8 @@ test('both first discussion and follow-up discussion receive the current snapsho
   ]) {
     assert.ok(prompt.includes(knowledge.text));
     assert.equal(prompt.split(header).length - 1, 1);
-    assert.match(prompt, /NOT a customer reply request/);
-    assert.match(prompt, /Reply in Chinese \(中文\)/);
+    assert.match(prompt, /Sales conversation — follow the current request/);
+    assert.match(prompt, /natural Chinese sentences \(中文\), the verdict first/);
     assert.doesNotMatch(prompt, /\n\[Reply Language\]\n/);
   }
 });

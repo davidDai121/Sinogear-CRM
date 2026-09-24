@@ -90,11 +90,12 @@ function ContactTasksForContact({ contact, orgId }: Props) {
     setBusy(true);
     setError(null);
     const cleanTitle = title.trim();
+    const dueAtUtc = dueAt ? new Date(dueAt).toISOString() : null;
     const { error } = await supabase.from('tasks').insert({
       org_id: orgId,
       contact_id: contactId,
       title: cleanTitle,
-      due_at: dueAt || null,
+      due_at: dueAtUtc,
     });
     setBusy(false);
     if (error) {
@@ -103,7 +104,7 @@ function ContactTasksForContact({ contact, orgId }: Props) {
     }
     void logContactEvent(contactId, 'task_created', {
       title: cleanTitle,
-      due_at: dueAt || null,
+      due_at: dueAtUtc,
       source: 'manual',
     });
     setTitle('');

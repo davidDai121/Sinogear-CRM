@@ -172,3 +172,22 @@ test('followupPrompt 默认完整；传 includedEvidenceTexts 时只缩写同文
   const unmatched = followupPrompt(ctx, { includedEvidenceTexts: ['completely different text'] });
   assert.equal(JSON.parse(unmatched.slice(unmatched.lastIndexOf('\n') + 1)).evidence[0].text, long, '无法证明同文就不去重');
 });
+
+test('用途答复不因上一段旧报价而启动核价；老板口述车型和价格原文保留', () => {
+  const messages = [
+    msg('R08 Petrol 4WD Luxury: USD 15,100 FOB Shanghai. RoRo shipping reference: USD 7,000.\nAre you mainly looking for a vehicle for daily personal use, or something with more off-road/cargo capability?', true),
+    msg('Mainly for personal daily use yes !', false, 1),
+    msg('And I am comparing SUVs from China to curacao', false, 2),
+  ];
+  const salesGuidance = '在你们那边儿，锐放还是挺受欢迎的。如果我们运一台锐放过去，大概得23000美金，是混动的，不过这个皮卡其实更划算';
+  const sel = selectGptWorkflows({ messages, salesGuidance });
+  assert.deepEqual(sel, { freight: false, quote: false, reasons: [] });
+  for (const prompt of [buildFirstMessage({contact,messages,salesGuidance,useCustomGpt:true}),buildFollowUpMessage({contact,newMessages:messages,salesGuidance})]) {
+    assert.ok(prompt.includes(salesGuidance));
+    assert.ok(prompt.indexOf(salesGuidance) < prompt.indexOf('[Sales Workflow'));
+    assert.ok(!prompt.includes(QUOTE_HEADER) && !prompt.includes(FREIGHT_HEADER));
+    assert.ok(prompt.includes('[WhatsApp Reply]') && prompt.includes('[Client Record]'));
+  }
+  assert.ok(selectGptWorkflows({messages, salesGuidance:'重新算一下两台CIF总价'}).quote);
+  assert.ok(selectGptWorkflows({messages, discussionQuestion:'查一下到库拉索的运费'}).freight);
+});

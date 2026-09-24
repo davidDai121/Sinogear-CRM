@@ -31,7 +31,7 @@ test('first and follow-up preserve seller review intent instead of directing it 
 test('both discussion routes receive continuity rules and keep internal discussion format',()=>{
  for(const prompt of [discuss({ctx:{contact,messages,useCustomGpt:true},question:'成本重算'}),discuss({contact,newMessages:messages,question:'成本重算'})]){
   assert.equal(prompt.split(header).length-1,1);
-  assert.ok(prompt.includes('[Discussion — NOT a customer reply request]'));
+  assert.ok(prompt.includes('[Sales conversation — follow the current request]'));
   assert.ok(!prompt.includes('Reminder: output exactly three sections'));
  }
 });
@@ -47,5 +47,30 @@ test('all prompt entrypoints carry single-pass quoting and pending owner clarifi
   assert.match(prompt,/ONE-PASS QUOTING/);assert.match(prompt,/continues the pending instruction/);
   assert.doesNotMatch(prompt,/Leave WhatsApp Reply empty for this intermediate/);
   assert.match(prompt,/PHEV is supported/);
+ }
+});
+
+// 2026-09-23 Jaycee "Right" 实测：判断题默认 2–4 句、先判断再依据；只在讨论路径，生成路径不带
+test('discussion routes carry the 2-4 sentence judgment default; generate routes do not',()=>{
+ const q='客户回了 Right，我觉得不用再推了，你怎么看？先和我讨论，不要写给客户的新消息。';
+ for(const prompt of [discuss({ctx:{contact,messages,useCustomGpt:true},question:q}),discuss({contact,newMessages:messages,question:q})]){
+  assert.match(prompt,/by default 2–4 natural Chinese sentences \(中文\), the verdict first/);
+  assert.match(prompt,/No headings, numbered points, nested lists, restated known prices/);
+  assert.match(prompt,/Expand into structure only for a complex quote, a multi-option comparison, a risk review/);
+  assert.match(prompt,/“Right”, “OK”, a thumbs-up or a one-word answer is a low-information acknowledgement/);
+  assert.match(prompt,/not objecting is not accepting/);
+  assert.doesNotMatch(prompt,/answer directly in concise Chinese/);
+  assert.ok(prompt.indexOf(q)<prompt.indexOf('by default 2–4 natural Chinese sentences'));
+ }
+ for(const prompt of [first({contact,messages,useCustomGpt:true,salesGuidance:'你怎么看'}),follow({contact,newMessages:messages,salesGuidance:'你怎么看'})]){
+  assert.doesNotMatch(prompt,/by default 2–4 natural Chinese sentences/);
+  assert.match(prompt,/output exactly three sections/);
+ }
+});
+
+test('output reminder tells both reply routes to leave the reply empty instead of re-sending sent content',()=>{
+ for(const prompt of [first({contact,messages,useCustomGpt:true}),follow({contact,newMessages:messages}),first({contact,messages,useCustomGpt:true,salesGuidance:'跟他说柴油四驱就剩五台了'})]){
+  assert.match(prompt,/leave \[WhatsApp Reply\] empty instead of re-sending or paraphrasing sent content/);
+  assert.match(prompt,/let the CRM follow-up block carry the dated second follow-up/);
  }
 });
