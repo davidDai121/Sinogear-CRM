@@ -1236,6 +1236,23 @@ Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% 
 
 **教训**：先显示、后保存的界面里，**任何「显示即写库」的组件都会改掉后面保存步骤要核对的状态**——写库要排在同一请求的保存链之后，或者从冲突检查里排除本轮自己的写入。
 
+### 近期补完（2026-09-25）— Miles V3：客户正文拆成几条，业务员逐条填入
+
+**起点**：老板嫌 V2「聊起来累」，新做了成交导向的 Miles V3 技能（新插件，V2 和原有模板都没动；源码 `skill-updates/miles-v3-2026-09-25/`，已装进 Yang、Menglong 两个 ChatGPT 账号，CRM 模板 `2449827e` / `58385ca9`）。V3 要求 WhatsApp 正文像真人聊天那样拆成几条发（空行分隔，逼单和关键报价各自单独一条），老板选「一次填一条、业务员发出去再填下一条」（B 方案）。
+
+**根因**：V3 走的是面板「GPT 回复」卡片：`GPTReplySection` → `ReplyCard` → `fillWhatsAppCompose` 把整段填进输入框，业务员点发送，**不管模型分了几条，发出去都是一条**。`auto-reply.ts` 的 `sendTextReply` 是 Gem 自动回复那条路，跟 V3 无关。V2 和 Gem 的回复也用空行，但那是同一条消息里的段落，不能一刀切全拆。`fillWhatsAppCompose` 用 paste 注入，是**接在输入框已有内容后面**的，上一条没发出去就填下一条会粘成一条。
+
+**修法**：
+- `lib/reply-parts.ts` `splitReplyParts`：按空行（可夹空格）拆，条内单换行保留。
+- `gpt-template-routing.ts` `splitsCustomerMessages`：按模板信封里的技能 ID 判断，只有 `SPLIT_MESSAGE_SKILL_IDS` 里的 V3 插件拆条（照 `R08_SKILL_IDS` 的做法；没往信封加字段，因为信封按键名严格校验，加字段会让旧版扩展认不出模板）。判断用**生成这条回复的模板**（`status.templateId`），不用当前选中的。
+- `ReplyCard` 新增 `splitParts`：正文按条显示（第 n 条、已填打 ✓），主按钮「💬 填入第 n/N 条」，每条旁「填这条」，另有「整段填入」「从第 1 条重来」。填第 2 条起先用 `readWhatsAppComposeText`（`whatsapp-compose.ts` 新增）看输入框是否还有没发出去的字，有就弹窗确认。
+- `GPTReplySection.fillReply` 改为返回成没成功（每个提前退出返回 false），逐条模式只有真填进去才跳到下一条。每条单独 `recordFill`，发出去的每条消息都能各自归因。
+- 同批技能改到 0.1.2（`skill-updates/sino-gear-miles-v3-0.1.2.zip`，需在插件页「⋯ → Upload new version」更新两个账号）：没有报价数据时不承诺整理清单、客户到处问车时最后一条必须单独问一个 SPIN 问题、最后一条必须是推进动作、已经报过的价格不再重报。
+
+**验证**：`scripts/test-reply-parts.mjs` 4 例（拆条规则、V3 两个账号拆、V2 / R08 / 无信封 / 坏信封不拆）；`test:gpt-skill` 102、`test:gpt-followup` 31、`test:gpt-paragraphs` 15、routing 22 例全过；typecheck + build 通过。测试号 David 上实测（Menglong 浏览器、Miles V3 · Menglong 模板，只填不发）：拆成 3 条，逐条填入每次输入框只有那一条，「从第 1 条重来」只重置进度不动输入框，「整段填入」一次填全部。「输入框还有内容时填下一条」的确认框没有实机点过（原生 confirm 会卡住自动化）。
+
+**教训**：① 回复卡片是 Gem / GPT 共用的，**按模板开功能，别全局改**——V2 / Gem 的空行是段落，拆开发会把一条消息打散。② 往输入框「填」是接在后面的，任何连续填入的功能都要先确认上一段已经发出去。③ 新账号装了 V3 要把它的插件 ID 加进 `SPLIT_MESSAGE_SKILL_IDS`，否则那个账号的 V3 回复不会拆条。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1404,6 +1421,8 @@ WhatsApp 绿色主题：
 - **ChatGPT 技能自动化的身份只认插件 ID，不认名字**（2026-09-25，`gpt-skill.ts` / `gpt-automation.ts`）：@ 选择器里可能有同名的自建 GPT，插件 ID 可能是大写 `Plugin_`。改这块时保持「逐个试 + 忽略大小写比对 `app-mention-path` + 身份对上前绝不填客户上下文 + 发送前再核一次」。技能按 ChatGPT 账号安装、每个账号 ID 不同：Menglong 账号（Menglong、Sophia 的模板都用它）和 Yang 账号各一套，**插件升级要两个账号都上传，模板知识改动要 Menglong / Sophia / Yang 三套同步**
 - **ChatGPT 页面 DOM 以后还会变，排查先看实际结构**：2026-09-25 这版的关键锚点是输入框 `.ProseMirror[role=textbox]`、Chat/Work 切换 `[role=group][aria-label="Composer mode"]`、强度按钮 `data-composer-navigation-target="reasoning"`（文字可能带模型版本前缀如「5.6 Medium」）、回复 `[data-conversation-role="assistant"] ~ [data-chatgpt-selection-message-id]`、停止按钮 aria-label「Stop」。读回复时 `header`（草稿卡片标题栏）和 `[data-testid="chatgpt-citation"]` 必须跳过。CRM 只在当前模型是 Latest 或 GPT-5.6 Sol 时才发送，模型名单变了要改 `gpt-skill.ts`
 - **在被遮住/后台的 ChatGPT 标签页里调试，页面定时器会被压到约 1 分钟一次**（`document.visibilityState === 'hidden'`），用 `setTimeout` 的等待会超时；调试脚本要么让窗口可见，要么用 MessageChannel 做短等待、MutationObserver 等完成
+- **拆条填入只对 `SPLIT_MESSAGE_SKILL_IDS` 里的技能打开**（2026-09-25，`gpt-template-routing.ts`）：新账号装了 Miles V3（或以后别的要拆条的技能），插件 ID 要加进这个集合，否则回复照旧整段填入。V2、Gem、R08 的空行是段落，不要加进来
+- **「默认用哪个 GPT」在装了浏览器绑定的浏览器里看的是本机绑定，不是数据库 `is_default`**（`gpt-browser-binding.ts`，存在 chrome.storage.local）：Yang、Menglong 的模板都挂在同一个 CRM 账号下，靠每个浏览器「⋯ 更多 → 🧠 GPT 模板 → 本浏览器的 ChatGPT 入口」各选各的。绑定后那个浏览器**只能用绑定的两个模板**，想换成 V3 要在那里改，别去改数据库 `is_default`（改了会让没绑定的浏览器用上别的 ChatGPT 账号才有的插件）
 
 ## 用户偏好
 

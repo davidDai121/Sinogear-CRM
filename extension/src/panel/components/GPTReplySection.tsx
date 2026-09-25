@@ -46,7 +46,7 @@ import { extractFreightResearch } from '@/lib/freight-research';
 import { loadPersonalSalesWorkMemory as loadSalesWorkMemory, saveSalesWorkEntry, type SalesWorkMemory } from '@/lib/sales-work-memory';
 import { rememberSalesPreferences, saveSalesPreference, type SalesPreference, type PreferenceScope } from '@/lib/sales-preferences';
 import { loadGptApprovedKnowledge } from '@/lib/gpt-template-knowledge';
-import { resolveGptTemplateRoute, isConversationForGptTemplate } from '@/lib/gpt-template-routing';
+import { resolveGptTemplateRoute, isConversationForGptTemplate, splitsCustomerMessages } from '@/lib/gpt-template-routing';
 import { loadApplicableSalesFacts, omitTemplateSourcedFacts } from '@/lib/sales-facts';
 import { SalesFactsPanel } from './SalesFactsPanel';
 
@@ -1071,6 +1071,11 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     }, contact.id, selectedTemplate)
   );
 
+  // 生成这条回复的模板是否要求拆条发送（Miles V3）。按生成时的模板判断，不按当前选中的。
+  const resultTemplateId = status.kind === 'done' ? status.templateId ?? selectedTemplate?.id : undefined;
+  const resultTemplate = resultTemplateId ? templates.find((t) => t.id === resultTemplateId) : undefined;
+  const resultSplitsMessages = !!resultTemplate && splitsCustomerMessages(resultTemplate);
+
   const copyToClipboard = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -1079,31 +1084,32 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
     }
   };
 
-  const fillReply = async (text: string) => {
+  /** 返回 false = 没填进去（已经弹过提示）；逐条填入靠它决定要不要跳到下一条。 */
+  const fillReply = async (text: string): Promise<boolean> => {
     try {
       if (!templatesLoaded || !guidanceLoaded || !recoveryLoaded) {
         alert('正在核对当前客户与模板，请稍后再填入。');
-        return;
+        return false;
       }
       if (!routeContext) {
         alert('尚未核对当前客户的车型，请重新生成以确认回复模板后再填入。');
-        return;
+        return false;
       }
       if (staleResult) {
         alert('旧模板生成，请使用当前模板重新生成后再填入。');
-        return;
+        return false;
       }
       const wasDirty = wasReplyDirty(text);
       const cleanText = sanitizeReplyForCustomer(text);
       if (!cleanText) {
         alert('回复为空（GPT 没生成有效的 [WhatsApp Reply] 段）');
-        return;
+        return false;
       }
       if (wasDirty) {
         const ok = confirm(
           'GPT 的回复里夹了内部段落（[Strategy] / 备注 之类），已自动剥掉。确认要把净化后的版本发给客户？',
         );
-        if (!ok) return;
+        if (!ok) return false;
       }
       if (needsJump) {
         const query = contact.phone
@@ -1113,19 +1119,19 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
           const ok = await jumpToChat(query, { allowDeepLink: true, requireMatch: { phone:contact.phone, name:contact.name, waName:contact.wa_name, groupJid:contact.group_jid } });
           if (!ok) {
             alert('未能跳转到该聊天，请先手动打开后再点填入');
-            return;
+            return false;
           }
           await new Promise((r) => setTimeout(r, 800));
         }
       }
       if (!verifyHeaderMatches({ phone:contact.phone, name:contact.name, waName:contact.wa_name, groupJid:contact.group_jid })) {
         alert('当前聊天与这条回复的客户不一致，请打开正确聊天后再填入。');
-        return;
+        return false;
       }
       const ok = fillWhatsAppCompose(cleanText);
       if (!ok) {
         alert('找不到 WhatsApp 输入框，请确认聊天已打开');
-        return;
+        return false;
       }
       const logId = status.kind === 'done' ? status.logId : null;
       if (logId) {
@@ -1133,8 +1139,10 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       }
       // 归因 attribution：记下这次填入，syncMessages 写出站消息时匹配文本来标 ai_source
       void recordFill({ contactId: contact.id, source: 'gpt', text: cleanText, logId });
+      return true;
     } catch (err) {
       alert(stringifyError(err));
+      return false;
     }
   };
 
@@ -1457,6 +1465,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
               chatUrl={status.chatUrl}
               contact={contact}
               deferRecordApply={!!status.saving && pendingAction?.requestId === status.requestId}
+              splitParts={resultSplitsMessages}
               onFillReply={fillReply}
               onCopy={copyToClipboard}
             />
@@ -1550,7 +1559,9 @@ interface ResultViewProps {
   contact: ContactRow;
   /** Hold the profile auto-save until this run's follow-up is saved, or the follow-up sees its own write as a conflict. */
   deferRecordApply?: boolean;
-  onFillReply: (text: string) => void;
+  /** 生成这条回复的模板要求拆条发送（Miles V3） */
+  splitParts?: boolean;
+  onFillReply: (text: string) => Promise<boolean>;
   onCopy: (text: string) => void;
 }
 
@@ -1561,6 +1572,7 @@ function ResultView({
   chatUrl,
   contact,
   deferRecordApply,
+  splitParts = false,
   onFillReply,
   onCopy,
 }: ResultViewProps) {
@@ -1583,6 +1595,7 @@ function ResultView({
           label="💬 给客户的回复"
           reply={parsed.reply}
           existingTranslation={parsed.translation}
+          splitParts={splitParts}
           onFillReply={onFillReply}
           onCopy={onCopy}
         />

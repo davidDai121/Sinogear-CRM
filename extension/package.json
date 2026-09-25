@@ -16,7 +16,8 @@
     "migrate-old-pg": "node scripts/migrate-from-old-pg.mjs",
     "test:gpt-followup": "node --test scripts/test-gpt-followup.mjs scripts/test-client-record-defer.mjs",
     "test:chat-context": "node --test scripts/test-chat-context.mjs",
-    "test:freight-estimate": "node --test scripts/test-freight-estimate.mjs"
+    "test:freight-estimate": "node --test scripts/test-freight-estimate.mjs",
+    "test:reply-parts": "node --test scripts/test-reply-parts.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

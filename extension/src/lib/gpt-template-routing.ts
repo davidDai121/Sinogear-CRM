@@ -108,6 +108,19 @@ function templateSkill(template: { description?: string | null }) {
   catch { return undefined; } // Generation still fails closed in the knowledge loader.
 }
 
+// 要求把客户正文按空行拆成几条、由业务员逐条发送的技能（Miles V3）。
+// 技能按 ChatGPT 账号安装，每个账号 ID 不同：Yang、Menglong 各一个。新账号装了 V3 要把 ID 加进来。
+const SPLIT_MESSAGE_SKILL_IDS = new Set([
+  'plugin_97e03b69e63481918e6471104dfaea98',
+  'plugin_ce56f4d023848191aab8d1b9e79d19f7',
+]);
+
+export function splitsCustomerMessages(template: { description?: string | null }): boolean {
+  // 上传安装的插件在页面上是 Plugin_（大写 P），模板里存小写；hex ID 才是身份。
+  const skillId = templateSkill(template)?.id.toLowerCase();
+  return skillId !== undefined && SPLIT_MESSAGE_SKILL_IDS.has(skillId);
+}
+
 export function isR08Template(template: Template): boolean {
   const gptId = customGptId(template.gpt_url);
   const skillId = templateSkill(template)?.id;

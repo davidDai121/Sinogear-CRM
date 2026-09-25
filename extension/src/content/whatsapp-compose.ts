@@ -23,6 +23,18 @@ function findCompose(): HTMLElement | null {
 }
 
 /**
+ * 读当前聊天输入框里还没发出去的文字。找不到输入框返回 null。
+ *
+ * 填入是接在已有内容后面的（paste），逐条填入时要先确认上一条已经发出去，
+ * 否则两条会粘成一条。
+ */
+export function readWhatsAppComposeText(): string | null {
+  const input = findCompose();
+  if (!input) return null;
+  return (input.textContent ?? '').trim();
+}
+
+/**
  * 把文本填入当前聊天输入框。返回 true = 成功，false = 找不到输入框。
  *
  * 优先 paste 事件（保留 \n 换行 — WA 的 Lexical 输入框会渲染成 <br>）；
