@@ -306,12 +306,20 @@ function parseChange(
       throw new Error('History messages require business phone identity');
     }
     // 历史回填是尽力而为：一条畸形（系统消息、没 id/时间戳）只跳过，不能让整批 673 个会话 503 重试到死
-    const tryPush = (m: Record<string, any>, direction: 'inbound' | 'outbound', customer?: unknown) => {
+    const tryPush = (
+      m: Record<string, any>,
+      direction: 'inbound' | 'outbound',
+      customer?: unknown,
+      customerUserId?: unknown,
+      thread?: Record<string, any>,
+    ) => {
       try {
-        push(m, direction, customer);
+        push(m, direction, customer, customerUserId);
       } catch {
         ctx.skipped = (ctx.skipped ?? 0) + 1;
-        (ctx.skippedRaw ??= []).push({ business, message: m });
+        // 连同会话头（id / context）一起留底，否则事后看不出这条是发给谁的
+        const message = thread ? { ...m, _thread: { id: thread.id, context: thread.context } } : m;
+        (ctx.skippedRaw ??= []).push({ business, message });
       }
     };
     for (const chunk of value.history ?? []) {
@@ -323,7 +331,7 @@ function parseChange(
           const from = normalizePhone(String(m.from ?? ''));
           const dir = self && from === self ? 'outbound' : 'inbound';
           tryPush(m, dir, tPhone ?? (dir === 'inbound' && isPhoneLike(m.from) ? m.from : undefined),
-            tUser ?? (dir === 'inbound' ? m.from_user_id : undefined));
+            tUser ?? (dir === 'inbound' ? m.from_user_id : undefined), thread);
         }
       }
     }
