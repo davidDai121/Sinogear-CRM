@@ -823,10 +823,19 @@ async function typeAndSend(tabId: number, text: string, skill?: GptSkill): Promi
   // Recheck the immutable skill ID at the final send boundary.
   const clicked = await execute<boolean>(tabId, (skillId: string | null) => {
     if (skillId) {
-      const pills = document.querySelectorAll('#prompt-textarea [data-symbol="skillMention"], #prompt-textarea [data-symbol="ecosystemMention"]');
+      // Old composer: #prompt-textarea + data-symbol pills. 2026-09-25: .ProseMirror + app-mention-path.
+      const pills = document.querySelectorAll(
+        '#prompt-textarea [data-symbol="skillMention"], #prompt-textarea [data-symbol="ecosystemMention"], '
+        + '.ProseMirror[contenteditable="true"] [data-symbol="skillMention"], '
+        + '.ProseMirror[contenteditable="true"] [data-symbol="ecosystemMention"], '
+        + '.ProseMirror[contenteditable="true"] [app-mention-path]');
       const plugin = skillId.startsWith('plugin_');
-      if (pills.length !== 1 || pills[0].getAttribute('data-id') !== (plugin ? `plugin:${skillId}` : skillId)
-        || pills[0].getAttribute('data-symbol') !== (plugin ? 'ecosystemMention' : 'skillMention')) return false;
+      const pill = pills[0];
+      const matches = pills.length === 1 && (pill.hasAttribute('app-mention-path')
+        ? plugin && pill.getAttribute('app-mention-path')?.toLowerCase() === `app://${skillId}`
+        : pill.getAttribute('data-id') === (plugin ? `plugin:${skillId}` : skillId)
+          && pill.getAttribute('data-symbol') === (plugin ? 'ecosystemMention' : 'skillMention'));
+      if (!matches) return false;
     }
     const inputSels = [
       '#prompt-textarea',
@@ -962,13 +971,16 @@ export interface TurnAnchors {
  */
 async function readTurnAnchors(tabId: number): Promise<TurnAnchors> {
   return execute<TurnAnchors>(tabId, () => {
-    const lastIdOf = (sel: string): string | null => {
+    const lastIdOf = (sel: string, idAttr = 'data-message-id'): string | null => {
       const els = document.querySelectorAll(sel);
       if (els.length === 0) return null;
       const el = els[els.length - 1];
-      return el.getAttribute('data-message-id') ?? `count:${els.length}`;
+      return el.getAttribute(idAttr) ?? `count:${els.length}`;
     };
-    let lastAssistantId = lastIdOf('[data-message-author-role="assistant"]');
+    // 2026-09-25 版 DOM 没有 author-role：assistant 正文是 sr-only 角色标题后面那个带
+    // selection-message-id 的节点，user 是 search-unit-key 以 :user 结尾的节点
+    let lastAssistantId = lastIdOf('[data-message-author-role="assistant"]')
+      ?? lastIdOf('[data-conversation-role="assistant"] ~ [data-chatgpt-selection-message-id]', 'data-chatgpt-selection-message-id');
     if (lastAssistantId === null) {
       // 老版 DOM 没有 author-role 属性：退化为 prose 块个数
       const prose = document.querySelectorAll('.markdown.prose, div.prose').length;
@@ -976,7 +988,8 @@ async function readTurnAnchors(tabId: number): Promise<TurnAnchors> {
     }
     return {
       lastAssistantId,
-      lastUserId: lastIdOf('[data-message-author-role="user"]'),
+      lastUserId: lastIdOf('[data-message-author-role="user"]')
+        ?? lastIdOf('[data-chatgpt-search-unit-key$=":user"]', 'data-chatgpt-search-message-ids'),
       generating: !!document.querySelector(
         'button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止"]',
       ),
@@ -1050,10 +1063,13 @@ async function waitForResponse(
         );
         if (stopBtn) return true;
         const els = document.querySelectorAll('[data-message-author-role="assistant"]');
+        const current = document.querySelectorAll('[data-conversation-role="assistant"] ~ [data-chatgpt-selection-message-id]');
         let curId: string | null = null;
         if (els.length > 0) {
           curId =
             els[els.length - 1].getAttribute('data-message-id') ?? `count:${els.length}`;
+        } else if (current.length > 0) {
+          curId = current[current.length - 1].getAttribute('data-chatgpt-selection-message-id') ?? `count:${current.length}`;
         } else {
           const prose = document.querySelectorAll('.markdown.prose, div.prose').length;
           curId = prose > 0 ? `prose:${prose}` : null;

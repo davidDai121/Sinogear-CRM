@@ -1192,6 +1192,35 @@ Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% 
 
 **教训**：① Meta 的身份字段在变（phone → BSUID），**任何「必须有手机号」的假设都要有 user id 兜底**，而且用户 ID 里有数字，`normalizePhone` 这类「剥非数字」函数会把它变成假手机号——先判形状再归一化。② 计数面板要写清口径：推送次数 ≠ 消息条数。③ 失败载荷留底 + 可重放脚本，让「修完 bug 补数据」变成一条命令。
 
+### 近期补完（2026-09-25）— ChatGPT 改版适配：输入框、回复读取、思考强度、草稿卡片、引用标记（「ChatGPT 技能输入框缺失」会话）
+
+**起点**：ChatGPT 网页改版后旧扩展找不到输入框、读不到回复，业务员的 GPT 回复整体用不了；借模型对比评测（Latest vs GPT-5.6 Sol，R08 技能、最高强度、同一份 CRM 提示词，4 个真实场景）又抓到 4 个 CRM 问题。
+
+**修法**（`gpt-automation.ts` / `gpt-response-dom.ts` / `gpt-skill.ts` / `gpt-template-routing.ts` / `GPTTemplatesModal.tsx` / `gpt-prompt.ts`）：适配新版输入框和回复 DOM；思考强度按钮显示成「5.6 Medium」这类带版本号的标签也能认；模型菜单折叠视图也能选；**ChatGPT 把回复放进「草稿卡片」时，卡片标题「WhatsApp Reply」不再被当成正文**（否则点填入会发给客户）；新版引用标记不再以「网站名: 网址」混进正文；去掉「策略最多 5 行」限制；Yang 账号改用自己的插件（ID 不同于 Menglong）。老板定：模型用 Latest + 最高强度（Menglong、Yang 已设；Sophia 的两个模板发布当天切最高强度）。
+
+**验证**：该会话 102 个相关测试全过；2026-09-25 在 CRM 里用测试号 David 实测生成一次（与运费估算联测）：CRM 自己打开 ChatGPT、选技能、读回复成功。
+
+**教训**：ChatGPT 网页会不定期改版，读回复一律按「消息 → 正文」结构取，**卡片标题、引用标记、按钮标签都不能当正文**；草稿卡片标题混进正文是会直接发给客户的 P0。
+
+### 近期补完（2026-09-24 ~ 2026-09-25）— 运费改由 CRM 估算：物流巴巴 API + 货代规则 + 按客户国家加价
+
+**起点**：老板看 Franklin（多米尼加，R08 EV 505）那条 ChatGPT 对话，问「看看这个聊天」。GPT 第一轮没查运费就说「会把 CIF 发你」，第二轮查到三个价却选了过期的 Flexport 10,975（有效期 9/8）还称「最高」（最高是 ZIM 12,665）；CRM 校验拦下后发「格式纠正」，GPT 回「没有有效证据」；点「取回生成结果」又把同一条旧结果跑了一遍纠正。老板随后问「要不要把查运费单独拿出来」「我感觉运费报高了」，最后定：不再每月问货代、不跑微信，估价要**比实际贵但别超 1,000**。
+
+**根因（实测）**：
+- 纠正机制对「运费过期」注定失败：`quote-workflow.ts` 要求纠正前后金额/来源/日期完全一致，而修过期运费唯一的办法就是换来源。「取回生成结果」注释说不调 GPT，但核算失败会走纠正分支再调一次。
+- 运费本身不稳：一周 20 个客户 30 个报价方案，GPT 每次现查、现挑、现加各项费用，对照货代实价（海纳 EMC 20GP 全包 10,800）偏差 −2,242 ~ +4,323，**hugolembcke、Jose francisco 两单低于成本已发出**。
+- 平台价 ≠ 报价：海纳 EMC 平台 20GP 8,080 + 港杂 ≈ 8,300，货代全包 10,800；运价变化快（海纳 EMC 20GP 6 月 8,210 → 7–8 月 10,925 → 9/24 8,080），旧货代价不能直接用。
+- 用微信群「鑫齿海运询价群」9/10–9/21 货代全包价检验几种算法：「平台最高价 + 每柜 $400」9 条里 7 条落在 [0, +1000]、0 条低估；货代经验「最高价 + 每台 ¥2,000」只 4 条（一柜多台按台加多了）；「最低价 + 2,500」平均误差 21.9%。
+
+**修法**：
+- **Edge Function `freight-rate-lookup`**（新）：物流巴巴开放平台 API（HMAC-SHA256 签名，密钥 `AWICE_APP_KEY/SECRET` 只在 Supabase secrets），action `estimate / refresh / search`。估算 = 平台当前**最高**有效价（海运 + 起运港杂，人民币按 open.er-api.com 当日汇率折美元）+ 每柜 $400 + 电车/插混危险品 $600；有「同周」货代全包价的航线改用差额校准 + 5% 缓冲。装柜：一台 20GP、两台一个 40HQ，不拼柜。报价时平台价超过 3 天或全部过期就现查（1 积分）。返回 `pricing`：按**客户**国家分档加价（高收入 1000 / 中高 750 / 中低及低 500，内陆国客户走邻国港仍按本国）+ 每台保险 $100。纯计算在 `estimate.ts`，`scripts/test-freight-estimate.mjs` 11 例。支持 OPTIONS 预检（扩展从 WhatsApp 页面调）。
+- **migrations 0047–0051**（已应用）：`freight_routes`（84 条：30 条 weekly 每周一刷、54 条 on_demand 报价时才查）/ `freight_rate_snapshots`（只增不改，留历史）/ `freight_calibrations`（货代全包价，海纳 10,800 原始日期 9/3 缺同周平台价，不参与校准）/ `freight_settings`（每柜 400、危险品 600、保险 100、默认加价 500）/ `freight_country_markup`（92 个国家分档）。pg_cron `freight-rate-refresh` 每周一 01:13 UTC。
+- **扩展**：GPT 不再上网查运费。`freight-research.ts` 的模块改成「运费由 CRM 估算」（标题行保留，workflow-selection 测试靠它判断）；`QUOTE_WORKFLOW` 改成 plan 里写 `freight={"kind":"crm_estimate","port","country"}`、`containers/insurance=null`，老板本单给的运费/滚装价仍用 `owner_estimate`（保险按每台 100）。`quote-workflow.ts` 新增 `resolveCrmFreight`：GPT 输出后、`calculateQuote` 前调估算填对客运费（成本 + 加价，`dgIncluded/groundIncluded=true` 不再叠加 DG/港杂）和保险；估算失败直接报「运费估算失败：原因」，不走格式纠正；纠正提示给模型看的是它自己写的未填输入。`lib/crm-freight.ts` 用业务员 JWT 调函数；报价版本多存一份 `freightEstimates`（内部核对，不进任何给模型/客户的文本）。
+
+**验证**：typecheck + build 通过；33 个测试文件全过（`test-quote-calculation` 新增 4 例：CRM 填运费和保险且不叠加 DG/港杂/10%、按方案传台数和动力、估算失败/滚装/缺港口给明确原因、owner_estimate 不被改动）。线上函数实测：几内亚客户科纳克里 1 台燃油对客运费 8,422 + 保险 100；玻利维亚客户经阿里卡按玻利维亚 500 加价；「Puerto de Arica, Chile」「Rio Haina, Dominican Republic」都能认到港口；OPTIONS 预检 200。70 个新港口探测 67 个有价（利伯维尔、圣多美、图阿马西纳平台没有）。
+
+**教训**：① 「格式纠正」只能修格式，**数据过期/证据缺失类错误不要走纠正**，直接报原因；否则模型要么说没证据、要么改金额被拦，白跑一轮还把对话搞乱。② 运费这种会变的数字不能交给模型每轮现挑——同一条线一周就变 10%，模型每次挑的来源、柜型、加项都不一样。确定性的数由代码出，模型只写话术。③ 平台挂牌价、货代全包价、对客报价是三层数，校准只能用**同一周**的平台价和货代价相减。④ 物流巴巴积分：每条航线每次 1 积分（无运价不扣），余额看控制台 Plans 页别为查余额调 API；`dict/popular` 免费不限次，加港口先用它查覆盖。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换
@@ -1353,6 +1382,10 @@ WhatsApp 绿色主题：
 - **测试共存推送不要点 Meta webhook 页的 Test 按钮**：样例载荷会往正式库建假客户
 
 - **隐藏号码客户只有 `wa_user_id` 没有 phone**（2026-09-24，0046）：`contacts.phone` 可能为 NULL 且不是群（`group_jid` 也 NULL）。按 phone 做的功能（jumpToChat、Google 同步、CAPI 手机号哈希）对这类客户都拿不到号，走 `phone ?? 兜底`；判群一律看 `group_jid`，别用 `!phone`
+- **报价里的运费一律走 CRM 估算，不要让 GPT 自己查或自己写运费数**（2026-09-25，`quote-workflow.ts resolveCrmFreight` + `freight-rate-lookup`）：plan 写 `freight={"kind":"crm_estimate","port","country"}`，CRM 填对客运费（成本 + 按客户国家加价）和每台 $100 保险，`dgIncluded/groundIncluded=true`，所以 `calculateQuote` 不会再叠加 DG 1000/柜和港杂 ¥2000/3000。**加价和成本绝不能进给模型或客户的文本**——估算原始返回只存在 `QuoteVersion.freightEstimates`，`freight.source` 只写港口和平台日期
+- **运费估算失败不是格式问题**：港口平台没运价、积分用完、网络错，都直接报「运费估算失败：原因」，别让它进「格式纠正」分支
+- **物流巴巴 API 积分会用完**：入门包 1,500 积分到 2027-03-24；每周刷 30 条 weekly 航线 + 报价时现查。用完后刷新和现查都会失败（航线 `last_error`），估价在平台价过期后停止——要在控制台续费。加新港口先用免费的 `dict/popular` 查覆盖，别逐条探测
+- **加价分档表 `freight_country_markup` 用 `contacts.country` 的英文写法匹配**（如 `Côte d'Ivoire`、`DR Congo`、`UAE`），找不到按目的港国家、再找不到按默认 500。CRM 里出现新的国家写法要补进表
 
 ## 用户偏好
 

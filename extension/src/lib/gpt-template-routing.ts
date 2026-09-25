@@ -10,7 +10,8 @@ import { browserAllowsTemplate, type GptBrowserBinding } from './gpt-browser-bin
 export const R08_GPT_ID = 'g-6aa7711ad9cc8191aa3d3693cfd7ad9f';
 export const MENGLONG_R08_GPT_ID = 'g-6aaff2e20f848191a17b81f6786cdebe';
 const R08_GPT_IDS = new Set([R08_GPT_ID, MENGLONG_R08_GPT_ID]);
-const R08_SKILL_IDS = new Set([R08_SKILL_ID, 'plugin_5e838f5f90dc81919776e122e642836e']);
+// R08 plugin installed in Menglong's ChatGPT account, then in Yang's (2026-09-25).
+const R08_SKILL_IDS = new Set([R08_SKILL_ID, 'plugin_5e838f5f90dc81919776e122e642836e', 'plugin_be083c80ae4c81919339c7e557170738']);
 
 interface Template {
   id: string;

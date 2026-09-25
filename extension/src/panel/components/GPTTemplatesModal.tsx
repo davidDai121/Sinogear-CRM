@@ -3,7 +3,7 @@ import { supabase } from '@/lib/supabase';
 import type { Database } from '@/lib/database.types';
 import { stringifyError } from '@/lib/errors';
 import { decodeGptTemplateDescription, encodeGptTemplateDescription } from '@/lib/gpt-template-knowledge';
-import { validateGptSkill } from '@/lib/gpt-skill';
+import { validateGptSkill, type GptThinkingEffort } from '@/lib/gpt-skill';
 import { GPTBrowserSettings } from './GPTBrowserSettings';
 
 type GptTemplateRow = Database['public']['Tables']['gpt_templates']['Row'];
@@ -260,7 +260,7 @@ function TemplateForm({
     useSkill: !!metadata.value?.skill,
     skillId: metadata.value?.skill?.id ?? '',
     skillName: metadata.value?.skill?.name ?? '',
-    highThinking: metadata.value?.skill?.thinkingEffort === 'high',
+    thinkingEffort: (metadata.value?.skill?.thinkingEffort ?? '') as GptThinkingEffort | '',
     is_default: template?.is_default ?? !hasDefault,
   });
   const [busy, setBusy] = useState(false);
@@ -288,7 +288,7 @@ function TemplateForm({
         metadata.value?.hasEnvelope,
         new Date().toISOString(),
         draft.useSkill ? validateGptSkill({ id: draft.skillId.trim(), name: draft.skillName.trim(),
-          ...(draft.highThinking && draft.skillId.trim().startsWith('plugin_') ? { thinkingEffort: 'high' } : {}) }) : undefined,
+          ...(draft.thinkingEffort && draft.skillId.trim().startsWith('plugin_') ? { thinkingEffort: draft.thinkingEffort } : {}) }) : undefined,
       );
       let savedTemplateId: string;
       if (template) {
@@ -361,10 +361,14 @@ function TemplateForm({
       </label>
 
       {draft.useSkill ? <>
-        {draft.skillId.trim().startsWith('plugin_') && <label className="sgc-field sgc-field-full sgc-checkbox-row">
-          <input type="checkbox" checked={draft.highThinking}
-            onChange={(e) => setDraft({ ...draft, highThinking: e.target.checked })} />
-          <span>固定使用 Chat High（不使用 Pro 模型）</span>
+        {draft.skillId.trim().startsWith('plugin_') && <label className="sgc-field sgc-field-full">
+          <span>思考强度（普通 Chat，不使用 Pro 模型）</span>
+          <select value={draft.thinkingEffort}
+            onChange={(e) => setDraft({ ...draft, thinkingEffort: e.target.value as GptThinkingEffort | '' })}>
+            <option value="">不固定（沿用 ChatGPT 当前设置）</option>
+            <option value="high">High</option>
+            <option value="extra_high">Extra High</option>
+          </select>
         </label>}
         <label className="sgc-field sgc-field-full">
           <span>技能名称（ChatGPT 中显示的名称）</span>

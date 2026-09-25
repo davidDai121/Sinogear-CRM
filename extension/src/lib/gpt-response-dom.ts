@@ -16,24 +16,31 @@ export function readGptResponseSnapshot(prevId: string | null): GptResponseSnaps
   const stopBtn = document.querySelector(
     'button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止" i]',
   );
-  const assistantEls = document.querySelectorAll('[data-message-author-role="assistant"]');
+  // 2026-09-25 markup has no author-role: the assistant body is the node carrying
+  // data-chatgpt-selection-message-id right after a screen-reader role heading.
+  const legacyEls = document.querySelectorAll('[data-message-author-role="assistant"]');
+  const legacy = legacyEls.length > 0;
+  const assistantEls = legacy ? legacyEls
+    : document.querySelectorAll('[data-conversation-role="assistant"] ~ [data-chatgpt-selection-message-id]');
+  const idAttr = legacy ? 'data-message-id' : 'data-chatgpt-selection-message-id';
   const proseEls = document.querySelectorAll('.markdown.prose, div.prose');
   const last = assistantEls.length > 0
     ? assistantEls[assistantEls.length - 1]
     : proseEls[proseEls.length - 1];
   const curId = assistantEls.length > 0
-    ? last.getAttribute('data-message-id') ?? `count:${assistantEls.length}`
+    ? last.getAttribute(idAttr) ?? `count:${assistantEls.length}`
     : proseEls.length > 0 ? `prose:${proseEls.length}` : null;
 
   // Only use completion controls belonging to this turn, not an old response.
   // The whole action bar (copy / thumbs / regenerate) only renders once the turn
   // is complete, so any of its buttons is a completion signal; the copy button
   // alone was missed in canvas/writing-block layouts and background tabs.
-  const turn = last?.closest('[data-testid^="conversation-turn-"], article') ?? last;
-  const copyBtn = turn?.querySelector(
+  // Code blocks and writing cards carry their own Copy buttons mid-stream; they are not turn controls.
+  const turn = last?.closest('[data-testid^="conversation-turn-"], article, [data-turn-key]') ?? last;
+  const copyBtn = Array.from(turn?.querySelectorAll(
     'button[data-testid="copy-turn-action-button"], button[data-testid*="copy" i], button[aria-label*="Copy" i], button[aria-label*="复制" i], '
     + 'button[data-testid*="good-response" i], button[data-testid*="thumbs" i], button[aria-label*="Good response" i], button[aria-label*="Regenerate" i], button[aria-label*="重新生成" i]',
-  );
+  ) ?? []).find(btn => !btn.closest('pre, [data-markdown-copy], header'));
   const state = { generating: !!stopBtn, hasCopyBtn: !!copyBtn, content: '' };
   if (!last || curId === null || curId === prevId) return state;
 
@@ -49,6 +56,12 @@ export function readGptResponseSnapshot(prevId: string | null): GptResponseSnaps
     '[data-writing-block-fullscreen-header-chrome="true"]',
     // Search citations are UI chrome, not links offered in the customer message.
     '[data-testid="webpage-citation-pill"]',
+    '[data-testid="chatgpt-citation"]', // 2026-09-25 markup
+    // 2026-09-25 code-block header (language label, copy/wrap controls).
+    '[data-markdown-copy="exclude"]',
+    // 2026-09-25 writing-card title bar ("WhatsApp Reply", library/copy/editor buttons).
+    // Markdown never renders <header>, so this is always UI chrome.
+    'header',
   ].join(',');
 
   function read(node: Node): string {

@@ -15,7 +15,8 @@
     "package": "node scripts/package.mjs",
     "migrate-old-pg": "node scripts/migrate-from-old-pg.mjs",
     "test:gpt-followup": "node --test scripts/test-gpt-followup.mjs",
-    "test:chat-context": "node --test scripts/test-chat-context.mjs"
+    "test:chat-context": "node --test scripts/test-chat-context.mjs",
+    "test:freight-estimate": "node --test scripts/test-freight-estimate.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

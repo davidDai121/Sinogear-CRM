@@ -132,3 +132,32 @@ test('invalid private placeholder repairs once and cannot leak internal amounts'
  assert.equal(calls,1);assert.doesNotMatch(r.text,/internalProfit|\{\{/);
  await assert.rejects(complete(draft,'reply',async()=>{throw Error('Should not run')},now),/缺少计算输入/);
 });
+
+// 2026-09-25 起：GPT 只写 freight={kind:'crm_estimate',port,country}，CRM 调运费估算填对客运费 + 每台保险
+function crmFixture(extra={}){return {schema:'quote-input.v1',origin:'Shanghai',destination:'Conakry',fx:null,plans:[{label:'一台',model:'R08 汽油 2.4L 5MT 两驱',quantity:1,propulsion:'fuel',shippingMode:'container',containers:null,loadingBasis:'一台一个 20GP',vehicle:{basis:'approved_fob',amount:'12200',currency:'USD',source:'R08 批准价',groundIncluded:false},freight:{kind:'crm_estimate',port:'Conakry',country:'GN'},profit:null,groundOverride:null,insurance:null,fixedSelling:null,...extra}]};}
+const fakeResolver=(calls=[])=>async req=>{calls.push(req);return {customerFreightTotalUsd:8422,insuranceTotalUsd:100*req.quantity,containers:1,checkedAt:'2026-09-17T12:00:00Z',validUntil:'2026-10-07',source:'CRM 运费估算 科纳克里（GNCON）',raw:{ok:true}};};
+const draft=x=>'[WhatsApp Reply]\nCIF Conakry: USD {{quote.1.totalUsd}} (USD {{quote.1.perVehicleUsd}} per vehicle).\n[Full Translation & Strategy]\n到科纳克里 CIF 参考价 {{quote.1.totalUsd}}。\n<quote_input>'+JSON.stringify(x)+'</quote_input>';
+test('crm_estimate: CRM fills customer freight and fixed insurance; no DG, ground or 10% on top',async()=>{
+ const calls=[];const r=await complete(draft(crmFixture()),'reply',async()=>{throw Error('no second GPT pass')},now,fakeResolver(calls));
+ assert.deepEqual(calls,[{port:'Conakry',country:'GN',quantity:1,propulsion:'fuel'}]);
+ const [p]=r.result;assert.equal(p.oceanUsd,'8422.00');assert.equal(p.dgUsd,'0.00');assert.equal(p.groundCny,'0.00');assert.equal(p.insuranceUsd,'100.00');
+ assert.equal(p.totalUsd,'20722.00');// 12,200 + 8,422 + 100
+ assert.match(r.text,/USD 20,722\.00/);assert.equal(r.input.plans[0].freight.kind,'crm_estimate');assert.equal(r.freightEstimates.length,1);
+});
+test('crm_estimate: resolver gets propulsion and quantity per plan; insurance scales with cars',async()=>{
+ const calls=[];const x=crmFixture({quantity:2,propulsion:'bev',model:'R08 EV505'});x.plans[0].vehicle.amount='26400';
+ const r=await complete(draft(x),'reply',async()=>'',now,fakeResolver(calls));
+ assert.equal(calls[0].quantity,2);assert.equal(calls[0].propulsion,'bev');assert.equal(r.result[0].insuranceUsd,'200.00');
+});
+test('crm_estimate failures give a clear reason instead of a format correction',async()=>{
+ await assert.rejects(complete(draft(crmFixture()),'reply',async()=>{throw Error('no correction pass')},now),/没有接估算服务/);
+ await assert.rejects(complete(draft(crmFixture()),'reply',async()=>{throw Error('no correction pass')},now,async()=>{throw new Error('平台没有这条航线的运价')}),/运费估算失败：平台没有这条航线的运价/);
+ await assert.rejects(complete(draft(crmFixture({shippingMode:'roro'})),'reply',async()=>'',now,fakeResolver()),/滚装需要老板给运费/);
+ const noPort=crmFixture();noPort.plans[0].freight={kind:'crm_estimate'};
+ await assert.rejects(complete(draft(noPort),'reply',async()=>'',now,fakeResolver()),/没写目的港/);
+});
+test('owner_estimate plans are untouched by the CRM resolver',async()=>{
+ const calls=[];const x=fixture();x.plans[0].freight.kind='owner_estimate';
+ const r=await complete('[WhatsApp Reply]\nUSD {{quote.1.totalUsd}} / {{quote.1.perVehicleUsd}}\n[Full Translation & Strategy]\n<quote_input>'+JSON.stringify(x)+'</quote_input>','reply',async()=>'',now,fakeResolver(calls));
+ assert.equal(calls.length,0);assert.equal(r.result[0].totalUsd,'63159.14');
+});

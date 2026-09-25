@@ -94,15 +94,21 @@ test('selects a real pill, preserves full long prompt, serialized function needs
     assert.equal(inserted[1], '\n' + prompt);
   });
 });
-for (const mode of ['missing', 'wrong', 'duplicate', 'dropped', 'truncated']) {
+for (const mode of ['missing', 'wrong', 'dropped', 'truncated']) {
   test(`composer ${mode} fails before send; missing or wrong skill never receives customer text`, async () => {
     await composerCase(mode, async ({ inserted }) => {
       const result = await fillGptSkillPrompt(skill, 'CRM 私有客户上下文与报价，本轮不能丢失。');
       assert.equal(result.ok, false); assert.ok(result.error);
-      if (['missing', 'wrong', 'duplicate'].includes(mode)) assert.equal(inserted.length, 1);
+      if (['missing', 'wrong'].includes(mode)) assert.ok(inserted.every(t => t.startsWith('@')));
     });
   });
 }
+test('same-name items are accepted only by the exact pill identity', async () => {
+  await composerCase('duplicate', async ({ input }) => {
+    assert.deepEqual(await fillGptSkillPrompt(skill, '上下文'), { ok: true });
+    assert.equal(input.querySelectorAll('[data-symbol]').length, 1);
+  });
+});
 
 test('Work skill response markup preserves empty NO_REPLY body and detects only current completion', () => {
   const { document } = parseHTML(`<html><body>
@@ -150,12 +156,12 @@ test('Chat plugin preserves mode, exact identity and full long context without m
       const serialized = new Function(`return (${fillGptSkillPrompt.toString()})`)();
       const prompt = 'CRM 历史客户消息与销售指令\n'.repeat(500);
       const result = await serialized(plugin, prompt);
-      assert.equal(result.ok, mode === 'ok');
-      if (mode === 'ok') {
-        assert.equal(inserted[1], '\n' + prompt);
+      assert.equal(result.ok, ['ok', 'duplicate'].includes(mode));
+      if (result.ok) {
+        assert.equal(inserted.at(-1), '\n' + prompt);
         assert.equal(input.querySelector('[data-symbol="ecosystemMention"]').getAttribute('data-id'), `plugin:${plugin.id}`);
       } else assert.ok(result.error);
-      if (['wrong', 'missing', 'duplicate'].includes(mode)) assert.equal(inserted.length, 1);
+      if (['wrong', 'missing'].includes(mode)) assert.ok(inserted.every(t => t.startsWith('@')));
     }, plugin);
   }
 });
@@ -228,4 +234,219 @@ test('waits for delayed surface controls before selecting a plugin', async () =>
   try{const serialized=new Function('return ('+fillGptSkillPrompt.toString()+')')();const result=await serialized(plugin,'测试');assert.equal(result.ok,!['missing','pro'].includes(mode));if(result.ok)assert.equal(effort.textContent,'High');}
   finally{globalThis.KeyboardEvent=old;globalThis.PointerEvent=oldPointer;}
  },plugin);
+});
+
+// 2026-09-25 ChatGPT markup observed in the browser: no #prompt-textarea, a
+// "Composer mode" button group, mention buttons without plugin markers, plugins
+// insert [app-mention-path], and a same-name custom GPT becomes a footer chip.
+const v2 = { id: 'plugin_bd1c07b572d08191882a68116ab63a17', name: 'Sino Gear Miles V2', thinkingEffort: 'high' };
+async function currentComposerCase(items, run, { work = false, chatSwitches = true, effort = 'Medium', modelTag = '', compact = false } = {}) {
+  const { window } = parseHTML(`<html><body><div role="group" aria-label="Composer mode">
+    <button aria-pressed="${!work}">Chat</button><button aria-pressed="${work}">Work</button></div>
+    <form><div class="ProseMirror" contenteditable="true" role="textbox"></div><div id="footer"></div>
+    <button type="button" aria-haspopup="menu" id="radix-1"><span class="sr-only">Thinking effort</span>${modelTag ? `<span>${modelTag}</span> ` : ''}<span>${effort}</span></button></form></body></html>`);
+  const { document } = window;
+  const old = { window: globalThis.window, document: globalThis.document, setTimeout: globalThis.setTimeout, now: Date.now,
+    KeyboardEvent: globalThis.KeyboardEvent, PointerEvent: globalThis.PointerEvent };
+  Object.assign(globalThis, { window, document });
+  globalThis.PointerEvent = window.Event;
+  globalThis.KeyboardEvent = class extends window.Event { constructor(type, init) { super(type, init); this.key = init.key; } };
+  window.Element.prototype.getBoundingClientRect = () => ({ width: 100, height: 30 });
+  const input = document.querySelector('.ProseMirror');
+  const [chat, work2] = document.querySelectorAll('[aria-label="Composer mode"] button');
+  chat.addEventListener('click', () => { if (chatSwitches) { chat.setAttribute('aria-pressed', 'true'); work2.setAttribute('aria-pressed', 'false'); } });
+  const effortBtn = document.querySelector('#radix-1');
+  effortBtn.addEventListener('pointerdown', () => {
+    const menu = document.createElement('div'); menu.setAttribute('role', 'menu'); menu.setAttribute('aria-labelledby', 'radix-1');
+    const level = ['Instant', 'Medium', 'High', 'Extra High'].indexOf(effortBtn.lastElementChild.textContent);
+    const models = '<div role="menuitemradio" aria-checked="true">Latest</div>';
+    menu.innerHTML = `<div role="menuitem" data-model-picker-view-toggle="true">${effortBtn.lastElementChild.textContent}</div><div role="menuitem" aria-label="Power"></div><span role="slider" aria-valuemax="3" aria-valuenow="${level}"></span>${compact ? '' : models}`;
+    menu.querySelector('[data-model-picker-view-toggle]').addEventListener('click', () => menu.insertAdjacentHTML('beforeend', models));
+    const power = menu.querySelector('[aria-label="Power"]'), slider = menu.querySelector('[role="slider"]'); power.focus = () => {};
+    power.addEventListener('keydown', e => {
+      if (e.key.startsWith('Arrow')) {
+        const n = Number(slider.getAttribute('aria-valuenow')) + (e.key === 'ArrowRight' ? 1 : -1);
+        slider.setAttribute('aria-valuenow', n); effortBtn.lastElementChild.textContent = ['Instant', 'Medium', 'High', 'Extra High'][n];
+      } else if (e.key === 'Enter') menu.remove();
+    });
+    document.body.append(menu);
+  });
+  let collapsed = false;
+  document.createRange = () => ({ selectNodeContents() { collapsed = false; }, collapse() { collapsed = true; } });
+  window.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
+  input.focus = () => {};
+  const inserted = [];
+  const chips = () => document.querySelectorAll('#footer button');
+  document.execCommand = (_cmd, _ui, text) => {
+    inserted.push(text);
+    if (collapsed) { input.append(document.createTextNode(text)); return true; }
+    input.innerHTML = `<p>${text}</p>`;
+    document.querySelector('[data-mention-list-scroll-area]')?.remove();
+    const list = document.createElement('div'); list.setAttribute('data-mention-list-scroll-area', '');
+    for (const kind of items) {
+      const item = document.createElement('button'); item.setAttribute('data-list-navigation-item', 'true');
+      item.innerHTML = '<div><span></span><span><span><span class="shrink-0">Sino Gear Miles V2</span><span>描述</span></span></span></div>';
+      item.addEventListener('click', () => {
+        list.remove();
+        if (kind === 'chip') {
+          const chip = document.createElement('button'); chip.setAttribute('aria-label', 'Remove Sino Gear Miles V2');
+          chip.addEventListener('click', () => chip.remove());
+          document.querySelector('#footer').append(chip); input.innerHTML = '<p></p>';
+        } else {
+          const id = kind === 'wrong' ? 'plugin_' + 'a'.repeat(32) : kind === 'upper' ? v2.id.replace('plugin_', 'Plugin_') : v2.id;
+          input.innerHTML = `<p><span app-mention-path="app://${id}" contenteditable="false"><span>Sino Gear Miles V2</span></span> </p>`;
+        }
+      });
+      list.append(item);
+    }
+    document.body.append(list);
+    return true;
+  };
+  let time = 0;
+  Date.now = () => time += 250;
+  globalThis.setTimeout = fn => { fn(); return 0; };
+  try { await run({ input, inserted, chips, effortBtn, chat }); }
+  finally {
+    Object.assign(globalThis, { window: old.window, document: old.document, setTimeout: old.setTimeout,
+      KeyboardEvent: old.KeyboardEvent, PointerEvent: old.PointerEvent });
+    Date.now = old.now;
+  }
+}
+const serializedFill = () => new Function(`return (${fillGptSkillPrompt.toString()})`)();
+
+test('2026-09-25 composer: skips a same-name GPT chip, keeps exact plugin pill, sets High', async () => {
+  await currentComposerCase(['chip', 'pill'], async ({ input, inserted, chips, effortBtn }) => {
+    const prompt = 'CRM 客户上下文\n'.repeat(300);
+    assert.deepEqual(await serializedFill()(v2, prompt), { ok: true });
+    assert.equal(input.querySelector('[app-mention-path]').getAttribute('app-mention-path'), `app://${v2.id}`);
+    assert.equal(chips().length, 0);
+    assert.equal(inserted.filter(t => !t.startsWith('@')).length, 1);
+    assert.equal(inserted.at(-1), '\n' + prompt);
+    assert.equal(effortBtn.lastElementChild.textContent, 'High');
+  });
+});
+
+for (const items of [['chip'], ['wrong'], ['wrong', 'chip'], []]) {
+  test(`2026-09-25 composer [${items}] fails closed without customer text`, async () => {
+    await currentComposerCase(items, async ({ inserted, chips }) => {
+      const result = await serializedFill()(v2, '私有客户上下文');
+      assert.equal(result.ok, false);
+      assert.match(result.error, items.length ? /不匹配/ : /未找到已安装技能/);
+      assert.ok(inserted.every(t => t.startsWith('@')));
+      assert.equal(chips().length, 0);
+    });
+  });
+}
+
+test('2026-09-25 composer: wrong plugin then the right one', async () => {
+  await currentComposerCase(['wrong', 'pill'], async ({ input }) => {
+    assert.equal((await serializedFill()(v2, '上下文')).ok, true);
+    assert.equal(input.querySelectorAll('[app-mention-path]').length, 1);
+  });
+});
+
+test('2026-09-25 composer: switches Work to Chat, or refuses when it stays on Work', async () => {
+  await currentComposerCase(['pill'], async ({ chat }) => {
+    assert.equal((await serializedFill()(v2, '上下文')).ok, true);
+    assert.equal(chat.getAttribute('aria-pressed'), 'true');
+  }, { work: true });
+  await currentComposerCase(['pill'], async ({ inserted }) => {
+    const result = await serializedFill()(v2, '上下文');
+    assert.equal(result.ok, false); assert.match(result.error, /Chat/); assert.equal(inserted.length, 0);
+  }, { work: true, chatSwitches: false });
+});
+
+test('2026-09-25 response markup: reads only the new assistant body, not code-block chrome', () => {
+  const { document } = parseHTML(`<html><body>
+    <div data-turn-key="t1"><div data-chatgpt-search-unit-key="t1:0:user" data-chatgpt-search-message-ids="u1"><div data-user-message-bubble="true">客户问题</div></div>
+    <div data-chatgpt-search-unit-key="t1:1:assistant"><h4 class="sr-only" data-conversation-role="assistant">ChatGPT said:</h4>
+    <div data-chatgpt-selection-message-id="old"><div data-markdown-text-style="assistant-message"><p>旧结果</p></div></div></div>
+    <button aria-label="Copy"></button></div>
+    <div data-turn-key="t2"><div data-chatgpt-search-unit-key="t2:1:assistant"><h4 class="sr-only" data-conversation-role="assistant">ChatGPT said:</h4>
+    <div data-chatgpt-selection-message-id="new"><div data-markdown-text-style="assistant-message"><p>[WhatsApp Reply]</p><p>Hello friend</p>
+    <div data-markdown-copy="code-block"><div data-markdown-copy="exclude">python<button aria-label="Copy"></button></div><pre>x = 1</pre></div></div></div></div>
+    <button aria-label="Rate response"></button><button aria-label="Regenerate response"></button></div></body></html>`);
+  const previous = globalThis.document; globalThis.document = document;
+  try {
+    const result = readGptResponseSnapshot('old');
+    assert.equal(result.hasCopyBtn, true);
+    assert.equal(result.content, '[WhatsApp Reply]\n\nHello friend\n\nx = 1');
+    assert.equal(readGptResponseSnapshot('new').content, '');
+    for (const b of document.querySelectorAll('[data-turn-key="t2"] > button')) b.remove();
+    assert.equal(readGptResponseSnapshot('old').hasCopyBtn, false);
+  } finally { globalThis.document = previous; }
+});
+
+test('uploaded plugins report app://Plugin_<id>; the same hex ID still matches', async () => {
+  await currentComposerCase(['upper'], async ({ input }) => {
+    assert.equal((await serializedFill()(v2, '上下文')).ok, true);
+    assert.equal(input.querySelector('[app-mention-path]').getAttribute('app-mention-path'), v2.id.replace('plugin_', 'app://Plugin_'));
+  });
+});
+
+test("Yang's R08 plugin is an R08 template; Yang's Miles V2 plugin is not", () => {
+  const yangR08 = { id: 'yang-r08', name: 'R08 专用 · Yang', gpt_url: 'https://chatgpt.com/', is_default: false,
+    description: encode('R08', '知识', false, '2026-09-25T00:00:00.000Z', { id: 'plugin_be083c80ae4c81919339c7e557170738', name: 'Sino Gear R08 Miles', thinkingEffort: 'high' }) };
+  const yangV2 = { ...yangR08, id: 'yang-v2', description: encode('V2', '知识', false, '2026-09-25T00:00:00.000Z', { id: 'plugin_7edc4c03db008191ad89a1001756c10b', name: 'Sino Gear Miles V2', thinkingEffort: 'high' }) };
+  const routed = route([yangV2, yangR08], 'yang-v2', { messages: [], vehicleInterests: [{ model: 'R08' }], browserBinding: { defaultTemplateId: 'yang-v2', r08TemplateId: 'yang-r08' } });
+  assert.equal(routed.error, null);
+  assert.equal(routed.template.id, 'yang-r08');
+  assert.equal(route([yangV2, yangR08], 'yang-v2', { messages: [], vehicleInterests: [], browserBinding: { defaultTemplateId: 'yang-v2', r08TemplateId: 'yang-r08' } }).template.id, 'yang-v2');
+});
+
+test('Extra High is a valid plugin preference and moves the slider to its last step', async () => {
+  const v2x = { ...v2, thinkingEffort: 'extra_high' };
+  assert.deepEqual(validateGptSkill(v2x), v2x);
+  assert.throws(() => validateGptSkill({ ...skill, thinkingEffort: 'extra_high' }));
+  assert.throws(() => validateGptSkill({ ...v2, thinkingEffort: 'xhigh' }));
+  for (const start of ['Instant', 'Medium', 'High', 'Extra High']) {
+    await currentComposerCase(['pill'], async ({ effortBtn }) => {
+      assert.deepEqual(await serializedFill()(v2x, '上下文'), { ok: true });
+      assert.equal(effortBtn.lastElementChild.textContent, 'Extra High');
+    }, { effort: start });
+  }
+});
+
+test('GPT-5.6 Sol prefixes the effort label with its version; the level is still read and set', async () => {
+  const v2x = { ...v2, thinkingEffort: 'extra_high' };
+  await currentComposerCase(['pill'], async ({ effortBtn }) => {
+    assert.deepEqual(await serializedFill()(v2x, '上下文'), { ok: true });
+    assert.equal(effortBtn.lastElementChild.textContent, 'Extra High');
+  }, { modelTag: '5.6' });
+});
+
+test('compact effort picker is expanded to confirm the model before setting Extra High', async () => {
+  const v2x = { ...v2, thinkingEffort: 'extra_high' };
+  await currentComposerCase(['pill'], async ({ effortBtn }) => {
+    assert.deepEqual(await serializedFill()(v2x, '上下文'), { ok: true });
+    assert.equal(effortBtn.lastElementChild.textContent, 'Extra High');
+  }, { compact: true });
+});
+
+test('2026-09-25 writing card: its title bar is not reply text and its Copy is not completion', () => {
+  const card = `<div data-turn-key="t1"><div data-chatgpt-search-unit-key="t1:1:assistant"><h4 class="sr-only" data-conversation-role="assistant">ChatGPT said:</h4>
+    <div data-chatgpt-selection-message-id="new"><div data-markdown-text-style="assistant-message"><p>[Client Record]<br>No change</p><p>[WhatsApp Reply]</p>
+    <div><div aria-hidden="true"></div><div><header><div><span><button aria-label="Add to library"></button><span>WhatsApp Reply</span></span></div>
+    <div><button aria-label="Copy"></button><button aria-label="Open editor"></button></div></header>
+    <div><div data-markdown-copy-content="true"><div contenteditable="true"><p>The Corolla Cross is popular there.</p></div></div></div></div></div>
+    <p>[Full Translation &amp; Strategy]<br>中文翻译</p></div></div></div>__BAR__</div>`;
+  const previous = globalThis.document;
+  try {
+    globalThis.document = parseHTML(`<html><body>${card.replace('__BAR__', '')}</body></html>`).document;
+    const streaming = readGptResponseSnapshot(null);
+    assert.equal(streaming.hasCopyBtn, false);
+    assert.equal(streaming.content, '[Client Record]\nNo change\n\n[WhatsApp Reply]\n\nThe Corolla Cross is popular there.\n\n[Full Translation & Strategy]\n中文翻译');
+    globalThis.document = parseHTML(`<html><body>${card.replace('__BAR__', '<button aria-label="Copy"></button>')}</body></html>`).document;
+    assert.equal(readGptResponseSnapshot(null).hasCopyBtn, true);
+  } finally { globalThis.document = previous; }
+});
+
+test('2026-09-25 citation chips are not read into the reply or strategy', () => {
+  const { document } = parseHTML(`<html><body><div data-turn-key="t1"><h4 data-conversation-role="assistant"></h4>
+    <div data-chatgpt-selection-message-id="new"><div data-markdown-text-style="assistant-message">
+    <p>[WhatsApp Reply]</p><p>Freight is a reference rate. <span data-state="closed"><span data-search-result-target=""><a data-testid="chatgpt-citation" href="https://truckingrates.org/x"><span><span><span>TruckingRates.org</span></span></span><span aria-hidden="true"><span>+2</span></span></a></span></span></p>
+    </div></div><button aria-label="Copy"></button></div></body></html>`);
+  const previous = globalThis.document; globalThis.document = document;
+  try { assert.equal(readGptResponseSnapshot(null).content, '[WhatsApp Reply]\n\nFreight is a reference rate.'); }
+  finally { globalThis.document = previous; }
 });

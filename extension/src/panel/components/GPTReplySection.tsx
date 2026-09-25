@@ -41,6 +41,7 @@ import { GPTTemplatesModal } from './GPTTemplatesModal';
 import { GeneratedAtBadge } from './GeneratedAtBadge';
 import type { GptSkill } from '@/lib/gpt-skill';
 import { publicQuoteAmounts, completeQuoteCalculation, saveQuoteVersion } from '@/lib/quote-workflow';
+import { makeCrmFreightResolver } from '@/lib/crm-freight';
 import { extractFreightResearch } from '@/lib/freight-research';
 import { loadPersonalSalesWorkMemory as loadSalesWorkMemory, saveSalesWorkEntry, type SalesWorkMemory } from '@/lib/sales-work-memory';
 import { rememberSalesPreferences, saveSalesPreference, type SalesPreference, type PreferenceScope } from '@/lib/sales-preferences';
@@ -604,7 +605,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       if (typeof next.chatUrl !== 'string' || next.chatUrl.split('#')[0] !== chatUrl.split('#')[0]) throw new Error('核算后的会话身份变化，未保存或展示报价');
       messageId = next.messageId;
       return next.responseText;
-    });
+    }, Date.now(), makeCrmFreightResolver(supabase, orgId, contact.country));
     if (!pending.prepared) {
       pending.metrics = { ...requestMetrics.current };
       pending.prepared = { chatUrl, calculated, research, messageId, at: new Date().toISOString(),
@@ -628,6 +629,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
         status:'draft', authority:'arithmetic_verified_inputs_require_sources', input:calculated.input, result:calculated.result,
         summary:calculated.result.map(p => `${p.label}: USD ${p.totalUsd}总额 / ${p.perVehicleUsd}每台`).join('；'),
         chatUrl, computedAt:prepared.at,
+        ...(calculated.freightEstimates?.length ? { freightEstimates: calculated.freightEstimates } : {}),
       });
     }
     if (calculated.result) await onReady(followupProse(calculated.text));

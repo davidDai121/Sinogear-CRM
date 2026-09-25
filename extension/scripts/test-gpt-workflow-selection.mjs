@@ -134,11 +134,12 @@ test('主 prompt 三个入口按选择注入；SALES_WORKFLOW 常量仍是完整
   assert.ok(discussQuote.includes(QUOTE_HEADER));
 });
 
-test('输出契约：三段头保留，Client Record 只写变化，策略限短', () => {
+test('输出契约：三段头保留，Client Record 只写变化，策略不限行数', () => {
   const p = buildFirstMessage({ contact, messages: [msg('Hola')], useCustomGpt: true });
   assert.match(p, /output exactly three sections in this order — \[Client Record\], \[WhatsApp Reply\], \[Full Translation & Strategy\]/);
   assert.match(p, /If nothing changed, write a single line "No change"/);
-  assert.match(p, /at most 5 short lines/);
+  assert.doesNotMatch(p, /at most 5 short lines/);
+  assert.match(p, /the strategy, as long as it needs to be/);
   assert.match(p, /\[WhatsApp Reply\] is the main product/);
 });
 

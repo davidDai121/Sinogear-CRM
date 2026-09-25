@@ -27,7 +27,7 @@ async function mount(t){
  await act(async()=>Simulate.click([...container.querySelectorAll('button')].find(b=>b.textContent==='+ 新建模板')));await settle();
  return {h,container};
 }
-function field(c,name){const label=[...c.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent===name);assert.ok(label,name);return label.querySelector('input,textarea');}
+function field(c,name){const label=[...c.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent===name);assert.ok(label,name);return label.querySelector('input,textarea,select');}
 async function change(node,value){await act(async()=>Simulate.change(node,{target:typeof value==='boolean'?{checked:value}:{value}}));await settle();}
 const submitButton=c=>c.querySelector('button[type="submit"]');
 async function submit(c){assert.equal(submitButton(c).disabled,false);await act(async()=>Simulate.submit(c.querySelector('form'),{preventDefault(){}}));await settle();}
@@ -65,9 +65,9 @@ test('new Chat plugin accepts its current display name and plugin ID without los
  const idField=field(c,'技能 / 插件 ID（详情页链接末尾）');
  assert.equal(new RegExp('^'+idField.getAttribute('pattern')+'$').test(id),true);
  await change(idField,id); await change(field(c,'已确认业务知识'),'Existing approved knowledge');
- await change(field(c,'固定使用 Chat High（不使用 Pro 模型）'),true);
+ await change(field(c,'思考强度（普通 Chat，不使用 Pro 模型）'),'extra_high');
  await submit(c);
  const config=JSON.parse(h.writes[0].description.split('\n').slice(1).join('\n'));
- assert.deepEqual(config.skill,{id,name:'Sino Gear R08 Miles',thinkingEffort:'high'});
+ assert.deepEqual(config.skill,{id,name:'Sino Gear R08 Miles',thinkingEffort:'extra_high'});
  assert.equal(config.approvedKnowledge,'Existing approved knowledge');
 });

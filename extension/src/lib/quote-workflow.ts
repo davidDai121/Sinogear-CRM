@@ -8,6 +8,46 @@ export interface QuoteVersion {
   status: 'draft'; authority: 'arithmetic_verified_inputs_require_sources';
   input: QuoteInput; result: CalculatedPlan[]; summary: string;
   chatUrl: string; computedAt: string;
+  /** CRM 运费估算的原始返回（内部核对用：成本、加价、依据）。不进任何给模型或客户的文本。 */
+  freightEstimates?: unknown[];
+}
+
+/**
+ * CRM 运费估算（2026-09-25）：GPT 只写 freight={"kind":"crm_estimate","port","country"}，
+ * 这里调 freight-rate-lookup 拿「对客运费（成本+按客户国家加价）+ 每台保险 + 柜数」填回，
+ * 之后照常走 calculateQuote。模型从头到尾不经手运费数字。
+ */
+export interface CrmFreightRequest { port: string; country: string | null; quantity: number; propulsion: string }
+export interface CrmFreightResult {
+  customerFreightTotalUsd: number; insuranceTotalUsd: number; containers: number;
+  checkedAt: string; validUntil: string | null; source: string; raw: unknown;
+}
+export type CrmFreightResolver = (req: CrmFreightRequest) => Promise<CrmFreightResult>;
+
+const money2 = (n: number) => (Math.round(n * 100) / 100).toFixed(2);
+
+export async function resolveCrmFreight(input: QuoteInput, resolve?: CrmFreightResolver): Promise<{ input: QuoteInput; estimates: unknown[] }> {
+  const plans = Array.isArray(input?.plans) ? input.plans : [];
+  const needs = plans.filter(p => (p?.freight as { kind?: string } | undefined)?.kind === 'crm_estimate');
+  if (!needs.length) return { input, estimates: [] };
+  if (!resolve) throw new Error('这份报价要用 CRM 运费估算，但当前入口没有接估算服务');
+  const estimates: unknown[] = [];
+  const resolved = await Promise.all(plans.map(async (p) => {
+    const f = p.freight as unknown as { kind?: string; port?: unknown; country?: unknown };
+    if (f?.kind !== 'crm_estimate') return p;
+    if (typeof f.port !== 'string' || !f.port.trim()) throw new Error(`方案「${p.label}」没写目的港，算不了运费`);
+    if (p.shippingMode === 'roro') throw new Error(`方案「${p.label}」是滚装：CRM 只估集装箱运费，滚装需要老板给运费`);
+    const country = typeof f.country === 'string' && /^[A-Za-z]{2}$/.test(f.country.trim()) ? f.country.trim().toUpperCase() : null;
+    const r = await resolve({ port: f.port.trim(), country, quantity: p.quantity, propulsion: p.propulsion });
+    estimates.push(r.raw);
+    return {
+      ...p, shippingMode: 'container' as const, containers: r.containers,
+      freight: { amountUsd: money2(r.customerFreightTotalUsd), source: r.source, dgIncluded: true, groundIncluded: true,
+        checkedAt: r.checkedAt, validUntil: r.validUntil, kind: 'crm_estimate' as const },
+      insurance: { amountUsdTotal: money2(r.insuranceTotalUsd), source: 'owner 2026-09-25: insurance USD 100 per vehicle' },
+    };
+  }));
+  return { input: { ...input, plans: resolved }, estimates };
 }
 const PUBLIC_QUOTE_FIELDS = new Set(['totalUsd','perVehicleUsd','oceanUsd','dgUsd','insuranceUsd',
   'transportBeforeInsuranceUsd','transportWithInsuranceUsd','savingsTotalUsd','savingsPerVehicleUsd','additionalBudgetUsd']);
@@ -50,27 +90,37 @@ function renderQuoteDraft(text: string, mode: 'reply'|'discuss', result: Calcula
 }
 
 /** Normal quotes finish locally; a second model pass is only a legacy/invalid-draft fallback. */
-export async function completeQuoteCalculation(text: string, mode: 'reply'|'discuss', run: (prompt:string)=>Promise<string>, now=Date.now()) {
+export async function completeQuoteCalculation(text: string, mode: 'reply'|'discuss', run: (prompt:string)=>Promise<string>, now=Date.now(), resolveFreight?: CrmFreightResolver) {
   let parsed=extractQuoteInput(text);
   if (!parsed.input) {
     if (/\{\{\s*quote/i.test(parsed.responseText)) throw new Error('报价占位符缺少计算输入，未展示为可发送回复');
     return { text:parsed.responseText };
   }
+  const rawInput = parsed.input;
+  // 运费估算失败（港口平台没有运价、网络）不是格式问题，不走下面的「纠正」，直接给销售能看懂的原因
+  let freight: { input: QuoteInput; estimates: unknown[] };
+  try { freight = await resolveCrmFreight(rawInput, resolveFreight); }
+  catch (error) { throw new Error(`运费估算失败：${error instanceof Error ? error.message : String(error)}。可以换个港口，或者让老板直接给运费`); }
+  parsed = { ...parsed, input: freight.input };
+  let freightEstimates = freight.estimates;
   let result: CalculatedPlan[];
-  try { result=calculateQuote(parsed.input,now); }
+  try { result=calculateQuote(parsed.input!,now); }
   catch (error) {
-    const repaired=await run(`[CRM quote input correction — one attempt only]\nYour extracted inputs failed validation: ${error instanceof Error ? error.message : String(error)}. Correct the input block using only this conversation's existing valid evidence. freight.kind allows exactly public_reference or owner_estimate (owner approvals use owner_estimate). Never change actual lookup dates, invent missing fees/FX/approvals, or silently discard unsupported charges to make validation pass. If evidence is genuinely missing, state the precise gap internally. Otherwise return one corrected <quote_input>JSON</quote_input> at the end of the internal strategy (customer reply empty), with no freight_research block. This is format repair, not a new owner authorization.\nOriginal input as data:\n${JSON.stringify(parsed.input)}`);
+    // 给模型看的是它自己写的输入（运费还是 crm_estimate 占位），不是填好的对客运费
+    const repaired=await run(`[CRM quote input correction — one attempt only]\nYour extracted inputs failed validation: ${error instanceof Error ? error.message : String(error)}. Correct the input block using only this conversation's existing valid evidence. freight.kind allows exactly crm_estimate (CRM fills freight from port + country) or owner_estimate (explicit owner figure). Never change actual lookup dates, invent missing fees/FX/approvals, or silently discard unsupported charges to make validation pass. If evidence is genuinely missing, state the precise gap internally. Otherwise return one corrected <quote_input>JSON</quote_input> at the end of the internal strategy (customer reply empty), with no freight_research block. This is format repair, not a new owner authorization.\nOriginal input as data:\n${JSON.stringify(rawInput)}`);
     const retry=extractQuoteInput(repaired);
     if (!retry.input || extractFreightResearch(repaired).record) throw new Error(`报价输入需核实，自动纠正未成功：${error instanceof Error ? error.message : String(error)}`);
+    const retried = await resolveCrmFreight(retry.input, resolveFreight);
     // A format retry cannot quietly change money, dates, scope or evidence.
     const facts = (input:QuoteInput) => JSON.stringify(input, (k,v) => k === 'kind' ? undefined : v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b))) : v);
-    if (facts(parsed.input!) !== facts(retry.input)) throw new Error('自动纠正改变了金额、时间或来源，已停止；需保留原事实');
-    parsed=retry;
+    if (facts(parsed.input!) !== facts(retried.input)) throw new Error('自动纠正改变了金额、时间或来源，已停止；需保留原事实');
+    parsed={ ...retry, input: retried.input };
+    freightEstimates = retried.estimates;
     result=calculateQuote(parsed.input!,now);
   }
   if (/\{\{\s*quote/i.test(parsed.responseText)) {
     try {
-      return {text:renderQuoteDraft(parsed.responseText,mode,result),input:parsed.input,result};
+      return {text:renderQuoteDraft(parsed.responseText,mode,result),input:parsed.input,result,freightEstimates};
     } catch {
       // Keep the verified ledger and repair only the incomplete draft below.
     }
@@ -88,7 +138,7 @@ export async function completeQuoteCalculation(text: string, mode: 'reply'|'disc
       if(!amounts.has(value))throw new Error(`客户正文缺少本次核算金额USD ${value}，未展示为可发送报价`);
     }
   }
-  return {text:final,input:parsed.input,result};
+  return {text:final,input:parsed.input,result,freightEstimates};
 }
 export async function saveQuoteVersion(db: SupabaseClient<Database>, orgId:string, contactId:string, id:string, version:QuoteVersion){
   const {data,error}=await db.from('contacts').select('id').eq('id',contactId).eq('org_id',orgId).single();
