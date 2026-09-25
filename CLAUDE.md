@@ -1196,7 +1196,10 @@ Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% 
 
 **起点**：ChatGPT 网页改版后旧扩展找不到输入框、读不到回复，业务员的 GPT 回复整体用不了；借模型对比评测（Latest vs GPT-5.6 Sol，R08 技能、最高强度、同一份 CRM 提示词，4 个真实场景）又抓到 4 个 CRM 问题。
 
-**修法**（`gpt-automation.ts` / `gpt-response-dom.ts` / `gpt-skill.ts` / `gpt-template-routing.ts` / `GPTTemplatesModal.tsx` / `gpt-prompt.ts`）：适配新版输入框和回复 DOM；思考强度按钮显示成「5.6 Medium」这类带版本号的标签也能认；模型菜单折叠视图也能选；**ChatGPT 把回复放进「草稿卡片」时，卡片标题「WhatsApp Reply」不再被当成正文**（否则点填入会发给客户）；新版引用标记不再以「网站名: 网址」混进正文；去掉「策略最多 5 行」限制；Yang 账号改用自己的插件（ID 不同于 Menglong）。老板定：模型用 Latest + 最高强度（Menglong、Yang 已设；Sophia 的两个模板发布当天切最高强度）。
+**修法**（`gpt-automation.ts` / `gpt-response-dom.ts` / `gpt-skill.ts` / `gpt-template-routing.ts` / `GPTTemplatesModal.tsx` / `gpt-prompt.ts`）：适配新版输入框和回复 DOM；思考强度按钮显示成「5.6 Medium」这类带版本号的标签也能认；模型菜单折叠视图也能选；**ChatGPT 把回复放进「草稿卡片」时，卡片标题「WhatsApp Reply」不再被当成正文**（否则点填入会发给客户）；新版引用标记不再以「网站名: 网址」混进正文；去掉「策略最多 5 行」限制；Yang 账号改用自己的插件（ID 不同于 Menglong）。老板定：模型用 Latest + 最高强度（6 个技能模板 2026-09-25 都已切 `extra_high`，含 Sophia 的两个）。
+- **技能身份**：新版 @ 选择器不再标记哪一项是插件，跟插件同名的自建 GPT（Yang 账号里就有一个「Sino Gear Miles V2」）会混在同一个列表里，点它只会在输入框下方加一个不带 ID 的 chip。`fillGptSkillPrompt` 改成同名项逐个试，只认插入 `[app-mention-path="app://plugin_<id>"]` 且 ID 完全对上的那个，其余撤掉（包括 chip）；ID 对上之前绝不填客户上下文。
+- **插件 ID 大小写**：用「Plugins → Add → Upload plugin archive」上传安装的插件，页面上显示为 `app://Plugin_<id>`（大写 P），Menglong 账号早先装的是小写 `plugin_`。比较时忽略大小写（hex ID 才是身份），模板里一律存小写 `plugin_<id>`。新装的 R08 插件 ID 要加进 `gpt-template-routing.ts` 的 `R08_SKILL_IDS`，否则不被当成 R08 模板。
+- 仓库里 `skill-updates/*-update.zip` 只含技能说明、缺参考资料，不能用于新账号安装；新装要用 `skill-updates/r08-miles-2026-09-23/`、`miles-v2-2026-09-23/new/` 打完整包（中文文件名要带 UTF-8 标记）。
 
 **验证**：该会话 102 个相关测试全过；2026-09-25 在 CRM 里用测试号 David 实测生成一次（与运费估算联测）：CRM 自己打开 ChatGPT、选技能、读回复成功。
 
@@ -1398,6 +1401,9 @@ WhatsApp 绿色主题：
 - **运费估算失败不是格式问题**：港口平台没运价、积分用完、网络错，都直接报「运费估算失败：原因」，别让它进「格式纠正」分支
 - **物流巴巴 API 积分会用完**：入门包 1,500 积分到 2027-03-24；每周刷 30 条 weekly 航线 + 报价时现查。用完后刷新和现查都会失败（航线 `last_error`），估价在平台价过期后停止——要在控制台续费。加新港口先用免费的 `dict/popular` 查覆盖，别逐条探测
 - **加价分档表 `freight_country_markup` 用 `contacts.country` 的英文写法匹配**（如 `Côte d'Ivoire`、`DR Congo`、`UAE`），找不到按目的港国家、再找不到按默认 500。CRM 里出现新的国家写法要补进表
+- **ChatGPT 技能自动化的身份只认插件 ID，不认名字**（2026-09-25，`gpt-skill.ts` / `gpt-automation.ts`）：@ 选择器里可能有同名的自建 GPT，插件 ID 可能是大写 `Plugin_`。改这块时保持「逐个试 + 忽略大小写比对 `app-mention-path` + 身份对上前绝不填客户上下文 + 发送前再核一次」。技能按 ChatGPT 账号安装、每个账号 ID 不同：Menglong 账号（Menglong、Sophia 的模板都用它）和 Yang 账号各一套，**插件升级要两个账号都上传，模板知识改动要 Menglong / Sophia / Yang 三套同步**
+- **ChatGPT 页面 DOM 以后还会变，排查先看实际结构**：2026-09-25 这版的关键锚点是输入框 `.ProseMirror[role=textbox]`、Chat/Work 切换 `[role=group][aria-label="Composer mode"]`、强度按钮 `data-composer-navigation-target="reasoning"`（文字可能带模型版本前缀如「5.6 Medium」）、回复 `[data-conversation-role="assistant"] ~ [data-chatgpt-selection-message-id]`、停止按钮 aria-label「Stop」。读回复时 `header`（草稿卡片标题栏）和 `[data-testid="chatgpt-citation"]` 必须跳过。CRM 只在当前模型是 Latest 或 GPT-5.6 Sol 时才发送，模型名单变了要改 `gpt-skill.ts`
+- **在被遮住/后台的 ChatGPT 标签页里调试，页面定时器会被压到约 1 分钟一次**（`document.visibilityState === 'hidden'`），用 `setTimeout` 的等待会超时；调试脚本要么让窗口可见，要么用 MessageChannel 做短等待、MutationObserver 等完成
 
 ## 用户偏好
 
