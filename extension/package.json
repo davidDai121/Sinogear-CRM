@@ -14,7 +14,7 @@
     "test:gpt-skill": "node --test scripts/test-gpt-skill.mjs scripts/test-gpt-template-routing-integration.mjs scripts/test-gpt-template-form.mjs",
     "package": "node scripts/package.mjs",
     "migrate-old-pg": "node scripts/migrate-from-old-pg.mjs",
-    "test:gpt-followup": "node --test scripts/test-gpt-followup.mjs",
+    "test:gpt-followup": "node --test scripts/test-gpt-followup.mjs scripts/test-client-record-defer.mjs",
     "test:chat-context": "node --test scripts/test-chat-context.mjs",
     "test:freight-estimate": "node --test scripts/test-freight-estimate.mjs"
   },

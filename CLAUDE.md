@@ -1221,6 +1221,18 @@ Events Manager 的 CRM 诊断报告原文：`Lead coverage must be at least 60% 
 
 **教训**：① 「格式纠正」只能修格式，**数据过期/证据缺失类错误不要走纠正**，直接报原因；否则模型要么说没证据、要么改金额被拦，白跑一轮还把对话搞乱。② 运费这种会变的数字不能交给模型每轮现挑——同一条线一周就变 10%，模型每次挑的来源、柜型、加项都不一样。确定性的数由代码出，模型只写话术。③ 平台挂牌价、货代全包价、对客报价是三层数，校准只能用**同一周**的平台价和货代价相减。④ 物流巴巴积分：每条航线每次 1 积分（无运价不扣），余额看控制台 Plans 页别为查余额调 API；`dict/popular` 免费不限次，加港口先用它查覆盖。
 
+### 近期补完（2026-09-25）— 客户档案自动写库等跟进安排存完再写（「跟进安排未确认保存」）
+
+**起点**：运费联测时（测试号 David，GPT 报科纳克里 CIF），回复卡片提示「正文已保留；跟进安排未确认保存……生成期间消息、指令或任务有更新」，并留了「取回生成结果」，这一轮没建跟进任务。
+
+**根因**：回复一就绪（`showReady`）卡片就显示，里面的 `ClientRecordCard` 挂载即自动写 `contacts`（这次是 `destination_port=Conakry`）；随后 `saveFollowup` 重读 `stateKey`（`inputKey` 含 contacts 的 name/country/language/destination_port/customer_stage/notes），发现变了就当成「生成期间有更新」拒绝保存。**只要这一轮 AI 识别出新的档案字段就大概率触发**，改版前就有。
+
+**修法**（「ChatGPT 技能输入框缺失」会话）：`GPTReplySection` 的就绪预览状态加 `saving:true`（各失败分支置 false）；`ClientRecordCard` 新增 `autoApply`，同一请求还在保存跟进时先不写库，跟进保存完（或失败）后再自动写一次。冲突检查本身没放宽。同批：Sophia 的两个模板切到最高强度（6 个技能模板都是 extra_high）。
+
+**验证**：新测试 `scripts/test-client-record-defer.mjs` 挂进 `test:gpt-followup`，31 例全过；typecheck 通过。
+
+**教训**：先显示、后保存的界面里，**任何「显示即写库」的组件都会改掉后面保存步骤要核对的状态**——写库要排在同一请求的保存链之后，或者从冲突检查里排除本轮自己的写入。
+
 ### 还可以做的（不急）
 
 - [ ] **AI key（`VITE_DASHSCOPE_API_KEY`）搬 Supabase Edge Function 代理 + 轮换**（代码评审 P0）：key 明文打进 `dist/assets/service-worker.ts-*.js`（实测出现两次），随 zip 发到每个销售机器，任何人可抠出来在老板智谱/DashScope 账号上无限跑推理，无配额/告警/审计；SW message handler 还没 sender/origin 校验。对*团队*是零操作（key 从包里消失，照装 zip），但需要 boss 一次性部署 Edge Function（校验 org 成员 + 限流 + 记花费）+ 轮换 key + 改 `service-worker.ts` 的 callQwen/callQwenTranslate 走代理。`supabase/functions/` 已有 conversions-api / fb-lead-webhook 可参照。**ROI 最高的安全改动**，待用户拍板。**2026-07 更新：基建已完成一半**——`ai-proxy` Edge Function 已部署（校验 org 成员 + 100k 上限 + secrets 配好），但目前只做直连失败的网络 fallback；剩下的是把直连路径删掉全走代理 + 从 .env/dist 移除 key + 轮换

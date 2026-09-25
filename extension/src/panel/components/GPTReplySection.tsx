@@ -89,6 +89,8 @@ type Status =
       generatedAt?: number;
       requestId?: string;
       followupWarning?: string;
+      /** The draft is shown before follow-up/work saving finishes; see ClientRecordCard autoApply. */
+      saving?: boolean;
       inputEvidence?: DraftEvidence;
     }
   | { kind: 'error'; message: string };
@@ -685,7 +687,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       const showReady = async (text: string) => {
         const preview: Extract<Status, {kind:'done'}> = { kind:'done', mode, text, chatUrl, source:action.source,
           count:action.count, logId:null, templateId:template.id, templateName:template.name,
-          inputEvidence:action.inputEvidence, followupWarning:'回复已就绪，正在保存跟进安排和工作记录…', generatedAt:Date.now(), requestId };
+          inputEvidence:action.inputEvidence, followupWarning:'回复已就绪，正在保存跟进安排和工作记录…', saving:true, generatedAt:Date.now(), requestId };
         await chrome.storage.local.set({ [`replyStatus:gpt:${contact.id}`]: preview });
         setStatus(preview);
       };
@@ -750,7 +752,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       if (response?.timing?.sentAt) { const t = response.timing; requestMetrics.current.pageMs = t.sentAt - t.startedAt; requestMetrics.current.responseMs = t.completedAt - t.sentAt; }
       await deliverGptResponse(response, saved, saved.requestId);
     } catch (err) {
-      setStatus(current => current.kind === 'done' ? { ...current, followupWarning: `保存未完成：${stringifyError(err)}` } : {kind:'error', message:stringifyError(err)});
+      setStatus(current => current.kind === 'done' ? { ...current, saving:false, followupWarning: `保存未完成：${stringifyError(err)}` } : {kind:'error', message:stringifyError(err)});
     } finally { actionLock.current = false; }
   };
 
@@ -765,8 +767,8 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
       await chrome.storage.local.remove(recoveryKey);
       await clearReplyProgress(contact.id);
       setPendingAction(null);
-      setStatus(current => current.kind === 'done' ? { ...current, followupWarning:'已保留正文并解除等待，未完成的保存请核对任务页。' } : {kind:'error', message:'已解除等待并保留原生成记录。这不会取消ChatGPT中的任务；再次生成前请先核对原会话。'});
-    } catch (err) { setStatus(current => current.kind === 'done' ? { ...current, followupWarning: `保存未完成：${stringifyError(err)}` } : {kind:'error', message:stringifyError(err)}); }
+      setStatus(current => current.kind === 'done' ? { ...current, saving:false, followupWarning:'已保留正文并解除等待，未完成的保存请核对任务页。' } : {kind:'error', message:'已解除等待并保留原生成记录。这不会取消ChatGPT中的任务；再次生成前请先核对原会话。'});
+    } catch (err) { setStatus(current => current.kind === 'done' ? { ...current, saving:false, followupWarning: `保存未完成：${stringifyError(err)}` } : {kind:'error', message:stringifyError(err)}); }
     finally { actionLock.current = false; }
   };
 
@@ -890,7 +892,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
             '需要先登录 ChatGPT。请打开 https://chatgpt.com 登录后再试（同一个 Chrome profile 即可）。',
         });
       } else {
-        setStatus(current => current.kind === 'done' ? { ...current, followupWarning: `回复已保留；保存未完成，可取回结果重试保存：${msg}` } : { kind: 'error', message: msg });
+        setStatus(current => current.kind === 'done' ? { ...current, saving:false, followupWarning: `回复已保留；保存未完成，可取回结果重试保存：${msg}` } : { kind: 'error', message: msg });
       }
       void clearReplyProgress(contact.id);
     } finally {
@@ -1011,7 +1013,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
           message: '需要先登录 ChatGPT。打开 https://chatgpt.com 登录后再试。',
         });
       } else {
-        setStatus(current => current.kind === 'done' ? { ...current, followupWarning: `回复已保留；保存未完成，可取回结果重试保存：${msg}` } : { kind: 'error', message: msg });
+        setStatus(current => current.kind === 'done' ? { ...current, saving:false, followupWarning: `回复已保留；保存未完成，可取回结果重试保存：${msg}` } : { kind: 'error', message: msg });
       }
       void clearReplyProgress(contact.id);
     } finally {
@@ -1454,6 +1456,7 @@ function GPTReplyForContact({ orgId, contact, needsJump }: Props) {
               count={status.count}
               chatUrl={status.chatUrl}
               contact={contact}
+              deferRecordApply={!!status.saving && pendingAction?.requestId === status.requestId}
               onFillReply={fillReply}
               onCopy={copyToClipboard}
             />
@@ -1545,6 +1548,8 @@ interface ResultViewProps {
   count: number;
   chatUrl: string;
   contact: ContactRow;
+  /** Hold the profile auto-save until this run's follow-up is saved, or the follow-up sees its own write as a conflict. */
+  deferRecordApply?: boolean;
   onFillReply: (text: string) => void;
   onCopy: (text: string) => void;
 }
@@ -1555,6 +1560,7 @@ function ResultView({
   count,
   chatUrl,
   contact,
+  deferRecordApply,
   onFillReply,
   onCopy,
 }: ResultViewProps) {
@@ -1611,6 +1617,7 @@ function ResultView({
           record={parsed.clientRecord}
           contact={contact}
           source="gpt"
+          autoApply={!deferRecordApply}
         />
       )}
 

@@ -91,11 +91,17 @@ export function ClientRecordCard({
   record,
   contact,
   source = 'gpt',
+  autoApply = true,
 }: {
   record: ParsedClientRecord;
   contact: ContactRow;
   /** 来源标签，写入 ai_extracted 事件的 payload，方便回看是哪个 AI 抽的 */
   source?: 'claude' | 'gpt' | 'gem';
+  /**
+   * false 时先不自动写库。GPT 回复在跟进安排保存完之前就显示出来，
+   * 这时写客户档案会让跟进保存把自己这一轮的写入当成「生成期间有更新」而拒绝。
+   */
+  autoApply?: boolean;
 }) {
   const [existingTags, setExistingTags] = useState<string[]>([]);
   const [existingTagsLoaded, setExistingTagsLoaded] = useState(false);
@@ -181,12 +187,12 @@ export function ClientRecordCard({
   // → 静默写入 DB。指纹 = contact.id|record JSON，保证切客户 / 重新生成时
   // 重新触发一次（同一 record 不重复写）
   useEffect(() => {
-    if (!existingTagsLoaded || total === 0 || applying || done) return;
+    if (!autoApply || !existingTagsLoaded || total === 0 || applying || done) return;
     const fingerprint = `${contact.id}|${JSON.stringify(record)}`;
     if (autoAppliedKey.current === fingerprint) return;
     autoAppliedKey.current = fingerprint;
     void apply();
-  }, [existingTagsLoaded, total, applying, done, contact.id, record, apply]);
+  }, [autoApply, existingTagsLoaded, total, applying, done, contact.id, record, apply]);
 
   if (!rows.length && !record.tags?.length) return null;
 
